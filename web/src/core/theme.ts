@@ -1,16 +1,16 @@
-// Theme Management for klanki (System, Light, Dark)
+// Theme Management for klanki (Light by default; user can switch to Dark or System)
 
 export type ThemeMode = "system" | "light" | "dark";
 
 const THEME_STORAGE_KEY = "klanki_theme_preference";
 
 export function getStoredTheme(): ThemeMode {
-  if (typeof window === "undefined") return "system";
+  if (typeof window === "undefined") return "light";
   const stored = localStorage.getItem(THEME_STORAGE_KEY);
   if (stored === "light" || stored === "dark" || stored === "system") {
     return stored;
   }
-  return "system";
+  return "light";
 }
 
 export function setStoredTheme(theme: ThemeMode): void {
@@ -30,13 +30,9 @@ export function applyTheme(theme: ThemeMode): void {
   const root = document.documentElement;
   const metaThemeColor = document.querySelector('meta[name="theme-color"]');
 
-  if (theme === "system") {
-    root.removeAttribute("data-theme");
-    const isDark = getSystemTheme() === "dark";
-    if (metaThemeColor) {
-      metaThemeColor.setAttribute("content", isDark ? "#0f172a" : "#0284c7");
-    }
-  } else if (theme === "dark") {
+  const effective = theme === "system" ? getSystemTheme() : theme;
+
+  if (effective === "dark") {
     root.setAttribute("data-theme", "dark");
     if (metaThemeColor) {
       metaThemeColor.setAttribute("content", "#0f172a");

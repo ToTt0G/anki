@@ -11,17 +11,20 @@
     <meta name="theme-color" content="#0284c7" />
     <meta name="color-scheme" content="light dark" />
 
-    <!-- Instant theme initialization to prevent flash -->
+    <!-- Instant theme initialization to prevent flash (defaults to light) -->
     <script>
       (function() {
         try {
-          var theme = localStorage.getItem("klanki_theme_preference");
-          if (theme === "dark") {
-            document.documentElement.setAttribute("data-theme", "dark");
-          } else if (theme === "light") {
-            document.documentElement.setAttribute("data-theme", "light");
-          }
-        } catch (e) {}
+          var theme = localStorage.getItem("klanki_theme_preference") || "light";
+          var isDark =
+            theme === "dark" ||
+            (theme === "system" &&
+              window.matchMedia &&
+              window.matchMedia("(prefers-color-scheme: dark)").matches);
+          document.documentElement.setAttribute("data-theme", isDark ? "dark" : "light");
+        } catch (e) {
+          document.documentElement.setAttribute("data-theme", "light");
+        }
       })();
     </script>
 
@@ -31,11 +34,6 @@
         --cyber-glow: #00F5FF;
         --duck-body: #A5DEFF;
         --duck-shade: #7BC4F5;
-      }
-      @media (prefers-color-scheme: dark) {
-        :root:not([data-theme="light"]) {
-          --bg-init: #0f172a;
-        }
       }
       :root[data-theme="dark"] {
         --bg-init: #0f172a;
