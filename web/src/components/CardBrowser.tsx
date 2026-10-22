@@ -49,8 +49,10 @@ export const CardBrowser: React.FC<Props> = ({
     if (!selectedCardItem) return;
     const card = { ...selectedCardItem.card };
     if (card.queue === -1) {
-      card.queue = card.type === 0 ? 0 : card.type === 2 ? 2 : 1;
+      // Unsuspend
+      card.queue = card.type === 0 ? 0 : 2;
     } else {
+      // Suspend
       card.queue = -1;
     }
     card.mod = Math.floor(Date.now() / 1000);
@@ -60,10 +62,12 @@ export const CardBrowser: React.FC<Props> = ({
   const handleToggleBury = () => {
     if (!selectedCardItem) return;
     const card = { ...selectedCardItem.card };
-    if (card.queue === -2 || card.queue === -3) {
-      card.queue = card.type === 0 ? 0 : card.type === 2 ? 2 : 1;
+    if (card.queue < -1) {
+      // Unbury
+      card.queue = card.type === 0 ? 0 : 2;
     } else {
-      card.queue = -3;
+      // Bury
+      card.queue = -2;
     }
     card.mod = Math.floor(Date.now() / 1000);
     onUpdateCard(card);
@@ -71,20 +75,25 @@ export const CardBrowser: React.FC<Props> = ({
 
   const handleResetCard = () => {
     if (!selectedCardItem) return;
-    const card = { ...selectedCardItem.card };
-    card.type = 0;
-    card.queue = 0;
-    card.reps = 0;
-    card.lapses = 0;
-    card.ivl = 0;
-    card.factor = 2500;
-    card.mod = Math.floor(Date.now() / 1000);
+    if (!window.confirm("Reset card learning progress back to New?")) return;
+    const card = {
+      ...selectedCardItem.card,
+      type: 0 as const,
+      queue: 0 as const,
+      due: 0,
+      ivl: 0,
+      factor: 2500,
+      reps: 0,
+      lapses: 0,
+      left: 0,
+      mod: Math.floor(Date.now() / 1000)
+    };
     onUpdateCard(card);
   };
 
   const handleDelete = () => {
     if (!selectedCardItem) return;
-    if (window.confirm("Delete this note and all its cards?")) {
+    if (window.confirm("Delete note and all associated cards?")) {
       onDeleteNote(selectedCardItem.note.id);
       setSelectedCardId(null);
     }
@@ -93,10 +102,10 @@ export const CardBrowser: React.FC<Props> = ({
   const model = selectedCardItem ? collection.models[selectedCardItem.note.mid] : null;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12, height: "calc(100vh - 120px)" }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 14, height: "100%", maxWidth: "100%", width: "100%", boxSizing: "border-box" }}>
       {/* Search Header */}
-      <div style={{ display: "flex", gap: 8 }}>
-        <div style={{ position: "relative", flex: 1 }}>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", width: "100%", boxSizing: "border-box" }}>
+        <div style={{ position: "relative", flex: 1, minWidth: 0 }}>
           <Search
             size={16}
             style={{
@@ -111,7 +120,7 @@ export const CardBrowser: React.FC<Props> = ({
             placeholder="deck:Default tag:anki is:due..."
             value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
-            style={{ width: "100%", paddingLeft: 34 }}
+            style={{ width: "100%", paddingLeft: 34, boxSizing: "border-box" }}
           />
         </div>
       </div>
@@ -171,14 +180,14 @@ export const CardBrowser: React.FC<Props> = ({
         {/* Card Table & Detail Editor */}
         <div className="browser-main">
           {/* Card list */}
-          <div style={{ flex: 1, overflowY: "auto", border: "1px solid var(--border-color)", borderRadius: 6 }}>
+          <div className="card-list-container" style={{ flex: 1, minHeight: 180, maxHeight: 320 }}>
             <table className="card-list-table">
               <thead>
                 <tr>
                   <th>Sort Field</th>
                   <th style={{ width: 100 }}>Deck</th>
-                  <th style={{ width: 60 }}>Reps</th>
-                  <th style={{ width: 60 }}>Lapses</th>
+                  <th style={{ width: 50 }}>Reps</th>
+                  <th style={{ width: 50 }}>Lapses</th>
                 </tr>
               </thead>
               <tbody>
@@ -191,11 +200,11 @@ export const CardBrowser: React.FC<Props> = ({
                       onClick={() => setSelectedCardId(card.id)}
                       style={{ cursor: "pointer" }}
                     >
-                      <td style={{ textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap", maxWidth: 220 }}>
+                      <td style={{ textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap", maxWidth: 160 }}>
                         {card.queue === -1 && <span style={{ color: "var(--text-muted)", marginRight: 4 }}>[S]</span>}
                         {note.sfld || note.fields[0]}
                       </td>
-                      <td>{deckName}</td>
+                      <td style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 90 }}>{deckName}</td>
                       <td>{card.reps}</td>
                       <td>{card.lapses}</td>
                     </tr>
@@ -216,12 +225,14 @@ export const CardBrowser: React.FC<Props> = ({
                 flexDirection: "column",
                 gap: 10,
                 maxHeight: 260,
-                overflowY: "auto"
+                overflowY: "auto",
+                boxSizing: "border-box",
+                maxWidth: "100%"
               }}
             >
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 6 }}>
                 <span style={{ fontSize: 13, fontWeight: 600 }}>{model.name}</span>
-                <div style={{ display: "flex", gap: 6 }}>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                   <button onClick={handleToggleSuspend} style={{ padding: "3px 8px", fontSize: 12 }}>
                     {selectedCardItem.card.queue === -1 ? "Unsuspend" : "Suspend"}
                   </button>
@@ -252,9 +263,16 @@ export const CardBrowser: React.FC<Props> = ({
                 <label style={{ fontSize: 12, color: "var(--text-secondary)" }}>Tags</label>
                 <input
                   type="text"
+                  placeholder="tag1 tag2"
                   value={selectedCardItem.note.tags.join(" ")}
                   onChange={e => handleTagsChange(e.target.value)}
                 />
+              </div>
+
+              <div style={{ display: "flex", gap: 16, fontSize: 12, color: "var(--text-secondary)", marginTop: 4, flexWrap: "wrap" }}>
+                <span>Interval: {selectedCardItem.card.ivl}d</span>
+                <span>Ease: {Math.round(selectedCardItem.card.factor / 10)}%</span>
+                <span>Due: {selectedCardItem.card.due}</span>
               </div>
             </div>
           )}

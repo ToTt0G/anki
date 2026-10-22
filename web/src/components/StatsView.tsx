@@ -25,9 +25,9 @@ export const StatsView: React.FC<Props> = ({ collection }) => {
   const maxDueInForecast = Math.max(1, ...forecast.map(f => f.dueCount));
 
   return (
-    <div style={{ maxWidth: 720, margin: "0 auto", display: "flex", flexDirection: "column", gap: 24 }}>
+    <div style={{ maxWidth: 720, width: "100%", margin: "0 auto", display: "flex", flexDirection: "column", gap: 20, boxSizing: "border-box" }}>
       {/* Today Recap */}
-      <section style={{ border: "1px solid var(--border-color)", borderRadius: 8, padding: 16 }}>
+      <section style={{ border: "1px solid var(--border-color)", borderRadius: 8, padding: 16, boxSizing: "border-box", maxWidth: "100%" }}>
         <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 12 }}>Today</h3>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, textAlign: "center" }}>
           <div>
@@ -51,6 +51,8 @@ export const StatsView: React.FC<Props> = ({ collection }) => {
             style={{
               display: "flex",
               justifyContent: "space-around",
+              flexWrap: "wrap",
+              gap: 8,
               marginTop: 16,
               paddingTop: 12,
               borderTop: "1px solid var(--border-color)",
@@ -66,44 +68,47 @@ export const StatsView: React.FC<Props> = ({ collection }) => {
       </section>
 
       {/* Due Forecast */}
-      <section style={{ border: "1px solid var(--border-color)", borderRadius: 8, padding: 16 }}>
+      <section style={{ border: "1px solid var(--border-color)", borderRadius: 8, padding: 16, boxSizing: "border-box", maxWidth: "100%", overflow: "hidden" }}>
         <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 12 }}>Due Forecast</h3>
-        <div style={{ display: "flex", alignItems: "flex-end", gap: 6, height: 120, paddingTop: 16 }}>
-          {forecast.map(item => {
-            const heightPercent = Math.max(8, Math.round((item.dueCount / maxDueInForecast) * 100));
-            return (
-              <div
-                key={item.dayOffset}
-                style={{
-                  flex: 1,
-                  display: "flex",
-                  flexDirection: "column",
-                  alignItems: "center",
-                  gap: 4
-                }}
-              >
-                <div style={{ fontSize: 10, color: "var(--text-secondary)" }}>
-                  {item.dueCount > 0 ? item.dueCount : ""}
-                </div>
+        <div style={{ overflowX: "auto", maxWidth: "100%", paddingBottom: 6, WebkitOverflowScrolling: "touch" }}>
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 6, height: 120, paddingTop: 16, minWidth: 340 }}>
+            {forecast.map(item => {
+              const heightPercent = Math.max(8, Math.round((item.dueCount / maxDueInForecast) * 100));
+              return (
                 <div
+                  key={item.dayOffset}
                   style={{
-                    width: "100%",
-                    height: `${heightPercent}%`,
-                    background: item.dayOffset === 0 ? "var(--color-due)" : "var(--color-new)",
-                    borderRadius: 3
+                    flex: 1,
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "center",
+                    gap: 4,
+                    minWidth: 20
                   }}
-                />
-                <div style={{ fontSize: 10, color: "var(--text-secondary)" }}>{item.dateStr}</div>
-              </div>
-            );
-          })}
+                >
+                  <div style={{ fontSize: 10, color: "var(--text-secondary)" }}>
+                    {item.dueCount > 0 ? item.dueCount : ""}
+                  </div>
+                  <div
+                    style={{
+                      width: "100%",
+                      height: `${heightPercent}%`,
+                      background: item.dayOffset === 0 ? "var(--color-due)" : "var(--color-new)",
+                      borderRadius: 3
+                    }}
+                  />
+                  <div style={{ fontSize: 9, color: "var(--text-secondary)", whiteSpace: "nowrap" }}>{item.dateStr}</div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       </section>
 
       {/* Card Breakdown */}
-      <section style={{ border: "1px solid var(--border-color)", borderRadius: 8, padding: 16 }}>
+      <section style={{ border: "1px solid var(--border-color)", borderRadius: 8, padding: 16, boxSizing: "border-box", maxWidth: "100%" }}>
         <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 12 }}>Card Counts</h3>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 8, textAlign: "center" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(58px, 1fr))", gap: 8, textAlign: "center" }}>
           <div>
             <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>Mature</div>
             <div style={{ fontSize: 18, fontWeight: 600, color: "var(--color-due)" }}>{cardStates.matureCount}</div>
@@ -128,9 +133,9 @@ export const StatsView: React.FC<Props> = ({ collection }) => {
       </section>
 
       {/* Review History Calendar Grid */}
-      <section style={{ border: "1px solid var(--border-color)", borderRadius: 8, padding: 16 }}>
+      <section style={{ border: "1px solid var(--border-color)", borderRadius: 8, padding: 16, boxSizing: "border-box", maxWidth: "100%" }}>
         <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 12 }}>History (30 Days)</h3>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(10, 1fr)", gap: 6 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(10, 1fr)", gap: 6, maxWidth: "100%" }}>
           {history.map(day => {
             const opacity = day.count === 0 ? 0.08 : Math.min(1, 0.25 + day.count * 0.15);
             return (
