@@ -1,5 +1,5 @@
 // klanki Service Worker (PWA & Web Push)
-const CACHE_NAME = "klanki-web-v15";
+const CACHE_NAME = "klanki-web-v16";
 const PRECACHE_URLS = [
   "/",
   "/index.html",

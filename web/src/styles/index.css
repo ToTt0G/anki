@@ -14,6 +14,12 @@
   --color-hard: #ca8a04;
   --color-good: #16a34a;
   --color-easy: #0284c7;
+  --cyber-glow: #00F5FF;
+  --duck-body: #A5DEFF;
+  --duck-shade: #7BC4F5;
+  --walk-duration: 0.38s;
+  --bob-duration: 0.19s;
+  --pulse-duration: 0.65s;
   --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   color-scheme: light;
 }
@@ -1540,4 +1546,120 @@ input:focus, select:focus, textarea:focus {
 @keyframes spin {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
+}
+
+/* Cyborg Duck Loading Screen */
+.cyborg-duck-stage {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  background: var(--bg-primary);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
+
+.cyborg-duck-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.cyborg-duck-svg {
+  position: relative;
+  z-index: 1;
+  width: 200px;
+  height: 222px;
+  overflow: visible;
+}
+
+.cyborg-duck-svg #leg-front {
+  transform-origin: 71px 190px;
+  animation: duck-walk var(--walk-duration) infinite alternate ease-in-out;
+}
+
+.cyborg-duck-svg #leg-back {
+  transform-origin: 117px 185px;
+  animation: duck-walk var(--walk-duration) infinite alternate-reverse ease-in-out;
+}
+
+.cyborg-duck-svg #torso {
+  transform-origin: 100px 155px;
+  animation: duck-bob var(--bob-duration) infinite alternate ease-in-out;
+}
+
+.cyborg-duck-svg #head {
+  transform-origin: 108px 124px;
+  animation: head-nod var(--walk-duration) infinite alternate ease-in-out;
+}
+
+.cyborg-duck-svg #wing {
+  transform-origin: 95px 156px;
+  animation: wing-flap var(--bob-duration) infinite alternate ease-in-out;
+}
+
+.cyborg-duck-svg #tail {
+  transform-origin: 36px 156px;
+  animation: tail-wag var(--bob-duration) infinite alternate-reverse ease-in-out;
+}
+
+.cyborg-duck-svg #shadow {
+  transform-origin: 98px 226px;
+  animation: shadow-pulse var(--bob-duration) infinite alternate ease-in-out;
+}
+
+.cyborg-duck-svg #cyber-core,
+.cyborg-duck-svg #chest-core {
+  animation: cyber-pulse var(--pulse-duration) infinite alternate ease-in-out;
+}
+
+.cyborg-duck-svg #eye-lid {
+  transform-origin: 140px 85px;
+  animation: eye-blink 4s infinite ease-in-out;
+}
+
+@keyframes duck-walk {
+  0% { transform: rotate(-18deg); }
+  100% { transform: rotate(18deg); }
+}
+
+@keyframes duck-bob {
+  0% { transform: translateY(2px) rotate(-1.5deg); }
+  100% { transform: translateY(-6px) rotate(2deg); }
+}
+
+@keyframes head-nod {
+  0% { transform: rotate(-3deg) translateY(1px); }
+  100% { transform: rotate(3.5deg) translateY(-1.5px); }
+}
+
+@keyframes wing-flap {
+  0% { transform: rotate(-5deg); }
+  100% { transform: rotate(15deg); }
+}
+
+@keyframes tail-wag {
+  0% { transform: rotate(-6deg); }
+  100% { transform: rotate(8deg); }
+}
+
+@keyframes shadow-pulse {
+  0% { transform: scaleX(1.06) scaleY(1); opacity: 0.26; }
+  100% { transform: scaleX(0.86) scaleY(0.85); opacity: 0.14; }
+}
+
+@keyframes cyber-pulse {
+  0% { opacity: 0.78; filter: drop-shadow(0 0 3px var(--cyber-glow)); }
+  100% { opacity: 1; filter: drop-shadow(0 0 8px var(--cyber-glow)) drop-shadow(0 0 14px var(--cyber-glow)); }
+}
+
+@keyframes eye-blink {
+  0%, 92%, 100% { transform: scaleY(1); }
+  96% { transform: scaleY(0.08); }
 }

@@ -25,6 +25,7 @@ import { ImportModal } from "./components/ImportModal";
 import { SyncModal } from "./components/SyncModal";
 import { InstallPrompt } from "./components/InstallPrompt";
 import { LandingPage } from "./components/LandingPage";
+import { CyborgDuckLoader } from "./components/CyborgDuckLoader";
 import { getStoredTheme, setStoredTheme } from "./core/theme";
 import { Sun, Moon } from "lucide-react";
 
@@ -113,19 +114,18 @@ export const App: React.FC = () => {
 
   if (isOAuthCallbackRoute && !isSignedIn) {
     return (
-      <div style={{ padding: 40, textAlign: "center" }}>
+      <CyborgDuckLoader>
         <AuthenticateWithRedirectCallback
           signInForceRedirectUrl="/"
           signUpForceRedirectUrl="/"
           continueSignUpUrl="/"
         />
-        Signing you in...
-      </div>
+      </CyborgDuckLoader>
     );
   }
 
   if (!isLoaded) {
-    return <div style={{ padding: 40, textAlign: "center" }}>Loading...</div>;
+    return <CyborgDuckLoader />;
   }
 
   if (!isSignedIn || !userId) {
@@ -172,7 +172,7 @@ export const App: React.FC = () => {
   }
 
   if (!collection) {
-    return <div style={{ padding: 40, textAlign: "center" }}>Loading...</div>;
+    return <CyborgDuckLoader />;
   }
 
   const activeDeck = selectedDeckId ? collection.decks[selectedDeckId] || null : null;
