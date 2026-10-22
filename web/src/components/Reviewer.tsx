@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { Card, Collection, Deck, Rating, RevlogEntry } from "../core/types";
 import { calculateScheduling, getDeckCounts, getNextStudyCard } from "../core/scheduler";
 import { renderCardTemplate } from "../core/template";
-import { ArrowLeft, Edit3, MoreHorizontal } from "lucide-react";
+import { ArrowLeft, MoreHorizontal } from "lucide-react";
 
 interface Props {
   collection: Collection;
@@ -32,7 +32,6 @@ export const Reviewer: React.FC<Props> = ({
   const [showMoreMenu, setShowMoreMenu] = useState<boolean>(false);
   const cardStartTimeRef = useRef<number>(Date.now());
 
-  // Reload next card if needed
   useEffect(() => {
     const next = getNextStudyCard(collection, deck.id);
     setCurrentCard(next);
@@ -70,10 +69,8 @@ export const Reviewer: React.FC<Props> = ({
     onAnswerCard(currentCard.id, chosen.nextState, revlog);
   };
 
-  // Keyboard shortcut listeners
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Don't trigger if user is typing in an input
       if (["INPUT", "TEXTAREA"].includes((e.target as HTMLElement)?.tagName)) {
         return;
       }
@@ -83,7 +80,7 @@ export const Reviewer: React.FC<Props> = ({
         if (!isAnswerShown) {
           handleShowAnswer();
         } else {
-          handleRate(3); // Default Good on space
+          handleRate(3);
         }
       } else if (isAnswerShown) {
         if (e.key === "1") {
@@ -115,7 +112,7 @@ export const Reviewer: React.FC<Props> = ({
       <div style={{ maxWidth: 500, margin: "40px auto", textAlign: "center" }}>
         <h3 style={{ fontSize: 18, marginBottom: 12 }}>Finished</h3>
         <p style={{ color: "var(--text-secondary)", marginBottom: 24, fontSize: 14 }}>
-          Congratulations! You have finished this deck for now.
+          You have finished this deck for now.
         </p>
         <button onClick={onExitStudy}>Decks</button>
       </div>
@@ -131,28 +128,42 @@ export const Reviewer: React.FC<Props> = ({
 
   const rendered = renderCardTemplate(currentCard, note, model, collection.media);
   const schedulingOptions = calculateScheduling(currentCard, config);
+  const tmpl = model.tmpls[currentCard.ord] || model.tmpls[0];
+  const backIncludesFrontSide = Boolean(tmpl?.afmt?.includes("FrontSide"));
 
   return (
     <div className="reviewer-container">
-      {/* Dynamic CSS from model */}
-      <style>{rendered.css}</style>
-
       {/* Minimal Header */}
       <div className="reviewer-header">
-        <button onClick={onExitStudy} style={{ padding: "4px 8px" }}>
+        <button onClick={onExitStudy} style={{ padding: "5px 9px" }} title="Back to Decks">
           <ArrowLeft size={16} />
         </button>
 
         <div className="reviewer-counts">
-          <span className="count-new">{counts.newCount}</span>
-          <span className="count-learn">{counts.learnCount}</span>
-          <span className="count-due">{counts.reviewCount}</span>
+          <span
+            className={`count-new ${currentCard.queue === 0 ? "active-queue" : ""}`}
+          >
+            {counts.newCount}
+          </span>
+          <span
+            className={`count-learn ${
+              currentCard.queue === 1 || currentCard.queue === 3 ? "active-queue" : ""
+            }`}
+          >
+            {counts.learnCount}
+          </span>
+          <span
+            className={`count-due ${currentCard.queue === 2 ? "active-queue" : ""}`}
+          >
+            {counts.reviewCount}
+          </span>
         </div>
 
         <div style={{ position: "relative" }}>
           <button
             onClick={() => setShowMoreMenu(!showMoreMenu)}
-            style={{ padding: "4px 8px" }}
+            style={{ padding: "5px 9px" }}
+            title="Card actions"
           >
             <MoreHorizontal size={16} />
           </button>
@@ -171,7 +182,7 @@ export const Reviewer: React.FC<Props> = ({
                 style={{
                   position: "absolute",
                   right: 0,
-                  top: 32,
+                  top: 34,
                   background: "var(--bg-primary)",
                   border: "1px solid var(--border-color)",
                   borderRadius: 6,
@@ -232,24 +243,27 @@ export const Reviewer: React.FC<Props> = ({
 
       {/* Card Body */}
       <div
-        className="card-area"
+        className="review-card-area"
         onClick={() => {
           if (!isAnswerShown) handleShowAnswer();
         }}
       >
-        <div
-          className="card"
-          dangerouslySetInnerHTML={{ __html: rendered.frontHtml }}
-        />
-
-        {isAnswerShown && (
-          <>
-            <hr className="card-answer-divider" />
-            <div
-              className="card"
-              dangerouslySetInnerHTML={{ __html: rendered.backHtml }}
-            />
-          </>
+        {!isAnswerShown ? (
+          <div
+            className="reviewer-card-content"
+            dangerouslySetInnerHTML={{ __html: rendered.frontHtml }}
+          />
+        ) : backIncludesFrontSide ? (
+          <div
+            className="reviewer-card-content"
+            dangerouslySetInnerHTML={{ __html: rendered.backHtml }}
+          />
+        ) : (
+          <div className="reviewer-card-content">
+            <div dangerouslySetInnerHTML={{ __html: rendered.frontHtml }} />
+            <hr id="answer" className="card-divider" />
+            <div dangerouslySetInnerHTML={{ __html: rendered.backHtml }} />
+          </div>
         )}
       </div>
 
