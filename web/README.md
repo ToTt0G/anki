@@ -10,7 +10,7 @@ A full-featured, zero-account, real-time syncing web port of Anki built for Clou
 - **Memory & Daily Recap Statistics**: Real-time study statistics, retention rate, forecast calendar, 30-day activity heatmap, and card state breakdown (Mature, Young, Learn, New, Suspended).
 - **Import & Export**: Client-side `.apkg` extraction with SQLite database parsing via WebAssembly (`sql.js` + `jszip`), CSV/TSV import with automatic delimiters, and deck export.
 - **Minimalist Mobile-First UI**: Strict adherence to Anki's original minimal UI conventions—zero redundant marketing labels, fluff text, or decorative clutter. Fully responsive for desktop, tablets, and smartphones.
-- **Zero-Account Real-Time Sync**: Cloudflare Workers + Durable Object with embedded SQLite database. Connects via WebSockets to synchronize card reviews, deck creations, and imports across all open devices in real time with offline IndexedDB fallback.
+- **Multi-User Isolation & Real-Time Sync**: Clerk authentication (`@clerk/react` + `@clerk/backend`) with Google & Email sign-in. Every Cloudflare Worker API request verifies the Clerk session token and derives the user's isolated SQLite Durable Object (`user:${userId}`). WebSocket connections authenticate via short-lived (60s), single-use HMAC-signed connection tickets (`POST /api/ws-ticket` → `wss://.../api/ws?ticket=...`), and local offline storage & Web Push subscriptions are strictly scoped per authenticated user.
 
 ## Running Locally
 

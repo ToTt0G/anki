@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useRef } from "react";
+import { Show, SignIn, SignInButton, SignUpButton, useAuth } from "@clerk/react";
 import { Collection, Deck, Note, Card, DeckConfig, RevlogEntry } from "./core/types";
 import { SyncClient, SyncStatus } from "./core/sync-client";
 import { exportDeckCsv, exportApkg } from "./core/import-export";
 import { registerServiceWorker } from "./core/pwa";
+import { syncPushSubscriptionForUser } from "./core/push-manager";
 import { Navbar, NavView } from "./components/Navbar";
 import { DeckList } from "./components/DeckList";
 import { DeckOverview } from "./components/DeckOverview";
@@ -17,6 +19,7 @@ import { SyncModal } from "./components/SyncModal";
 import { InstallPrompt } from "./components/InstallPrompt";
 
 export const App: React.FC = () => {
+  const { isLoaded, isSignedIn, userId, getToken } = useAuth();
   const [collection, setCollection] = useState<Collection | null>(null);
   const [currentView, setCurrentView] = useState<NavView>("decks");
   const [selectedDeckId, setSelectedDeckId] = useState<number | null>(null);
@@ -30,22 +33,92 @@ export const App: React.FC = () => {
   const [isSyncModalOpen, setIsSyncModalOpen] = useState<boolean>(false);
 
   const syncClientRef = useRef<SyncClient | null>(null);
+  const getTokenRef = useRef(getToken);
+  getTokenRef.current = getToken;
 
   useEffect(() => {
-    // 1. Initialize PWA Service Worker
     registerServiceWorker().catch(err => {
       console.warn("Service Worker initialization error:", err);
     });
+  }, []);
 
-    // 2. Initialize Real-time Sync Client
+  useEffect(() => {
+    if (!isLoaded) return;
+
+    if (!isSignedIn || !userId) {
+      if (syncClientRef.current) {
+        syncClientRef.current.disconnect();
+        syncClientRef.current = null;
+      }
+      setCollection(null);
+      setSyncStatus("offline");
+      setSelectedDeckId(null);
+      setIsStudying(false);
+      syncPushSubscriptionForUser(null).catch(() => {});
+      return;
+    }
+
+    const tokenGetter = () => getTokenRef.current();
     const client = new SyncClient(
+      userId,
+      tokenGetter,
       col => setCollection(col),
       status => setSyncStatus(status)
     );
     syncClientRef.current = client;
     setCollection(client.getCollection());
     client.connect();
-  }, []);
+
+    syncPushSubscriptionForUser(userId, tokenGetter).catch(() => {});
+
+    return () => {
+      client.disconnect();
+      if (syncClientRef.current === client) {
+        syncClientRef.current = null;
+      }
+    };
+  }, [isLoaded, isSignedIn, userId]);
+
+  if (!isLoaded) {
+    return <div style={{ padding: 40, textAlign: "center" }}>Loading...</div>;
+  }
+
+  if (!isSignedIn || !userId) {
+    return (
+      <div className="app-container">
+        <header className="navbar">
+          <div className="navbar-inner">
+            <div className="nav-brand">klanki</div>
+            <div className="nav-right" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <Show when="signed-out">
+                <SignInButton mode="modal">
+                  <button>Sign In</button>
+                </SignInButton>
+                <SignUpButton mode="modal">
+                  <button className="primary">Sign Up</button>
+                </SignUpButton>
+              </Show>
+            </div>
+          </div>
+        </header>
+
+        <main
+          className="main-content"
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            minHeight: "calc(100vh - 80px)"
+          }}
+        >
+          <SignIn routing="hash" />
+        </main>
+
+        <InstallPrompt />
+      </div>
+    );
+  }
 
   if (!collection) {
     return <div style={{ padding: 40, textAlign: "center" }}>Loading...</div>;
@@ -204,7 +277,7 @@ export const App: React.FC = () => {
                 deck={activeDeck}
                 onExitStudy={() => setIsStudying(false)}
                 onAnswerCard={handleAnswerCard}
-                onEditNote={nid => {
+                onEditNote={_nid => {
                   setCurrentView("browse");
                 }}
                 onSuspendCard={handleSuspendCard}
@@ -298,9 +371,7 @@ export const App: React.FC = () => {
           syncStatus={syncStatus}
           onForceSync={() => syncClientRef.current?.connect()}
           onClose={() => setIsSyncModalOpen(false)}
-          onShowInstallGuide={() => {
-            // Can trigger install or guide
-          }}
+          onShowInstallGuide={() => {}}
         />
       )}
     </div>

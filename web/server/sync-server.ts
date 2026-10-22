@@ -2,7 +2,8 @@ import { DurableObject } from "cloudflare:workers";
 import { Collection, Card, Note, Deck, DeckConfig, NoteType, RevlogEntry } from "../src/core/types";
 import { ClientMessage, ServerMessage } from "./types";
 import {
-  DEFAULT_VAPID_CONFIG,
+  DEFAULT_VAPID_PUBLIC_KEY,
+  DEFAULT_VAPID_SUBJECT,
   PushSubscriptionData,
   PushPayload,
   sendWebPush,
@@ -20,14 +21,14 @@ export class AnkiSyncServer extends DurableObject {
 
   private initDatabase() {
     this.sql.exec(`
-      CREATE TABLE IF NOT EXISTS col_meta (\n        key TEXT PRIMARY KEY,\n        val TEXT NOT NULL\n      );\n      CREATE TABLE IF NOT EXISTS decks (\n        id INTEGER PRIMARY KEY,\n        json TEXT NOT NULL\n      );\n      CREATE TABLE IF NOT EXISTS dconf (\n        id INTEGER PRIMARY KEY,\n        json TEXT NOT NULL\n      );\n      CREATE TABLE IF NOT EXISTS models (\n        id INTEGER PRIMARY KEY,\n        json TEXT NOT NULL\n      );\n      CREATE TABLE IF NOT EXISTS notes (\n        id INTEGER PRIMARY KEY,\n        json TEXT NOT NULL\n      );\n      CREATE TABLE IF NOT EXISTS cards (\n        id INTEGER PRIMARY KEY,\n        json TEXT NOT NULL\n      );\n      CREATE TABLE IF NOT EXISTS revlog (\n        id INTEGER PRIMARY KEY,\n        json TEXT NOT NULL\n      );\n      CREATE TABLE IF NOT EXISTS media (\n        name TEXT PRIMARY KEY,\n        data TEXT NOT NULL\n      );\n      CREATE TABLE IF NOT EXISTS push_subscriptions (\n        endpoint TEXT PRIMARY KEY,\n        p256dh TEXT NOT NULL,\n        auth TEXT NOT NULL,\n        created_at INTEGER NOT NULL,\n        updated_at INTEGER NOT NULL\n      );\n    `);
+      CREATE TABLE IF NOT EXISTS col_meta (\n        key TEXT PRIMARY KEY,\n        val TEXT NOT NULL\n      );\n      CREATE TABLE IF NOT EXISTS decks (\n        id INTEGER PRIMARY KEY,\n        json TEXT NOT NULL\n      );\n      CREATE TABLE IF NOT EXISTS dconf (\n        id INTEGER PRIMARY KEY,\n        json TEXT NOT NULL\n      );\n      CREATE TABLE IF NOT EXISTS models (\n        id INTEGER PRIMARY KEY,\n        json TEXT NOT NULL\n      );\n      CREATE TABLE IF NOT EXISTS notes (\n        id INTEGER PRIMARY KEY,\n        json TEXT NOT NULL\n      );\n      CREATE TABLE IF NOT EXISTS cards (\n        id INTEGER PRIMARY KEY,\n        json TEXT NOT NULL\n      );\n      CREATE TABLE IF NOT EXISTS revlog (\n        id INTEGER PRIMARY KEY,\n        json TEXT NOT NULL\n      );\n      CREATE TABLE IF NOT EXISTS media (\n        name TEXT PRIMARY KEY,\n        data TEXT NOT NULL\n      );\n      CREATE TABLE IF NOT EXISTS push_subscriptions (\n        endpoint TEXT PRIMARY KEY,\n        p256dh TEXT NOT NULL,\n        auth TEXT NOT NULL,\n        created_at INTEGER NOT NULL,\n        updated_at INTEGER NOT NULL\n      );\n      CREATE TABLE IF NOT EXISTS ws_tickets (\n        nonce TEXT PRIMARY KEY,\n        exp INTEGER NOT NULL\n      );\n    `);
   }
 
   private getVapidConfig(): VapidConfig {
     return {
-      publicKey: (this.env as any)?.VAPID_PUBLIC_KEY || DEFAULT_VAPID_CONFIG.publicKey,
-      privateKey: (this.env as any)?.VAPID_PRIVATE_KEY || DEFAULT_VAPID_CONFIG.privateKey,
-      subject: (this.env as any)?.VAPID_SUBJECT || DEFAULT_VAPID_CONFIG.subject
+      publicKey: (this.env as any)?.VAPID_PUBLIC_KEY || DEFAULT_VAPID_PUBLIC_KEY,
+      privateKey: (this.env as any)?.VAPID_PRIVATE_KEY || "",
+      subject: (this.env as any)?.VAPID_SUBJECT || DEFAULT_VAPID_SUBJECT
     };
   }
 
@@ -120,8 +121,36 @@ export class AnkiSyncServer extends DurableObject {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
 
-    // 1. WebSocket Upgrade
+    // 0. Internal endpoint to register a single-use WebSocket ticket nonce
+    if (url.pathname === "/internal/issue-ticket" && request.method === "POST") {
+      const body: { nonce: string; exp: number } = await request.json();
+      const now = Date.now();
+      this.sql.exec("DELETE FROM ws_tickets WHERE exp < ?", now);
+      this.sql.exec(
+        "INSERT OR REPLACE INTO ws_tickets (nonce, exp) VALUES (?, ?)",
+        body.nonce,
+        body.exp
+      );
+      return Response.json({ ok: true });
+    }
+
+    // 1. WebSocket Upgrade (requires valid single-use ticket nonce)
     if (request.headers.get("Upgrade") === "websocket") {
+      const nonce = request.headers.get("X-Ticket-Nonce");
+      if (!nonce) {
+        return Response.json({ error: "Missing WebSocket ticket" }, { status: 401 });
+      }
+      const now = Date.now();
+      this.sql.exec("DELETE FROM ws_tickets WHERE exp < ?", now);
+      const rows = this.sql
+        .exec("SELECT nonce, exp FROM ws_tickets WHERE nonce = ?", nonce)
+        .toArray();
+      if (!rows.length || rows[0].exp < now) {
+        return Response.json({ error: "Invalid or expired WebSocket ticket" }, { status: 401 });
+      }
+      // Consume ticket so it is strictly single-use
+      this.sql.exec("DELETE FROM ws_tickets WHERE nonce = ?", nonce);
+
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
       this.ctx.acceptWebSocket(server);

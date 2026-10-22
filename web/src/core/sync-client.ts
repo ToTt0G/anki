@@ -2,26 +2,46 @@ import { Collection, Card, Note, Deck, DeckConfig, RevlogEntry } from "./types";
 import { ClientMessage, ServerMessage } from "../../server/types";
 import { createDefaultCollection } from "./default-data";
 
-const STORAGE_KEY = "anki_web_collection_v1";
+const LEGACY_STORAGE_KEY = "anki_web_collection_v1";
+const USER_STORAGE_PREFIX = "anki_web_collection_v2_";
 
 export type SyncStatus = "connected" | "connecting" | "offline";
+export type TokenGetter = () => Promise<string | null>;
 
 export class SyncClient {
   private ws: WebSocket | null = null;
-  private room: string = "default";
+  private userId: string;
+  private getToken: TokenGetter;
   private onCollectionUpdated: (col: Collection) => void;
   private onStatusChanged: (status: SyncStatus) => void;
   private col: Collection;
   private reconnectTimer: any = null;
   private status: SyncStatus = "offline";
+  private disposed: boolean = false;
 
   constructor(
+    userId: string,
+    getToken: TokenGetter,
     onCollectionUpdated: (col: Collection) => void,
     onStatusChanged: (status: SyncStatus) => void
   ) {
+    this.userId = userId;
+    this.getToken = getToken;
     this.onCollectionUpdated = onCollectionUpdated;
     this.onStatusChanged = onStatusChanged;
+
+    // Remove legacy unauthenticated storage key so shared data never leaks across users
+    try {
+      localStorage.removeItem(LEGACY_STORAGE_KEY);
+    } catch {
+      // ignore
+    }
+
     this.col = this.loadLocalCollection();
+  }
+
+  private getStorageKey(): string {
+    return `${USER_STORAGE_PREFIX}${this.userId}`;
   }
 
   public getCollection(): Collection {
@@ -30,12 +50,12 @@ export class SyncClient {
 
   private loadLocalCollection(): Collection {
     try {
-      const saved = localStorage.getItem(STORAGE_KEY);
+      const saved = localStorage.getItem(this.getStorageKey());
       if (saved) {
         return JSON.parse(saved);
       }
     } catch (e) {
-      console.warn("Failed to load local storage collection:", e);
+      console.warn("Failed to load user local storage collection:", e);
     }
     const def = createDefaultCollection();
     this.saveLocalCollection(def);
@@ -45,33 +65,68 @@ export class SyncClient {
   public saveLocalCollection(col: Collection) {
     this.col = col;
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(col));
+      localStorage.setItem(this.getStorageKey(), JSON.stringify(col));
     } catch (e) {
-      console.warn("Failed to save local storage collection:", e);
+      console.warn("Failed to save user local storage collection:", e);
     }
-    this.onCollectionUpdated(this.col);
+    if (!this.disposed) {
+      this.onCollectionUpdated(this.col);
+    }
   }
 
-  public connect() {
-    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+  public async connect() {
+    if (this.disposed) return;
+    if (
+      this.ws &&
+      (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)
+    ) {
       return;
     }
 
     this.setStatus("connecting");
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const host = window.location.host;
-    const wsUrl = `${protocol}//${host}/api/ws?room=${encodeURIComponent(this.room)}`;
 
     try {
+      const token = await this.getToken();
+      if (!token || this.disposed) {
+        this.setStatus("offline");
+        return;
+      }
+
+      const ticketRes = await fetch("/api/ws-ticket", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        }
+      });
+
+      if (!ticketRes.ok) {
+        throw new Error(`Ticket request failed with status ${ticketRes.status}`);
+      }
+
+      const { ticket } = (await ticketRes.json()) as { ticket?: string };
+      if (!ticket || this.disposed) {
+        this.setStatus("offline");
+        return;
+      }
+
+      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const host = window.location.host;
+      const wsUrl = `${protocol}//${host}/api/ws?ticket=${encodeURIComponent(ticket)}`;
+
       this.ws = new WebSocket(wsUrl);
 
       this.ws.onopen = () => {
+        if (this.disposed) {
+          this.ws?.close();
+          return;
+        }
         this.setStatus("connected");
-        // Request initial sync
         this.send({ type: "init", lastMod: this.col.mod });
       };
 
-      this.ws.onmessage = (event) => {
+      this.ws.onmessage = event => {
+        if (this.disposed) return;
         try {
           const msg: ServerMessage = JSON.parse(event.data);
           this.handleServerMessage(msg);
@@ -81,26 +136,52 @@ export class SyncClient {
       };
 
       this.ws.onclose = () => {
+        if (this.disposed) return;
         this.setStatus("offline");
         this.scheduleReconnect();
       };
 
       this.ws.onerror = () => {
+        if (this.disposed) return;
         this.setStatus("offline");
         this.ws?.close();
       };
     } catch (e) {
+      if (this.disposed) return;
       this.setStatus("offline");
       this.scheduleReconnect();
     }
   }
 
+  public disconnect() {
+    this.disposed = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (this.ws) {
+      try {
+        this.ws.onopen = null;
+        this.ws.onmessage = null;
+        this.ws.onclose = null;
+        this.ws.onerror = null;
+        this.ws.close();
+      } catch {
+        // ignore
+      }
+      this.ws = null;
+    }
+  }
+
   private setStatus(status: SyncStatus) {
     this.status = status;
-    this.onStatusChanged(status);
+    if (!this.disposed) {
+      this.onStatusChanged(status);
+    }
   }
 
   private scheduleReconnect() {
+    if (this.disposed) return;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = setTimeout(() => {
       this.connect();
@@ -115,14 +196,13 @@ export class SyncClient {
 
   private handleServerMessage(msg: ServerMessage) {
     if (msg.type === "full_state") {
-      // If server has decks/cards, update local
       const serverDeckCount = Object.keys(msg.collection.decks || {}).length;
       const serverCardCount = Object.keys(msg.collection.cards || {}).length;
 
       if (serverDeckCount > 0 && serverCardCount > 0) {
         this.saveLocalCollection(msg.collection);
       } else {
-        // If server is brand new and empty, upload our default collection
+        // If this user's Durable Object is brand new and empty, seed it with their local collection
         this.send({ type: "import_collection", collection: this.col });
       }
       return;
@@ -211,7 +291,6 @@ export class SyncClient {
 
   public deleteDeck(deckId: number) {
     delete this.col.decks[deckId];
-    // Also remove cards belonging to this deck
     for (const card of Object.values(this.col.cards)) {
       if (card.did === deckId) {
         delete this.col.cards[card.id];

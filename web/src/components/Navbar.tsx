@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { UserButton } from "@clerk/react";
 import { SyncStatus } from "../core/sync-client";
 import { Layers, PlusCircle, Search, BarChart2, RefreshCw, Download } from "lucide-react";
 import { isStandalone, onInstallPromptChange, promptPwaInstall } from "../core/pwa";
@@ -115,6 +116,8 @@ export const Navbar: React.FC<Props> = ({
               />
               <span className={`sync-status ${syncStatus}`} />
             </button>
+
+            <UserButton />
           </div>
         </div>
       </header>

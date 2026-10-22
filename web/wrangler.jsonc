@@ -10,6 +10,11 @@
       "custom_domain": true
     }
   ],
+  "vars": {
+    "CLERK_PUBLISHABLE_KEY": "pk_test_bGVnYWwtcHVtYS04NjY0LmNsZXJrLmFjY291bnRzLmRldiQ",
+    "VAPID_PUBLIC_KEY": "BMvc07ap8EiEgS3O3upQee-f8UUuB2pDgaaNoZtkx4pxxURiZUh-WEhCDo_NYfrnqYvXrVyMj2NiPfwSI9aV6WM",
+    "VAPID_SUBJECT": "mailto:rainryder4@gmail.com"
+  },
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS"

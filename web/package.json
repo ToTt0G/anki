@@ -11,6 +11,8 @@
     "worker:deploy": "wrangler deploy"
   },
   "dependencies": {
+    "@clerk/backend": "^3.26.1",
+    "@clerk/react": "^6.18.0",
     "@types/web-push": "^3.6.4",
     "jszip": "^3.10.1",
     "lucide-react": "^1.16.0",

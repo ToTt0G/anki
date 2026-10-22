@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { useAuth } from "@clerk/react";
 import { SyncStatus } from "../core/sync-client";
 import {
   X,
@@ -46,6 +47,7 @@ export const SyncModal: React.FC<Props> = ({
   onClose,
   onShowInstallGuide
 }) => {
+  const { userId, getToken } = useAuth();
   const [themeMode, setThemeMode] = useState<ThemeMode>(getStoredTheme());
   const [pushSupported, setPushSupported] = useState(false);
   const [permission, setPermission] = useState<NotificationPermission>("default");
@@ -64,11 +66,11 @@ export const SyncModal: React.FC<Props> = ({
 
     if (supported) {
       setPermission(getNotificationPermission());
-      getCurrentPushSubscription().then(sub => {
+      getCurrentPushSubscription(userId || undefined).then(sub => {
         setHasSubscription(!!sub);
       });
     }
-  }, []);
+  }, [userId]);
 
   const handleThemeChange = (newTheme: ThemeMode) => {
     setThemeMode(newTheme);
@@ -80,7 +82,7 @@ export const SyncModal: React.FC<Props> = ({
     setPushFeedback(null);
     try {
       if (hasSubscription) {
-        const res = await unsubscribeFromPush();
+        const res = await unsubscribeFromPush(getToken);
         if (res.success) {
           setHasSubscription(false);
           setPushFeedback({ type: "info", msg: "Push notifications disabled on this device." });
@@ -88,7 +90,7 @@ export const SyncModal: React.FC<Props> = ({
           setPushFeedback({ type: "error", msg: res.error || "Failed to unsubscribe." });
         }
       } else {
-        const res = await subscribeToPush();
+        const res = await subscribeToPush(userId || undefined, getToken);
         if (res.success) {
           setHasSubscription(true);
           setPermission("granted");
@@ -109,7 +111,7 @@ export const SyncModal: React.FC<Props> = ({
     setIsPushLoading(true);
     setPushFeedback(null);
     try {
-      const res = await sendTestPush();
+      const res = await sendTestPush(getToken);
       if (res.success) {
         setPushFeedback({ type: "success", msg: "Test notification sent! Check your notification center." });
       } else {
@@ -126,7 +128,7 @@ export const SyncModal: React.FC<Props> = ({
     setIsPushLoading(true);
     setPushFeedback(null);
     try {
-      const res = await sendNotifyDue(7);
+      const res = await sendNotifyDue(7, getToken);
       if (res.success) {
         setPushFeedback({ type: "success", msg: "Triggered due card notification across active devices!" });
       } else {
@@ -256,7 +258,7 @@ export const SyncModal: React.FC<Props> = ({
               <Laptop size={15} />
               <span>↔</span>
               <Smartphone size={15} />
-              <span>Real-time cross-device sync active without accounts</span>
+              <span>Isolated per-user real-time sync across devices</span>
             </div>
           </div>
 

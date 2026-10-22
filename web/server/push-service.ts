@@ -6,11 +6,10 @@ export interface VapidConfig {
   subject: string;
 }
 
-export const DEFAULT_VAPID_CONFIG: VapidConfig = {
-  publicKey: "BLeGIxHLsB6mB7_RYNMw0wI55oR1vGCzPaOWxdjPxfwOHnc4GZkwoubPACQx6qnaTt16qQmXlzaKBy4NzEoKOvY",
-  privateKey: "jFpw15Jrj9Grs3KAETrGSGXCNr30AvHqfQRCUB66iqE",
-  subject: "mailto:support@anki.local"
-};
+export const DEFAULT_VAPID_PUBLIC_KEY =
+  "BMvc07ap8EiEgS3O3upQee-f8UUuB2pDgaaNoZtkx4pxxURiZUh-WEhCDo_NYfrnqYvXrVyMj2NiPfwSI9aV6WM";
+
+export const DEFAULT_VAPID_SUBJECT = "mailto:rainryder4@gmail.com";
 
 export interface PushSubscriptionData {
   endpoint: string;
@@ -43,15 +42,23 @@ export interface PushDeliveryResult {
 export async function sendWebPush(
   sub: PushSubscriptionData,
   payload: PushPayload,
-  config: VapidConfig = DEFAULT_VAPID_CONFIG
+  config: VapidConfig
 ): Promise<PushDeliveryResult> {
+  if (!config.publicKey || !config.privateKey) {
+    return {
+      endpoint: sub.endpoint,
+      success: false,
+      error: "VAPID keys are not configured on the server"
+    };
+  }
+
   try {
     const details = webpush.generateRequestDetails(
       sub,
       JSON.stringify(payload),
       {
         vapidDetails: {
-          subject: config.subject,
+          subject: config.subject || DEFAULT_VAPID_SUBJECT,
           publicKey: config.publicKey,
           privateKey: config.privateKey
         },
