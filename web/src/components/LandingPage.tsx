@@ -1,17 +1,19 @@
 import React, { useState } from "react";
-import { SignInButton, SignUpButton } from "@clerk/react";
+import { SignInButton, SignUpButton, useSignIn } from "@clerk/react";
 import {
   Laptop,
   Bell,
   Download,
   RefreshCw,
-  ArrowRight
+  ArrowRight,
+  LogIn
 } from "lucide-react";
 
 interface DemoCard {
   id: number;
   front: string;
   back: string;
+  isAuthCard?: boolean;
   intervals: {
     again: string;
     hard: string;
@@ -35,9 +37,10 @@ const DEMO_CARDS: DemoCard[] = [
   },
   {
     id: 3,
-    front: "Do my Anki decks work here?",
-    back: "Yes. Import and export .apkg decks with all your cards, images, and progress.",
-    intervals: { again: "10m", hard: "4d", good: "10d", easy: "21d" }
+    front: "Ready to start your own deck?",
+    back: "Sign in to sync your decks, import .apkg files, and get study reminders.",
+    isAuthCard: true,
+    intervals: { again: "1m", hard: "6m", good: "10m", easy: "4d" }
   }
 ];
 
@@ -46,6 +49,7 @@ export const LandingPage: React.FC = () => {
   const [isFlipped, setIsFlipped] = useState(false);
   const [learnCount, setLearnCount] = useState(0);
   const [dueCount, setDueCount] = useState(1);
+  const { signIn } = useSignIn();
 
   const currentCard = DEMO_CARDS[cardIndex] || DEMO_CARDS[0];
   const remainingNew = Math.max(1, DEMO_CARDS.length - cardIndex);
@@ -70,6 +74,88 @@ export const LandingPage: React.FC = () => {
       setCardIndex(0);
     }
     setIsFlipped(false);
+  };
+
+  const handleGoogleSignIn = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      if (signIn && typeof (signIn as any).authenticateWithRedirect === "function") {
+        await (signIn as any).authenticateWithRedirect({
+          strategy: "oauth_google",
+          redirectUrl: "/",
+          redirectUrlComplete: "/"
+        });
+      }
+    } catch {
+      // Fallback handled by SignInButton modal wrapper
+    }
+  };
+
+  const renderCardBack = (compact?: boolean) => {
+    if (!currentCard.isAuthCard) {
+      return (
+        <div className={`landing-card-back ${compact ? "landing-card-back-phone" : ""} landing-reveal`}>
+          {currentCard.back}
+        </div>
+      );
+    }
+
+    return (
+      <div
+        className={`landing-auth-card-body ${compact ? "compact" : ""} landing-reveal`}
+        onClick={e => e.stopPropagation()}
+      >
+        <div className={`landing-card-back ${compact ? "landing-card-back-phone" : ""}`}>
+          {currentCard.back}
+        </div>
+
+        <div className="landing-auth-card-actions">
+          <SignInButton mode="modal">
+            <button
+              type="button"
+              className="landing-google-btn"
+              onClick={handleGoogleSignIn}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true">
+                <path
+                  fill="#4285F4"
+                  d="M23.49 12.27c0-.79-.07-1.54-.19-2.27H12v4.51h6.47c-.29 1.48-1.14 2.73-2.4 3.58v3h3.86c2.26-2.09 3.56-5.17 3.56-8.82z"
+                />
+                <path
+                  fill="#34A853"
+                  d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.86-3c-1.08.72-2.45 1.16-4.07 1.16-3.13 0-5.78-2.11-6.73-4.96H1.29v3.09C3.26 21.3 7.31 24 12 24z"
+                />
+                <path
+                  fill="#FBBC05"
+                  d="M5.27 14.29c-.25-.72-.38-1.49-.38-2.29s.14-1.57.38-2.29V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.98-3.09z"
+                />
+                <path
+                  fill="#EA4335"
+                  d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.98 3.09c.95-2.85 3.6-4.96 6.73-4.96z"
+                />
+              </svg>
+              <span>Continue with Google</span>
+            </button>
+          </SignInButton>
+
+          <div className="landing-auth-card-split">
+            <SignUpButton mode="modal">
+              <button type="button" className="primary landing-auth-card-btn">
+                <span>Sign Up</span>
+                <ArrowRight size={13} />
+              </button>
+            </SignUpButton>
+
+            <SignInButton mode="modal">
+              <button type="button" className="landing-auth-card-btn">
+                <LogIn size={13} />
+                <span>Sign In</span>
+              </button>
+            </SignInButton>
+          </div>
+        </div>
+      </div>
+    );
   };
 
   const renderControls = (compact?: boolean) =>
@@ -158,6 +244,20 @@ export const LandingPage: React.FC = () => {
               <div className="landing-monitor-screen">
                 <div className="landing-screen-topbar">
                   <span className="landing-screen-brand">klanki</span>
+                  <div className="landing-card-dots">
+                    {DEMO_CARDS.map((c, idx) => (
+                      <button
+                        key={c.id}
+                        type="button"
+                        className={`landing-dot ${idx === cardIndex ? "active" : ""}`}
+                        onClick={() => {
+                          setCardIndex(idx);
+                          setIsFlipped(idx === 2);
+                        }}
+                        title={`Card ${idx + 1}`}
+                      />
+                    ))}
+                  </div>
                   <div className="landing-counts-pill">
                     <span className="count-new">{remainingNew}</span>
                     <span className="count-learn">{learnCount}</span>
@@ -166,7 +266,8 @@ export const LandingPage: React.FC = () => {
                 </div>
 
                 <div
-                  className="landing-flashcard"
+                  key={`desktop-card-${currentCard.id}`}
+                  className="landing-flashcard landing-card-transition"
                   onClick={handleFlip}
                   role="button"
                   tabIndex={0}
@@ -180,8 +281,8 @@ export const LandingPage: React.FC = () => {
                   <div className="landing-card-front">{currentCard.front}</div>
                   {isFlipped && (
                     <>
-                      <hr className="card-divider" style={{ margin: "14px 0" }} />
-                      <div className="landing-card-back">{currentCard.back}</div>
+                      <hr className="card-divider" style={{ margin: "14px 0", width: "100%" }} />
+                      {renderCardBack(false)}
                     </>
                   )}
                 </div>
@@ -198,7 +299,6 @@ export const LandingPage: React.FC = () => {
             <div className="landing-phone-bezel">
               <div className="landing-phone-notch" />
               <div className="landing-phone-screen">
-                {/* Push notification pill */}
                 <div className="landing-phone-toast">
                   <Bell size={12} color="var(--color-new)" style={{ flexShrink: 0 }} />
                   <span>{remainingNew + dueCount} cards ready to review</span>
@@ -214,7 +314,8 @@ export const LandingPage: React.FC = () => {
                 </div>
 
                 <div
-                  className="landing-flashcard landing-flashcard-phone"
+                  key={`phone-card-${currentCard.id}`}
+                  className="landing-flashcard landing-flashcard-phone landing-card-transition"
                   onClick={handleFlip}
                 >
                   <div className="landing-card-front landing-card-front-phone">
@@ -222,10 +323,8 @@ export const LandingPage: React.FC = () => {
                   </div>
                   {isFlipped && (
                     <>
-                      <hr className="card-divider" style={{ margin: "10px 0" }} />
-                      <div className="landing-card-back landing-card-back-phone">
-                        {currentCard.back}
-                      </div>
+                      <hr className="card-divider" style={{ margin: "10px 0", width: "100%" }} />
+                      {renderCardBack(true)}
                     </>
                   )}
                 </div>
