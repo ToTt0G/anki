@@ -158,63 +158,74 @@ export const Reviewer: React.FC<Props> = ({
           </button>
 
           {showMoreMenu && (
-            <div
-              style={{
-                position: "absolute",
-                right: 0,
-                top: 32,
-                background: "var(--bg-primary)",
-                border: "1px solid var(--border-color)",
-                borderRadius: 6,
-                boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
-                zIndex: 20,
-                minWidth: 120,
-                display: "flex",
-                flexDirection: "column"
-              }}
-            >
-              <button
-                style={{ border: "none", justifyContent: "flex-start", borderRadius: 0 }}
-                onClick={() => {
-                  setShowMoreMenu(false);
-                  onEditNote(currentCard.nid);
-                }}
-              >
-                Edit
-              </button>
-              <button
-                style={{ border: "none", justifyContent: "flex-start", borderRadius: 0 }}
-                onClick={() => {
-                  setShowMoreMenu(false);
-                  onBuryCard(currentCard.id);
-                }}
-              >
-                Bury
-              </button>
-              <button
-                style={{ border: "none", justifyContent: "flex-start", borderRadius: 0 }}
-                onClick={() => {
-                  setShowMoreMenu(false);
-                  onSuspendCard(currentCard.id);
-                }}
-              >
-                Suspend
-              </button>
-              <button
+            <>
+              <div
+                onClick={() => setShowMoreMenu(false)}
                 style={{
-                  border: "none",
-                  justifyContent: "flex-start",
-                  borderRadius: 0,
-                  color: "var(--color-again)"
+                  position: "fixed",
+                  inset: 0,
+                  zIndex: 15
                 }}
-                onClick={() => {
-                  setShowMoreMenu(false);
-                  onDeleteCard(currentCard.id);
+              />
+              <div
+                style={{
+                  position: "absolute",
+                  right: 0,
+                  top: 32,
+                  background: "var(--bg-primary)",
+                  border: "1px solid var(--border-color)",
+                  borderRadius: 6,
+                  boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
+                  zIndex: 20,
+                  minWidth: 120,
+                  overflow: "hidden",
+                  display: "flex",
+                  flexDirection: "column"
                 }}
               >
-                Delete
-              </button>
-            </div>
+                <button
+                  style={{ border: "none", justifyContent: "flex-start", borderRadius: 0 }}
+                  onClick={() => {
+                    setShowMoreMenu(false);
+                    onEditNote(currentCard.nid);
+                  }}
+                >
+                  Edit
+                </button>
+                <button
+                  style={{ border: "none", justifyContent: "flex-start", borderRadius: 0 }}
+                  onClick={() => {
+                    setShowMoreMenu(false);
+                    onBuryCard(currentCard.id);
+                  }}
+                >
+                  Bury
+                </button>
+                <button
+                  style={{ border: "none", justifyContent: "flex-start", borderRadius: 0 }}
+                  onClick={() => {
+                    setShowMoreMenu(false);
+                    onSuspendCard(currentCard.id);
+                  }}
+                >
+                  Suspend
+                </button>
+                <button
+                  style={{
+                    border: "none",
+                    justifyContent: "flex-start",
+                    borderRadius: 0,
+                    color: "var(--color-again)"
+                  }}
+                  onClick={() => {
+                    setShowMoreMenu(false);
+                    onDeleteCard(currentCard.id);
+                  }}
+                >
+                  Delete
+                </button>
+              </div>
+            </>
           )}
         </div>
       </div>

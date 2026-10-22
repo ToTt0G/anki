@@ -135,7 +135,7 @@ input:focus, select:focus, textarea:focus {
   min-height: 100vh;
   width: 100%;
   max-width: 100vw;
-  overflow-x: hidden;
+  overflow-x: clip;
   box-sizing: border-box;
 }
 
@@ -146,7 +146,7 @@ input:focus, select:focus, textarea:focus {
   margin: 0 auto;
   padding: 20px 16px;
   box-sizing: border-box;
-  overflow-x: hidden;
+  overflow-x: clip;
 }
 
 @media (max-width: 640px) {
@@ -255,7 +255,7 @@ input:focus, select:focus, textarea:focus {
 .deck-table-container {
   width: 100%;
   max-width: 100%;
-  overflow-x: auto;
+  overflow: visible;
   box-sizing: border-box;
 }
 
@@ -293,6 +293,8 @@ input:focus, select:focus, textarea:focus {
   display: flex;
   align-items: center;
   gap: 6px;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .deck-name-cell:hover {

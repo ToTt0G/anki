@@ -28,7 +28,11 @@ export const DeckList: React.FC<Props> = ({
   onExportCollectionApkg,
   onImportClick
 }) => {
-  const [activeMenuDid, setActiveMenuDid] = useState<number | null>(null);
+  const [activeMenu, setActiveMenu] = useState<{
+    did: number;
+    top: number;
+    right: number;
+  } | null>(null);
 
   const decks = Object.values(collection.decks).sort((a, b) =>
     a.name.localeCompare(b.name)
@@ -46,15 +50,17 @@ export const DeckList: React.FC<Props> = ({
     if (name && name.trim() && name !== currentName) {
       onRenameDeck(did, name.trim());
     }
-    setActiveMenuDid(null);
+    setActiveMenu(null);
   };
 
   const handleDeleteConfirm = (did: number, name: string) => {
     if (window.confirm(`Delete deck '${name}' and its cards?`)) {
       onDeleteDeck(did);
     }
-    setActiveMenuDid(null);
+    setActiveMenu(null);
   };
+
+  const activeDeck = activeMenu ? collection.decks[activeMenu.did] : null;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16, width: "100%", maxWidth: "100%", boxSizing: "border-box" }}>
@@ -95,80 +101,26 @@ export const DeckList: React.FC<Props> = ({
                   <td className="count-badge count-due">
                     {counts.reviewCount > 0 ? counts.reviewCount : ""}
                   </td>
-                  <td style={{ textAlign: "right", position: "relative" }}>
+                  <td style={{ textAlign: "right" }}>
                     <button
-                      onClick={() =>
-                        setActiveMenuDid(activeMenuDid === deck.id ? null : deck.id)
-                      }
+                      onClick={e => {
+                        if (activeMenu?.did === deck.id) {
+                          setActiveMenu(null);
+                          return;
+                        }
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        const menuHeight = deck.id !== 1 ? 185 : 150;
+                        const openUpward = rect.bottom + menuHeight > window.innerHeight - 70;
+                        setActiveMenu({
+                          did: deck.id,
+                          top: openUpward ? Math.max(8, rect.top - menuHeight - 4) : rect.bottom + 4,
+                          right: Math.max(8, window.innerWidth - rect.right)
+                        });
+                      }}
                       style={{ padding: "4px 6px", border: "none", background: "transparent" }}
                     >
                       <Settings size={15} color="var(--text-secondary)" />
                     </button>
-
-                    {activeMenuDid === deck.id && (
-                      <div
-                        style={{
-                          position: "absolute",
-                          right: 0,
-                          top: 30,
-                          background: "var(--bg-primary)",
-                          border: "1px solid var(--border-color)",
-                          borderRadius: 6,
-                          boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
-                          zIndex: 20,
-                          minWidth: 140,
-                          display: "flex",
-                          flexDirection: "column"
-                        }}
-                      >
-                        <button
-                          style={{ border: "none", justifyContent: "flex-start", borderRadius: 0 }}
-                          onClick={() => {
-                            setActiveMenuDid(null);
-                            onOptionsDeck(deck.id);
-                          }}
-                        >
-                          Options
-                        </button>
-                        <button
-                          style={{ border: "none", justifyContent: "flex-start", borderRadius: 0 }}
-                          onClick={() => handleRenamePrompt(deck.id, deck.name)}
-                        >
-                          Rename
-                        </button>
-                        <button
-                          style={{ border: "none", justifyContent: "flex-start", borderRadius: 0 }}
-                          onClick={() => {
-                            setActiveMenuDid(null);
-                            onExportDeckApkg(deck.id);
-                          }}
-                        >
-                          Export (.apkg)
-                        </button>
-                        <button
-                          style={{ border: "none", justifyContent: "flex-start", borderRadius: 0 }}
-                          onClick={() => {
-                            setActiveMenuDid(null);
-                            onExportDeckCsv(deck.id);
-                          }}
-                        >
-                          Export (.tsv)
-                        </button>
-                        {deck.id !== 1 && (
-                          <button
-                            style={{
-                              border: "none",
-                              justifyContent: "flex-start",
-                              borderRadius: 0,
-                              color: "var(--color-again)"
-                            }}
-                            onClick={() => handleDeleteConfirm(deck.id, deck.name)}
-                          >
-                            Delete
-                          </button>
-                        )}
-                      </div>
-                    )}
                   </td>
                 </tr>
               );
@@ -176,6 +128,85 @@ export const DeckList: React.FC<Props> = ({
           </tbody>
         </table>
       </div>
+
+      {activeMenu && activeDeck && (
+        <>
+          <div
+            onClick={() => setActiveMenu(null)}
+            style={{
+              position: "fixed",
+              inset: 0,
+              zIndex: 90
+            }}
+          />
+          <div
+            style={{
+              position: "fixed",
+              top: activeMenu.top,
+              right: activeMenu.right,
+              background: "var(--bg-primary)",
+              border: "1px solid var(--border-color)",
+              borderRadius: 6,
+              boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
+              zIndex: 100,
+              minWidth: 140,
+              overflow: "hidden",
+              display: "flex",
+              flexDirection: "column"
+            }}
+          >
+            <button
+              style={{ border: "none", justifyContent: "flex-start", borderRadius: 0 }}
+              onClick={() => {
+                const did = activeDeck.id;
+                setActiveMenu(null);
+                onOptionsDeck(did);
+              }}
+            >
+              Options
+            </button>
+            <button
+              style={{ border: "none", justifyContent: "flex-start", borderRadius: 0 }}
+              onClick={() => handleRenamePrompt(activeDeck.id, activeDeck.name)}
+            >
+              Rename
+            </button>
+            <button
+              style={{ border: "none", justifyContent: "flex-start", borderRadius: 0 }}
+              onClick={() => {
+                const did = activeDeck.id;
+                setActiveMenu(null);
+                onExportDeckApkg(did);
+              }}
+            >
+              Export (.apkg)
+            </button>
+            <button
+              style={{ border: "none", justifyContent: "flex-start", borderRadius: 0 }}
+              onClick={() => {
+                const did = activeDeck.id;
+                setActiveMenu(null);
+                onExportDeckCsv(did);
+              }}
+            >
+              Export (.tsv)
+            </button>
+            {activeDeck.id !== 1 && (
+              <button
+                style={{
+                  border: "none",
+                  justifyContent: "flex-start",
+                  borderRadius: 0,
+                  color: "var(--color-again)"
+                }}
+                onClick={() => handleDeleteConfirm(activeDeck.id, activeDeck.name)}
+              >
+                Delete
+              </button>
+            )}
+          </div>
+        </>
+      )}
 
       {/* Bottom action buttons */}
       <div style={{ display: "flex", justifyContent: "center", gap: 10, marginTop: 16, flexWrap: "wrap", width: "100%", boxSizing: "border-box" }}>
