@@ -15,10 +15,11 @@
   --color-good: #16a34a;
   --color-easy: #0284c7;
   --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  color-scheme: light;
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg-primary: #0f172a;
     --bg-secondary: #1e293b;
     --bg-tertiary: #334155;
@@ -27,7 +28,32 @@
     --text-muted: #64748b;
     --border-color: #334155;
     --border-light: #1e293b;
+    color-scheme: dark;
   }
+}
+
+:root[data-theme="dark"] {
+  --bg-primary: #0f172a;
+  --bg-secondary: #1e293b;
+  --bg-tertiary: #334155;
+  --text-primary: #f8fafc;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --border-color: #334155;
+  --border-light: #1e293b;
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f8fafc;
+  --bg-tertiary: #f1f5f9;
+  --text-primary: #0f172a;
+  --text-secondary: #64748b;
+  --text-muted: #94a3b8;
+  --border-color: #e2e8f0;
+  --border-light: #f1f5f9;
+  color-scheme: light;
 }
 
 *, *::before, *::after {
@@ -448,45 +474,77 @@ input:focus, select:focus, textarea:focus {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  overflow: hidden;
   min-width: 0;
   max-width: 100%;
   box-sizing: border-box;
 }
 
-.card-list-container {
+.browser-search-bar {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.browser-search-bar input {
   flex: 1;
-  overflow-x: auto;
+}
+
+.browser-table-container {
+  flex: 1;
   overflow-y: auto;
+  overflow-x: auto;
   border: 1px solid var(--border-color);
   border-radius: 6px;
-  width: 100%;
+  background: var(--bg-primary);
   max-width: 100%;
   box-sizing: border-box;
 }
 
-.card-list-table {
+.browser-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 13px;
-  min-width: 320px;
 }
 
-.card-list-table th, .card-list-table td {
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--border-color);
+.browser-table th {
+  position: sticky;
+  top: 0;
+  background: var(--bg-secondary);
   text-align: left;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border-color);
+  z-index: 10;
 }
 
-.card-list-table tr.selected {
-  background: var(--bg-tertiary);
+.browser-table td {
+  padding: 8px 12px;
+  font-size: 13.5px;
+  border-bottom: 1px solid var(--border-light);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 250px;
+}
+
+.browser-table tr:hover td {
+  background: var(--bg-secondary);
+}
+
+.browser-table tr.selected td {
+  background: rgba(2, 132, 199, 0.12);
+  color: var(--color-new);
 }
 
 /* Modals */
 .modal-backdrop {
   position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.5);
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0,0,0,0.5);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -558,4 +616,42 @@ input:focus, select:focus, textarea:focus {
     text-align: center;
     justify-content: center;
   }
+}
+
+/* Theme Selector Segmented Control */
+.theme-selector {
+  display: flex;
+  background: var(--bg-tertiary);
+  padding: 3px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  gap: 2px;
+}
+
+.theme-option {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 10px;
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: 6px;
+  cursor: pointer;
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  transition: all 0.15s ease;
+}
+
+.theme-option:hover {
+  color: var(--text-primary);
+}
+
+.theme-option.active {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  font-weight: 600;
 }

@@ -6,10 +6,24 @@
       name="viewport"
       content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
     />
-    <title>Anki</title>
+    <title>klanki</title>
     <meta name="description" content="Powerful, intelligent spaced repetition flashcards." />
     <meta name="theme-color" content="#0284c7" />
     <meta name="color-scheme" content="light dark" />
+
+    <!-- Instant theme initialization to prevent flash -->
+    <script>
+      (function() {
+        try {
+          var theme = localStorage.getItem("klanki_theme_preference");
+          if (theme === "dark") {
+            document.documentElement.setAttribute("data-theme", "dark");
+          } else if (theme === "light") {
+            document.documentElement.setAttribute("data-theme", "light");
+          }
+        } catch (e) {}
+      })();
+    </script>
 
     <!-- PWA & Apple Touch Icons -->
     <link rel="manifest" href="/manifest.webmanifest" />
@@ -18,8 +32,8 @@
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
-    <meta name="apple-mobile-web-app-title" content="Anki" />
-    <meta name="application-name" content="Anki" />
+    <meta name="apple-mobile-web-app-title" content="klanki" />
+    <meta name="application-name" content="klanki" />
 
     <!-- MathJax for rendering math and science formulas -->
     <script>

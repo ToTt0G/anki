@@ -1,5 +1,5 @@
 // Anki Web Service Worker (PWA & Web Push)
-const CACHE_NAME = "anki-web-v2";
+const CACHE_NAME = "klanki-web-v3";
 const PRECACHE_URLS = [
   "/",
   "/index.html",
@@ -85,12 +85,12 @@ self.addEventListener("push", (event) => {
     }
   }
 
-  const title = data.title || "Anki Review Reminder";
+  const title = data.title || "klanki Review Reminder";
   const options = {
     body: data.body || "You have cards due for review today!",
     icon: "/icons/icon-192.png",
     badge: "/icons/badge-72.png",
-    tag: data.tag || "anki-due-review",
+    tag: data.tag || "klanki-due-review",
     renotify: true,
     data: {
       url: data.url || "/",

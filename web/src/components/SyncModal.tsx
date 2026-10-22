@@ -11,7 +11,10 @@ import {
   Download,
   CheckCircle,
   AlertCircle,
-  Info
+  Info,
+  Sun,
+  Moon,
+  Monitor
 } from "lucide-react";
 import {
   isPushSupported,
@@ -28,6 +31,7 @@ import {
   canInstallPrompt,
   promptPwaInstall
 } from "../core/pwa";
+import { ThemeMode, getStoredTheme, setStoredTheme } from "../core/theme";
 
 interface Props {
   syncStatus: SyncStatus;
@@ -42,6 +46,7 @@ export const SyncModal: React.FC<Props> = ({
   onClose,
   onShowInstallGuide
 }) => {
+  const [themeMode, setThemeMode] = useState<ThemeMode>(getStoredTheme());
   const [pushSupported, setPushSupported] = useState(false);
   const [permission, setPermission] = useState<NotificationPermission>("default");
   const [hasSubscription, setHasSubscription] = useState(false);
@@ -55,6 +60,7 @@ export const SyncModal: React.FC<Props> = ({
     setPushSupported(supported);
     setStandalone(isStandalone());
     setCanPrompt(canInstallPrompt());
+    setThemeMode(getStoredTheme());
 
     if (supported) {
       setPermission(getNotificationPermission());
@@ -63,6 +69,11 @@ export const SyncModal: React.FC<Props> = ({
       });
     }
   }, []);
+
+  const handleThemeChange = (newTheme: ThemeMode) => {
+    setThemeMode(newTheme);
+    setStoredTheme(newTheme);
+  };
 
   const handleTogglePush = async () => {
     setIsPushLoading(true);
@@ -144,13 +155,76 @@ export const SyncModal: React.FC<Props> = ({
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal-content" style={{ maxWidth: 460 }} onClick={e => e.stopPropagation()}>
         <div className="modal-header">
-          <h3 style={{ fontSize: 16, fontWeight: 600 }}>Sync & App Settings</h3>
+          <h3 style={{ fontSize: 16, fontWeight: 600 }}>Settings & Sync</h3>
           <button onClick={onClose} style={{ border: "none", padding: 4, background: "transparent" }}>
             <X size={18} />
           </button>
         </div>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+          {/* Appearance / Theme Section */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: "0.5px" }}>
+              Appearance
+            </span>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                padding: "10px 14px",
+                background: "var(--bg-secondary)",
+                borderRadius: 8,
+                border: "1px solid var(--border-color)",
+                gap: 12,
+                flexWrap: "wrap"
+              }}
+            >
+              <div>
+                <div style={{ fontSize: 13.5, fontWeight: 500, color: "var(--text-primary)" }}>
+                  Theme
+                </div>
+                <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
+                  {themeMode === "system"
+                    ? "Currently matching device system theme."
+                    : `Active: ${themeMode.charAt(0).toUpperCase() + themeMode.slice(1)} mode.`}
+                </div>
+              </div>
+
+              <div className="theme-selector">
+                <button
+                  type="button"
+                  className={`theme-option ${themeMode === "system" ? "active" : ""}`}
+                  onClick={() => handleThemeChange("system")}
+                  title="Follow device theme"
+                >
+                  <Monitor size={14} />
+                  <span>System</span>
+                </button>
+                <button
+                  type="button"
+                  className={`theme-option ${themeMode === "light" ? "active" : ""}`}
+                  onClick={() => handleThemeChange("light")}
+                  title="Light theme"
+                >
+                  <Sun size={14} />
+                  <span>Light</span>
+                </button>
+                <button
+                  type="button"
+                  className={`theme-option ${themeMode === "dark" ? "active" : ""}`}
+                  onClick={() => handleThemeChange("dark")}
+                  title="Dark theme"
+                >
+                  <Moon size={14} />
+                  <span>Dark</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <hr style={{ border: "none", borderTop: "1px solid var(--border-color)", margin: "2px 0" }} />
+
           {/* Real-time Sync Section */}
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: "0.5px" }}>
@@ -267,7 +341,7 @@ export const SyncModal: React.FC<Props> = ({
                 >
                   <Info size={15} color="var(--color-new)" style={{ flexShrink: 0, marginTop: 1 }} />
                   <div>
-                    <strong>iOS requirement:</strong> Apple Web Push requires adding Anki to your Home Screen before notifications can be enabled.
+                    <strong>iOS requirement:</strong> Apple Web Push requires adding klanki to your Home Screen before notifications can be enabled.
                   </div>
                 </div>
               )}

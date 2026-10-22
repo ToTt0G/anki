@@ -20,46 +20,7 @@ export class AnkiSyncServer extends DurableObject {
 
   private initDatabase() {
     this.sql.exec(`
-      CREATE TABLE IF NOT EXISTS col_meta (
-        key TEXT PRIMARY KEY,
-        val TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS decks (
-        id INTEGER PRIMARY KEY,
-        json TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS dconf (
-        id INTEGER PRIMARY KEY,
-        json TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS models (
-        id INTEGER PRIMARY KEY,
-        json TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS notes (
-        id INTEGER PRIMARY KEY,
-        json TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS cards (
-        id INTEGER PRIMARY KEY,
-        json TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS revlog (
-        id INTEGER PRIMARY KEY,
-        json TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS media (
-        name TEXT PRIMARY KEY,
-        data TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS push_subscriptions (
-        endpoint TEXT PRIMARY KEY,
-        p256dh TEXT NOT NULL,
-        auth TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
-      );
-    `);
+      CREATE TABLE IF NOT EXISTS col_meta (\n        key TEXT PRIMARY KEY,\n        val TEXT NOT NULL\n      );\n      CREATE TABLE IF NOT EXISTS decks (\n        id INTEGER PRIMARY KEY,\n        json TEXT NOT NULL\n      );\n      CREATE TABLE IF NOT EXISTS dconf (\n        id INTEGER PRIMARY KEY,\n        json TEXT NOT NULL\n      );\n      CREATE TABLE IF NOT EXISTS models (\n        id INTEGER PRIMARY KEY,\n        json TEXT NOT NULL\n      );\n      CREATE TABLE IF NOT EXISTS notes (\n        id INTEGER PRIMARY KEY,\n        json TEXT NOT NULL\n      );\n      CREATE TABLE IF NOT EXISTS cards (\n        id INTEGER PRIMARY KEY,\n        json TEXT NOT NULL\n      );\n      CREATE TABLE IF NOT EXISTS revlog (\n        id INTEGER PRIMARY KEY,\n        json TEXT NOT NULL\n      );\n      CREATE TABLE IF NOT EXISTS media (\n        name TEXT PRIMARY KEY,\n        data TEXT NOT NULL\n      );\n      CREATE TABLE IF NOT EXISTS push_subscriptions (\n        endpoint TEXT PRIMARY KEY,\n        p256dh TEXT NOT NULL,\n        auth TEXT NOT NULL,\n        created_at INTEGER NOT NULL,\n        updated_at INTEGER NOT NULL\n      );\n    `);
   }
 
   private getVapidConfig(): VapidConfig {
@@ -232,10 +193,10 @@ export class AnkiSyncServer extends DurableObject {
       try {
         const body: { endpoint?: string; title?: string; body?: string } = await request.json().catch(() => ({}));
         const payload: PushPayload = {
-          title: body.title || "Anki Test Notification",
+          title: body.title || "klanki Test Notification",
           body: body.body || "Web Push is fully working on this device!",
           url: "/",
-          tag: "anki-test"
+          tag: "klanki-test"
         };
 
         const config = this.getVapidConfig();
@@ -265,10 +226,10 @@ export class AnkiSyncServer extends DurableObject {
         }
 
         const payload: PushPayload = {
-          title: body.title || "Anki Review Reminder",
+          title: body.title || "klanki Review Reminder",
           body: body.body || `${dueCount} cards are ready for review today!`,
           url: "/",
-          tag: "anki-due-review"
+          tag: "klanki-due-review"
         };
 
         const config = this.getVapidConfig();

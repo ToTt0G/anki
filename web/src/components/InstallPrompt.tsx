@@ -24,7 +24,7 @@ export const InstallPrompt: React.FC<Props> = () => {
     setStandalone(isApp);
     if (isApp) return;
 
-    const isDismissed = localStorage.getItem("anki_pwa_install_dismissed") === "true";
+    const isDismissed = localStorage.getItem("klanki_pwa_install_dismissed") === "true";
     setDismissed(isDismissed);
 
     const unsub = onInstallPromptChange(available => {
@@ -57,7 +57,7 @@ export const InstallPrompt: React.FC<Props> = () => {
 
   const handleDismiss = () => {
     setDismissed(true);
-    localStorage.setItem("anki_pwa_install_dismissed", "true");
+    localStorage.setItem("klanki_pwa_install_dismissed", "true");
   };
 
   const isIos = isIosDevice();
@@ -105,7 +105,7 @@ export const InstallPrompt: React.FC<Props> = () => {
 
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: "14px", fontWeight: 600, color: "var(--text-primary)", marginBottom: 2 }}>
-              Install Anki App
+              Install klanki App
             </div>
             <p style={{ fontSize: "12.5px", color: "var(--text-secondary)", lineHeight: 1.4, margin: 0 }}>
               {isIos
@@ -178,7 +178,7 @@ export const InstallPrompt: React.FC<Props> = () => {
         >
           <CheckCircle2 size={20} color="var(--color-good)" />
           <span style={{ fontSize: "13.5px", fontWeight: 500 }}>
-            Anki successfully installed!
+            klanki successfully installed!
           </span>
         </div>
       )}
@@ -194,7 +194,7 @@ export const InstallPrompt: React.FC<Props> = () => {
             <div className="modal-header">
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <Smartphone size={20} color="var(--color-new)" />
-                <h3 style={{ fontSize: 16, fontWeight: 600 }}>Install Anki as an App</h3>
+                <h3 style={{ fontSize: 16, fontWeight: 600 }}>Install klanki as an App</h3>
               </div>
               <button
                 onClick={() => setShowIosGuide(false)}
@@ -315,7 +315,7 @@ export const InstallPrompt: React.FC<Props> = () => {
                       ✓
                     </div>
                     <div>
-                      Launch <strong>Anki</strong> from your Home Screen to unlock native Push Notifications!
+                      Launch <strong>klanki</strong> from your Home Screen to unlock native Push Notifications!
                     </div>
                   </div>
                 </div>
@@ -334,7 +334,7 @@ export const InstallPrompt: React.FC<Props> = () => {
                   <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13.5 }}>
                     <Monitor size={18} color="var(--color-new)" />
                     <span>
-                      Click the <strong>Install</strong> icon in the browser address bar (right side), or open the browser menu (⋮) and select <strong>Install Anki</strong>.
+                      Click the <strong>Install</strong> icon in the browser address bar (right side), or open the browser menu (⋮) and select <strong>Install klanki</strong>.
                     </span>
                   </div>
                 </div>

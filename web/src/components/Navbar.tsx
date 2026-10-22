@@ -50,7 +50,7 @@ export const Navbar: React.FC<Props> = ({
       <header className="navbar">
         <div className="navbar-inner">
           <div className="nav-brand" onClick={() => onSelectView("decks")}>
-            Anki
+            klanki
           </div>
 
           <nav className="nav-links">
@@ -88,7 +88,7 @@ export const Navbar: React.FC<Props> = ({
             {showInstall && (
               <button
                 onClick={handleInstall}
-                title="Install Anki as an application"
+                title="Install klanki as an application"
                 style={{
                   padding: "4px 10px",
                   fontSize: "12px",
@@ -106,7 +106,7 @@ export const Navbar: React.FC<Props> = ({
 
             <button
               onClick={onSyncClick}
-              title={`Sync & Settings (${syncStatus})`}
+              title={`Settings & Sync (${syncStatus})`}
               style={{ padding: "4px 8px" }}
             >
               <RefreshCw

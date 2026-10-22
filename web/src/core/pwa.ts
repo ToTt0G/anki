@@ -84,7 +84,7 @@ export async function registerServiceWorker(): Promise<ServiceWorkerRegistration
       if (newWorker) {
         newWorker.addEventListener("statechange", () => {
           if (newWorker.state === "installed" && navigator.serviceWorker.controller) {
-            console.log("New version of Anki Web available.");
+            console.log("New version of klanki available.");
           }
         });
       }

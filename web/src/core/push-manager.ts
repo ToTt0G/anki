@@ -144,7 +144,7 @@ export async function sendTestPush(): Promise<{ success: boolean; data?: any; er
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         endpoint: sub?.endpoint,
-        title: "Anki Study Reminder",
+        title: "klanki Study Reminder",
         body: "Your spaced repetition notifications are working properly!"
       })
     });
