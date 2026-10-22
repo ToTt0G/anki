@@ -17,6 +17,9 @@ import { CustomStudyModal } from "./components/CustomStudyModal";
 import { ImportModal } from "./components/ImportModal";
 import { SyncModal } from "./components/SyncModal";
 import { InstallPrompt } from "./components/InstallPrompt";
+import { LandingPage } from "./components/LandingPage";
+import { getStoredTheme, setStoredTheme } from "./core/theme";
+import { Sun, Moon } from "lucide-react";
 
 export const App: React.FC = () => {
   const { isLoaded, isSignedIn, userId, getToken } = useAuth();
@@ -90,6 +93,21 @@ export const App: React.FC = () => {
           <div className="navbar-inner">
             <div className="nav-brand">klanki</div>
             <div className="nav-right" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <button
+                type="button"
+                onClick={() => {
+                  const current = document.documentElement.getAttribute("data-theme");
+                  const isDark =
+                    current === "dark" ||
+                    (!current && window.matchMedia("(prefers-color-scheme: dark)").matches);
+                  setStoredTheme(isDark ? "light" : "dark");
+                }}
+                style={{ padding: "5px 8px" }}
+                title="Toggle theme"
+              >
+                <Sun size={14} />
+                <Moon size={14} />
+              </button>
               <Show when="signed-out">
                 <SignInButton mode="modal">
                   <button>Sign In</button>
@@ -102,17 +120,8 @@ export const App: React.FC = () => {
           </div>
         </header>
 
-        <main
-          className="main-content"
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            justifyContent: "center",
-            minHeight: "calc(100vh - 80px)"
-          }}
-        >
-          <SignIn routing="hash" />
+        <main className="main-content landing-main">
+          <LandingPage />
         </main>
 
         <InstallPrompt />
