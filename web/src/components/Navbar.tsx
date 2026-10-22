@@ -1,6 +1,7 @@
-import React from "react";
+import React, { useState, useEffect } from "react";
 import { SyncStatus } from "../core/sync-client";
-import { Layers, PlusCircle, Search, BarChart2, RefreshCw } from "lucide-react";
+import { Layers, PlusCircle, Search, BarChart2, RefreshCw, Download } from "lucide-react";
+import { isStandalone, onInstallPromptChange, promptPwaInstall } from "../core/pwa";
 
 export type NavView = "decks" | "add" | "browse" | "stats";
 
@@ -9,14 +10,41 @@ interface Props {
   onSelectView: (view: NavView) => void;
   syncStatus: SyncStatus;
   onSyncClick: () => void;
+  onInstallClick?: () => void;
 }
 
 export const Navbar: React.FC<Props> = ({
   currentView,
   onSelectView,
   syncStatus,
-  onSyncClick
+  onSyncClick,
+  onInstallClick
 }) => {
+  const [standalone, setStandalone] = useState(true);
+  const [canPrompt, setCanPrompt] = useState(false);
+
+  useEffect(() => {
+    const isApp = isStandalone();
+    setStandalone(isApp);
+    if (!isApp) {
+      const unsub = onInstallPromptChange(available => {
+        setCanPrompt(available);
+      });
+      return () => unsub();
+    }
+  }, []);
+
+  const handleInstall = async () => {
+    if (canPrompt) {
+      const res = await promptPwaInstall();
+      if (res) setStandalone(true);
+    } else if (onInstallClick) {
+      onInstallClick();
+    }
+  };
+
+  const showInstall = !standalone;
+
   return (
     <>
       <header className="navbar">
@@ -56,10 +84,29 @@ export const Navbar: React.FC<Props> = ({
             </div>
           </nav>
 
-          <div className="nav-right">
+          <div className="nav-right" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {showInstall && (
+              <button
+                onClick={handleInstall}
+                title="Install Anki as an application"
+                style={{
+                  padding: "4px 10px",
+                  fontSize: "12px",
+                  fontWeight: 500,
+                  borderRadius: 6,
+                  background: "rgba(2, 132, 199, 0.1)",
+                  color: "var(--color-new)",
+                  border: "1px solid rgba(2, 132, 199, 0.2)"
+                }}
+              >
+                <Download size={13} />
+                <span>Install App</span>
+              </button>
+            )}
+
             <button
               onClick={onSyncClick}
-              title={`Sync: ${syncStatus}`}
+              title={`Sync & Settings (${syncStatus})`}
               style={{ padding: "4px 8px" }}
             >
               <RefreshCw

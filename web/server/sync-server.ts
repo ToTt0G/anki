@@ -1,6 +1,13 @@
 import { DurableObject } from "cloudflare:workers";
 import { Collection, Card, Note, Deck, DeckConfig, NoteType, RevlogEntry } from "../src/core/types";
 import { ClientMessage, ServerMessage } from "./types";
+import {
+  DEFAULT_VAPID_CONFIG,
+  PushSubscriptionData,
+  PushPayload,
+  sendWebPush,
+  VapidConfig
+} from "./push-service";
 
 export class AnkiSyncServer extends DurableObject {
   private sql: any;
@@ -45,7 +52,22 @@ export class AnkiSyncServer extends DurableObject {
         name TEXT PRIMARY KEY,
         data TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS push_subscriptions (
+        endpoint TEXT PRIMARY KEY,
+        p256dh TEXT NOT NULL,
+        auth TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
     `);
+  }
+
+  private getVapidConfig(): VapidConfig {
+    return {
+      publicKey: (this.env as any)?.VAPID_PUBLIC_KEY || DEFAULT_VAPID_CONFIG.publicKey,
+      privateKey: (this.env as any)?.VAPID_PRIVATE_KEY || DEFAULT_VAPID_CONFIG.privateKey,
+      subject: (this.env as any)?.VAPID_SUBJECT || DEFAULT_VAPID_CONFIG.subject
+    };
   }
 
   private getFullCollection(): Collection {
@@ -78,67 +100,60 @@ export class AnkiSyncServer extends DurableObject {
       cards[c.id] = c;
     }
     for (const row of this.sql.exec("SELECT json FROM revlog ORDER BY id ASC").toArray()) {
-      revlog.push(JSON.parse(row.json));
+      const r: RevlogEntry = JSON.parse(row.json);
+      revlog.push(r);
     }
     for (const row of this.sql.exec("SELECT name, data FROM media").toArray()) {
       media[row.name] = row.data;
     }
 
-    const modRow = this.sql.exec("SELECT val FROM col_meta WHERE key = 'mod'").toArray();
-    const mod = modRow.length > 0 ? parseInt(modRow[0].val, 10) : Math.floor(Date.now() / 1000);
-
     return {
-      id: 1,
-      crt: 1600000000,
-      mod,
-      decks,
+      crt: Math.floor(Date.now() / 1000),
+      mod: Math.floor(Date.now() / 1000),
+      scm: Math.floor(Date.now() / 1000),
       dconf,
       models,
-      notes,
+      decks,
       cards,
+      notes,
       revlog,
       media
     };
   }
 
   private saveFullCollection(col: Collection) {
-    (this.ctx.storage as any).transactionSync(() => {
-      this.sql.exec("INSERT OR REPLACE INTO col_meta (key, val) VALUES ('mod', ?)", String(Date.now()));
+    // Durable Objects requires storage.transactionSync for batch operations
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec("DELETE FROM decks");
+      this.sql.exec("DELETE FROM dconf");
+      this.sql.exec("DELETE FROM models");
+      this.sql.exec("DELETE FROM notes");
+      this.sql.exec("DELETE FROM cards");
+      this.sql.exec("DELETE FROM revlog");
+      this.sql.exec("DELETE FROM media");
 
-      for (const deck of Object.values(col.decks)) {
-        this.sql.exec("INSERT OR REPLACE INTO decks (id, json) VALUES (?, ?)", deck.id, JSON.stringify(deck));
+      for (const d of Object.values(col.decks)) {
+        this.sql.exec("INSERT INTO decks (id, json) VALUES (?, ?)", d.id, JSON.stringify(d));
       }
       for (const dc of Object.values(col.dconf)) {
-        this.sql.exec("INSERT OR REPLACE INTO dconf (id, json) VALUES (?, ?)", dc.id, JSON.stringify(dc));
+        this.sql.exec("INSERT INTO dconf (id, json) VALUES (?, ?)", dc.id, JSON.stringify(dc));
       }
       for (const m of Object.values(col.models)) {
-        this.sql.exec("INSERT OR REPLACE INTO models (id, json) VALUES (?, ?)", m.id, JSON.stringify(m));
+        this.sql.exec("INSERT INTO models (id, json) VALUES (?, ?)", m.id, JSON.stringify(m));
       }
-      for (const note of Object.values(col.notes)) {
-        this.sql.exec("INSERT OR REPLACE INTO notes (id, json) VALUES (?, ?)", note.id, JSON.stringify(note));
+      for (const n of Object.values(col.notes)) {
+        this.sql.exec("INSERT INTO notes (id, json) VALUES (?, ?)", n.id, JSON.stringify(n));
       }
-      for (const card of Object.values(col.cards)) {
-        this.sql.exec("INSERT OR REPLACE INTO cards (id, json) VALUES (?, ?)", card.id, JSON.stringify(card));
+      for (const c of Object.values(col.cards)) {
+        this.sql.exec("INSERT INTO cards (id, json) VALUES (?, ?)", c.id, JSON.stringify(c));
       }
-      for (const r of col.revlog) {
-        this.sql.exec("INSERT OR REPLACE INTO revlog (id, json) VALUES (?, ?)", r.id, JSON.stringify(r));
+      for (const r of col.revlog || []) {
+        this.sql.exec("INSERT INTO revlog (id, json) VALUES (?, ?)", r.id, JSON.stringify(r));
       }
       for (const [name, data] of Object.entries(col.media || {})) {
-        this.sql.exec("INSERT OR REPLACE INTO media (name, data) VALUES (?, ?)", name, data);
+        this.sql.exec("INSERT INTO media (name, data) VALUES (?, ?)", name, data);
       }
     });
-  }
-
-  private broadcast(msg: ServerMessage, senderWs?: WebSocket) {
-    const raw = JSON.stringify(msg);
-    const sockets = this.ctx.getWebSockets();
-    for (const ws of sockets) {
-      if (ws !== senderWs) {
-        try {
-          ws.send(raw);
-        } catch (e) {}
-      }
-    }
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -166,7 +181,146 @@ export class AnkiSyncServer extends DurableObject {
       }
     }
 
+    // 3. Web Push API Endpoints
+    if (url.pathname === "/push/vapid-public-key") {
+      const config = this.getVapidConfig();
+      return Response.json({ publicKey: config.publicKey });
+    }
+
+    if (url.pathname === "/push/subscribe" && request.method === "POST") {
+      try {
+        const sub: PushSubscriptionData = await request.json();
+        if (!sub?.endpoint || !sub?.keys?.p256dh || !sub?.keys?.auth) {
+          return Response.json({ error: "Invalid subscription format" }, { status: 400 });
+        }
+        const now = Date.now();
+        this.sql.exec(
+          "INSERT OR REPLACE INTO push_subscriptions (endpoint, p256dh, auth, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+          sub.endpoint,
+          sub.keys.p256dh,
+          sub.keys.auth,
+          now,
+          now
+        );
+        return Response.json({ success: true });
+      } catch (err: any) {
+        return Response.json({ error: err.message }, { status: 500 });
+      }
+    }
+
+    if (url.pathname === "/push/unsubscribe" && request.method === "POST") {
+      try {
+        const body: { endpoint: string } = await request.json();
+        if (body?.endpoint) {
+          this.sql.exec("DELETE FROM push_subscriptions WHERE endpoint = ?", body.endpoint);
+        }
+        return Response.json({ success: true });
+      } catch (err: any) {
+        return Response.json({ error: err.message }, { status: 500 });
+      }
+    }
+
+    if (url.pathname === "/push/status") {
+      const rows = this.sql.exec("SELECT COUNT(*) as count FROM push_subscriptions").toArray();
+      return Response.json({
+        subscriptions: rows[0]?.count || 0,
+        vapidConfigured: !!this.getVapidConfig().publicKey
+      });
+    }
+
+    if (url.pathname === "/push/send-test" && request.method === "POST") {
+      try {
+        const body: { endpoint?: string; title?: string; body?: string } = await request.json().catch(() => ({}));
+        const payload: PushPayload = {
+          title: body.title || "Anki Test Notification",
+          body: body.body || "Web Push is fully working on this device!",
+          url: "/",
+          tag: "anki-test"
+        };
+
+        const config = this.getVapidConfig();
+        const results = await this.broadcastPushNotification(payload, config, body.endpoint);
+        return Response.json(results);
+      } catch (err: any) {
+        return Response.json({ error: err.message }, { status: 500 });
+      }
+    }
+
+    if (url.pathname === "/push/notify-due" && request.method === "POST") {
+      try {
+        const body: { title?: string; body?: string } = await request.json().catch(() => ({}));
+        const col = this.getFullCollection();
+
+        // Calculate due count
+        const nowSec = Math.floor(Date.now() / 1000);
+        let dueCount = 0;
+        for (const card of Object.values(col.cards)) {
+          if (card.queue === 1 && card.due <= nowSec) {
+            dueCount++; // Reviewing/Learning due
+          } else if (card.queue === 2) {
+            dueCount++; // Review due
+          } else if (card.queue === 0) {
+            dueCount++; // New card available
+          }
+        }
+
+        const payload: PushPayload = {
+          title: body.title || "Anki Review Reminder",
+          body: body.body || `${dueCount} cards are ready for review today!`,
+          url: "/",
+          tag: "anki-due-review"
+        };
+
+        const config = this.getVapidConfig();
+        const results = await this.broadcastPushNotification(payload, config);
+        return Response.json({ dueCount, ...results });
+      } catch (err: any) {
+        return Response.json({ error: err.message }, { status: 500 });
+      }
+    }
+
     return new Response("Not Found", { status: 404 });
+  }
+
+  private async broadcastPushNotification(
+    payload: PushPayload,
+    config: VapidConfig,
+    targetEndpoint?: string
+  ) {
+    let query = "SELECT endpoint, p256dh, auth FROM push_subscriptions";
+    let args: any[] = [];
+    if (targetEndpoint) {
+      query += " WHERE endpoint = ?";
+      args.push(targetEndpoint);
+    }
+
+    const rows = this.sql.exec(query, ...args).toArray();
+    let sent = 0;
+    let failed = 0;
+    let pruned = 0;
+
+    for (const row of rows) {
+      const sub: PushSubscriptionData = {
+        endpoint: row.endpoint,
+        keys: {
+          p256dh: row.p256dh,
+          auth: row.auth
+        }
+      };
+
+      const result = await sendWebPush(sub, payload, config);
+      if (result.success) {
+        sent++;
+      } else {
+        failed++;
+        if (result.expired) {
+          this.sql.exec("DELETE FROM push_subscriptions WHERE endpoint = ?", row.endpoint);
+          pruned++;
+        }
+      }
+    }
+
+    return { sent, failed, pruned, total: rows.length };
   }
 
   webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
@@ -241,7 +395,7 @@ export class AnkiSyncServer extends DurableObject {
       }
 
       if (msg.type === "save_media") {
-        this.sql.exec("INSERT OR REPLACE INTO media (name, val) VALUES (?, ?)", msg.filename, msg.dataUrl);
+        this.sql.exec("INSERT OR REPLACE INTO media (name, data) VALUES (?, ?)", msg.filename, msg.dataUrl);
         this.broadcast(msg, ws);
         return;
       }
@@ -258,5 +412,18 @@ export class AnkiSyncServer extends DurableObject {
 
   webSocketClose(ws: WebSocket) {
     // Client disconnected
+  }
+
+  private broadcast(msg: ServerMessage, senderWs?: WebSocket) {
+    const payload = JSON.stringify(msg);
+    for (const ws of this.ctx.getWebSockets()) {
+      if (ws !== senderWs && ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(payload);
+        } catch (e) {
+          console.warn("Failed to broadcast message:", e);
+        }
+      }
+    }
   }
 }

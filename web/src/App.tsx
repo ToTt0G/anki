@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { Collection, Deck, Note, Card, DeckConfig, RevlogEntry } from "./core/types";
 import { SyncClient, SyncStatus } from "./core/sync-client";
 import { exportDeckCsv, exportApkg } from "./core/import-export";
+import { registerServiceWorker } from "./core/pwa";
 import { Navbar, NavView } from "./components/Navbar";
 import { DeckList } from "./components/DeckList";
 import { DeckOverview } from "./components/DeckOverview";
@@ -13,6 +14,7 @@ import { DeckOptionsModal } from "./components/DeckOptionsModal";
 import { CustomStudyModal } from "./components/CustomStudyModal";
 import { ImportModal } from "./components/ImportModal";
 import { SyncModal } from "./components/SyncModal";
+import { InstallPrompt } from "./components/InstallPrompt";
 
 export const App: React.FC = () => {
   const [collection, setCollection] = useState<Collection | null>(null);
@@ -30,6 +32,12 @@ export const App: React.FC = () => {
   const syncClientRef = useRef<SyncClient | null>(null);
 
   useEffect(() => {
+    // 1. Initialize PWA Service Worker
+    registerServiceWorker().catch(err => {
+      console.warn("Service Worker initialization error:", err);
+    });
+
+    // 2. Initialize Real-time Sync Client
     const client = new SyncClient(
       col => setCollection(col),
       status => setSyncStatus(status)
@@ -184,6 +192,7 @@ export const App: React.FC = () => {
         }}
         syncStatus={syncStatus}
         onSyncClick={() => setIsSyncModalOpen(true)}
+        onInstallClick={() => setIsSyncModalOpen(true)}
       />
 
       <main className="main-content">
@@ -250,6 +259,9 @@ export const App: React.FC = () => {
         {currentView === "stats" && <StatsView collection={collection} />}
       </main>
 
+      {/* Non-intrusive PWA install banner / prompt */}
+      <InstallPrompt />
+
       {/* Modals */}
       {optionsDeckId !== null && (
         <DeckOptionsModal
@@ -286,6 +298,9 @@ export const App: React.FC = () => {
           syncStatus={syncStatus}
           onForceSync={() => syncClientRef.current?.connect()}
           onClose={() => setIsSyncModalOpen(false)}
+          onShowInstallGuide={() => {
+            // Can trigger install or guide
+          }}
         />
       )}
     </div>
