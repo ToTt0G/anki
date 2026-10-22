@@ -54,16 +54,20 @@ export async function importApkg(
         const itemFile = zip.file(idxStr);
         if (itemFile) {
           const itemBase64 = await itemFile.async("base64");
-          // Determine mime type
+          // Determine mime type including all modern web image formats
           let mime = "application/octet-stream";
           const lower = originalFilename.toLowerCase();
           if (lower.endsWith(".png")) mime = "image/png";
           else if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) mime = "image/jpeg";
+          else if (lower.endsWith(".webp")) mime = "image/webp";
           else if (lower.endsWith(".gif")) mime = "image/gif";
           else if (lower.endsWith(".svg")) mime = "image/svg+xml";
+          else if (lower.endsWith(".avif")) mime = "image/avif";
+          else if (lower.endsWith(".bmp")) mime = "image/bmp";
           else if (lower.endsWith(".mp3")) mime = "audio/mpeg";
           else if (lower.endsWith(".ogg")) mime = "audio/ogg";
           else if (lower.endsWith(".wav")) mime = "audio/wav";
+          else if (lower.endsWith(".m4a") || lower.endsWith(".aac")) mime = "audio/mp4";
 
           extractedMedia[originalFilename] = `data:${mime};base64,${itemBase64}`;
           mediaCount++;

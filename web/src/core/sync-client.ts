@@ -180,6 +180,12 @@ export class SyncClient {
       return;
     }
 
+    if (msg.type === "save_media") {
+      this.col.media[msg.filename] = msg.dataUrl;
+      this.saveLocalCollection({ ...this.col });
+      return;
+    }
+
     if (msg.type === "import_collection") {
       this.saveLocalCollection(msg.collection);
       return;
@@ -247,6 +253,12 @@ export class SyncClient {
     this.col.cards[card.id] = card;
     this.saveLocalCollection({ ...this.col });
     this.send({ type: "update_card", card });
+  }
+
+  public saveMedia(filename: string, dataUrl: string) {
+    this.col.media[filename] = dataUrl;
+    this.saveLocalCollection({ ...this.col });
+    this.send({ type: "save_media", filename, dataUrl });
   }
 
   public importCollection(col: Collection) {

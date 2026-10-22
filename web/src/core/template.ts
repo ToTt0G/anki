@@ -93,19 +93,36 @@ export function renderCardTemplate(
 
     // 8. Replace [sound:filename.mp3] with audio tags
     out = out.replace(/\[sound:([^\]]+)\]/g, (_m, filename) => {
-      const src = mediaMap && mediaMap[filename] ? mediaMap[filename] : `/media/${filename}`;
+      const decodedFilename = decodeURIComponent(filename.trim());
+      const src = mediaMap && (mediaMap[filename.trim()] || mediaMap[decodedFilename])
+        ? (mediaMap[filename.trim()] || mediaMap[decodedFilename])
+        : `/media/${filename.trim()}`;
       return `<audio controls class="anki-audio" src="${src}"></audio>`;
     });
 
-    // 9. Resolve relative images if mediaMap provided
-    if (mediaMap) {
-      out = out.replace(/<img([^>]+)src=["']([^"']+)["']/gi, (full, attrs, src) => {
-        if (src in mediaMap) {
-          return `<img${attrs}src="${mediaMap[src]}"`;
+    // 9. Resolve images: handles relative src, encoded filenames, and ensures responsive bounds
+    out = out.replace(/<img\b([^>]*)src=["']([^"']+)["']([^>]*)>/gi, (full, beforeAttrs, src, afterAttrs) => {
+      const trimmedSrc = src.trim();
+      let resolvedSrc = trimmedSrc;
+
+      if (mediaMap) {
+        const decodedSrc = decodeURIComponent(trimmedSrc);
+        const baseName = trimmedSrc.split("/").pop() || trimmedSrc;
+        const decodedBaseName = decodeURIComponent(baseName);
+
+        if (mediaMap[trimmedSrc]) {
+          resolvedSrc = mediaMap[trimmedSrc];
+        } else if (mediaMap[decodedSrc]) {
+          resolvedSrc = mediaMap[decodedSrc];
+        } else if (mediaMap[baseName]) {
+          resolvedSrc = mediaMap[baseName];
+        } else if (mediaMap[decodedBaseName]) {
+          resolvedSrc = mediaMap[decodedBaseName];
         }
-        return full;
-      });
-    }
+      }
+
+      return `<img${beforeAttrs}src="${resolvedSrc}" loading="lazy" class="anki-image"${afterAttrs}>`;
+    });
 
     return out;
   }

@@ -1,23 +1,49 @@
 import React, { useState } from "react";
 import { Collection, Card, Note } from "../core/types";
 import { searchCards, SearchFilterResult } from "../core/search";
-import { Search, EyeOff, Trash2, RotateCcw, Archive } from "lucide-react";
+import { Search, EyeOff, Trash2, RotateCcw, Archive, Image as ImageIcon } from "lucide-react";
 
 interface Props {
   collection: Collection;
   onUpdateNote: (note: Note) => void;
   onUpdateCard: (card: Card) => void;
   onDeleteNote: (noteId: number) => void;
+  onSaveMedia?: (filename: string, dataUrl: string) => void;
 }
 
 export const CardBrowser: React.FC<Props> = ({
   collection,
   onUpdateNote,
   onUpdateCard,
-  onDeleteNote
+  onDeleteNote,
+  onSaveMedia
 }) => {
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [selectedCardId, setSelectedCardId] = useState<number | null>(null);
+  const browserFileRef = React.useRef<HTMLInputElement | null>(null);
+  const editingFieldIdxRef = React.useRef<number>(0);
+
+  const handleBrowserImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !selectedCardItem) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result as string;
+      const cleanName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+      const filename = "paste_" + Date.now() + "_" + cleanName;
+      if (onSaveMedia) {
+        onSaveMedia(filename, dataUrl);
+      } else {
+        collection.media[filename] = dataUrl;
+      }
+      const idx = editingFieldIdxRef.current;
+      const cur = selectedCardItem.note.fields[idx] || "";
+      const imgTag = "<img src=\"" + filename + "\">";
+      handleFieldChange(idx, cur ? cur + "\n" + imgTag : imgTag);
+    };
+    reader.readAsDataURL(file);
+    e.target.value = "";
+  };
 
   const searchResults = searchCards(collection, searchQuery);
 
@@ -103,6 +129,13 @@ export const CardBrowser: React.FC<Props> = ({
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14, height: "100%", maxWidth: "100%", width: "100%", boxSizing: "border-box" }}>
+      <input
+        type="file"
+        ref={browserFileRef}
+        accept="image/*"
+        style={{ display: "none" }}
+        onChange={handleBrowserImageUpload}
+      />
       {/* Search Header */}
       <div style={{ display: "flex", gap: 10, alignItems: "center", width: "100%", boxSizing: "border-box" }}>
         <div style={{ position: "relative", flex: 1, minWidth: 0 }}>
@@ -250,7 +283,21 @@ export const CardBrowser: React.FC<Props> = ({
 
               {model.flds.map((fld, idx) => (
                 <div key={fld.name} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                  <label style={{ fontSize: 12, color: "var(--text-secondary)" }}>{fld.name}</label>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <label style={{ fontSize: 12, color: "var(--text-secondary)" }}>{fld.name}</label>
+                    <button
+                      type="button"
+                      style={{ padding: "1px 6px", fontSize: 11, display: "inline-flex", alignItems: "center", gap: 3 }}
+                      onClick={() => {
+                        editingFieldIdxRef.current = idx;
+                        browserFileRef.current?.click();
+                      }}
+                      title="Insert Image"
+                    >
+                      <ImageIcon size={11} />
+                      <span>Image</span>
+                    </button>
+                  </div>
                   <input
                     type="text"
                     value={selectedCardItem.note.fields[idx] || ""}

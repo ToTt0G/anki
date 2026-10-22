@@ -9,6 +9,7 @@ export type ClientMessage =
   | { type: "upsert_note"; note: Note; cards: Card[] }
   | { type: "delete_note"; noteId: number; cardIds: number[] }
   | { type: "update_card"; card: Card }
+  | { type: "save_media"; filename: string; dataUrl: string }
   | { type: "import_collection"; collection: Collection }
   | { type: "ping" };
 
@@ -21,5 +22,6 @@ export type ServerMessage =
   | { type: "upsert_note"; note: Note; cards: Card[] }
   | { type: "delete_note"; noteId: number; cardIds: number[] }
   | { type: "update_card"; card: Card }
+  | { type: "save_media"; filename: string; dataUrl: string }
   | { type: "import_collection"; collection: Collection }
   | { type: "pong" };

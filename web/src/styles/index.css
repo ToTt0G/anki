@@ -322,6 +322,16 @@ input:focus, select:focus, textarea:focus {
   box-sizing: border-box;
 }
 
+.review-card-area img,
+.anki-image {
+  max-width: 100% !important;
+  height: auto !important;
+  border-radius: 6px;
+  margin: 8px 0;
+  display: block;
+  object-fit: contain;
+}
+
 .card-divider {
   margin: 20px 0;
   border: 0;

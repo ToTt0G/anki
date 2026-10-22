@@ -233,6 +233,7 @@ export const App: React.FC = () => {
             collection={collection}
             defaultDeckId={selectedDeckId || 1}
             onAddNote={handleAddNote}
+            onSaveMedia={(filename, dataUrl) => syncClientRef.current?.saveMedia(filename, dataUrl)}
           />
         )}
 
@@ -242,6 +243,7 @@ export const App: React.FC = () => {
             onUpdateNote={handleUpdateNote}
             onUpdateCard={handleUpdateCard}
             onDeleteNote={handleDeleteNote}
+            onSaveMedia={(filename, dataUrl) => syncClientRef.current?.saveMedia(filename, dataUrl)}
           />
         )}
 

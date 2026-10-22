@@ -240,6 +240,12 @@ export class AnkiSyncServer extends DurableObject {
         return;
       }
 
+      if (msg.type === "save_media") {
+        this.sql.exec("INSERT OR REPLACE INTO media (name, val) VALUES (?, ?)", msg.filename, msg.dataUrl);
+        this.broadcast(msg, ws);
+        return;
+      }
+
       if (msg.type === "import_collection") {
         this.saveFullCollection(msg.collection);
         this.broadcast(msg, ws);

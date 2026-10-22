@@ -1,18 +1,20 @@
 import React, { useState, useRef } from "react";
 import { Collection, Note, Card } from "../core/types";
 import { findClozeNumbers, wrapInCloze } from "../core/cloze";
-import { Plus } from "lucide-react";
+import { Plus, Image as ImageIcon } from "lucide-react";
 
 interface Props {
   collection: Collection;
   defaultDeckId?: number;
   onAddNote: (note: Note, cards: Card[]) => void;
+  onSaveMedia?: (filename: string, dataUrl: string) => void;
 }
 
 export const AddNote: React.FC<Props> = ({
   collection,
   defaultDeckId = 1,
-  onAddNote
+  onAddNote,
+  onSaveMedia
 }) => {
   const models = Object.values(collection.models);
   const decks = Object.values(collection.decks);
@@ -22,6 +24,8 @@ export const AddNote: React.FC<Props> = ({
   const [fieldValues, setFieldValues] = useState<Record<number, string>>({});
   const [tagsStr, setTagsStr] = useState<string>("");
   const [addedStatus, setAddedStatus] = useState<boolean>(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const activeFieldIdxRef = useRef<number>(0);
 
   const activeModel = collection.models[selectedMid] || models[0];
   const fieldRefs = useRef<Record<number, HTMLTextAreaElement | null>>({});
@@ -47,6 +51,49 @@ export const AddNote: React.FC<Props> = ({
     const newVal = currentVal.substring(0, start) + wrapped + currentVal.substring(end);
 
     setFieldValues(prev => ({ ...prev, [idx]: newVal }));
+  };
+
+  const triggerImageUpload = (fieldIdx: number) => {
+    activeFieldIdxRef.current = fieldIdx;
+    fileInputRef.current?.click();
+  };
+
+  const handleImageFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result as string;
+      const cleanName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+      const filename = `paste_${Date.now()}_${cleanName}`;
+
+      if (onSaveMedia) {
+        onSaveMedia(filename, dataUrl);
+      } else {
+        collection.media[filename] = dataUrl;
+      }
+
+      // Insert img tag into active field
+      const targetIdx = activeFieldIdxRef.current;
+      const currentVal = fieldValues[targetIdx] || "";
+      const imgTag = `<img src="${filename}">`;
+      const input = fieldRefs.current[targetIdx];
+
+      if (input) {
+        const start = input.selectionStart || 0;
+        const end = input.selectionEnd || 0;
+        const newVal = currentVal.substring(0, start) + imgTag + currentVal.substring(end);
+        setFieldValues(prev => ({ ...prev, [targetIdx]: newVal }));
+      } else {
+        setFieldValues(prev => ({
+          ...prev,
+          [targetIdx]: currentVal ? `${currentVal}\n${imgTag}` : imgTag
+        }));
+      }
+    };
+    reader.readAsDataURL(file);
+    e.target.value = "";
   };
 
   const handleAdd = () => {
@@ -162,13 +209,20 @@ export const AddNote: React.FC<Props> = ({
       style={{ maxWidth: 640, margin: "0 auto", display: "flex", flexDirection: "column", gap: 16 }}
       onKeyDown={handleKeyDown}
     >
+      <input
+        type="file"
+        ref={fileInputRef}
+        accept="image/*"
+        style={{ display: "none" }}
+        onChange={handleImageFileChange}
+      />
+
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <label style={{ fontSize: 13, color: "var(--text-secondary)" }}>Type</label>
           <select
             value={selectedMid}
-            onChange={e => setSelectedMid(Number(e.target.value))}
-          >
+            onChange={e => setSelectedMid(Number(e.target.value))}>
             {models.map(m => (
               <option key={m.id} value={m.id}>
                 {m.name}
@@ -197,16 +251,27 @@ export const AddNote: React.FC<Props> = ({
         <div key={fld.name} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <label style={{ fontSize: 13, fontWeight: 500 }}>{fld.name}</label>
-            {activeModel.type === 1 && idx === 0 && (
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
               <button
                 type="button"
-                onClick={() => handleInsertCloze(idx)}
-                style={{ padding: "2px 8px", fontSize: 12 }}
-                title="Cloze deletion ([...])"
+                onClick={() => triggerImageUpload(idx)}
+                style={{ padding: "3px 8px", fontSize: 12, display: "inline-flex", alignItems: "center", gap: 4 }}
+                title="Insert Image"
               >
-                [...]
+                <ImageIcon size={13} />
+                <span>Image</span>
               </button>
-            )}
+              {activeModel.type === 1 && idx === 0 && (
+                <button
+                  type="button"
+                  onClick={() => handleInsertCloze(idx)}
+                  style={{ padding: "3px 8px", fontSize: 12 }}
+                  title="Cloze deletion ([...])"
+                >
+                  [...]
+                </button>
+              )}
+            </div>
           </div>
           <textarea
             ref={el => {
