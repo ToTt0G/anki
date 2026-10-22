@@ -10,7 +10,7 @@ initTheme();
 
 const PUBLISHABLE_KEY =
   (import.meta as any).env?.VITE_CLERK_PUBLISHABLE_KEY ||
-  "pk_test_bGVnYWwtcHVtYS04NjY0LmNsZXJrLmFjY291bnRzLmRldiQ";
+  "pk_live_Y2xlcmsua2xhbmtpLmV6cnlkZXIudXMk";
 
 const rootElement = document.getElementById("root");
 if (rootElement) {

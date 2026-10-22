@@ -56,10 +56,21 @@ export async function verifyClerkRequest(
   }
 
   try {
-    const payload = await verifyToken(token, {
-      secretKey: env.CLERK_SECRET_KEY,
-      jwtKey: env.CLERK_JWT_KEY
-    });
+    let payload: any = null;
+    if (env.CLERK_JWT_KEY) {
+      try {
+        payload = await verifyToken(token, {
+          jwtKey: env.CLERK_JWT_KEY
+        });
+      } catch {
+        payload = null;
+      }
+    }
+    if (!payload && env.CLERK_SECRET_KEY) {
+      payload = await verifyToken(token, {
+        secretKey: env.CLERK_SECRET_KEY
+      });
+    }
 
     if (!payload || typeof payload.sub !== "string" || !payload.sub.trim()) {
       return null;
