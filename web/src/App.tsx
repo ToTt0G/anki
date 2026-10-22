@@ -178,7 +178,6 @@ export const App: React.FC = () => {
       URL.revokeObjectURL(url);
     } catch (e) {
       console.error("Export error:", e);
-      alert("Failed to export .apkg");
     }
   };
 

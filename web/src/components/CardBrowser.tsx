@@ -43,6 +43,7 @@ export const CardBrowser: React.FC<Props> = ({
 }) => {
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [selectedCardId, setSelectedCardId] = useState<number | null>(null);
+  const [confirmAction, setConfirmAction] = useState<"reset" | "delete" | null>(null);
   const browserFileRef = React.useRef<HTMLInputElement | null>(null);
   const editingFieldIdxRef = React.useRef<number>(0);
 
@@ -118,9 +119,8 @@ export const CardBrowser: React.FC<Props> = ({
     onUpdateCard(card);
   };
 
-  const handleResetCard = () => {
+  const executeResetCard = () => {
     if (!selectedCardItem) return;
-    if (!window.confirm("Reset card learning progress back to New?")) return;
     const card = {
       ...selectedCardItem.card,
       type: 0 as const,
@@ -134,14 +134,14 @@ export const CardBrowser: React.FC<Props> = ({
       mod: Math.floor(Date.now() / 1000)
     };
     onUpdateCard(card);
+    setConfirmAction(null);
   };
 
-  const handleDelete = () => {
+  const executeDeleteNote = () => {
     if (!selectedCardItem) return;
-    if (window.confirm("Delete note and all associated cards?")) {
-      onDeleteNote(selectedCardItem.note.id);
-      setSelectedCardId(null);
-    }
+    onDeleteNote(selectedCardItem.note.id);
+    setSelectedCardId(null);
+    setConfirmAction(null);
   };
 
   const model = selectedCardItem ? collection.models[selectedCardItem.note.mid] : null;
@@ -355,14 +355,14 @@ export const CardBrowser: React.FC<Props> = ({
                   </button>
                   <button
                     type="button"
-                    onClick={handleResetCard}
+                    onClick={() => setConfirmAction("reset")}
                     style={{ padding: "4px 10px", fontSize: 12.5 }}
                   >
                     Reset
                   </button>
                   <button
                     type="button"
-                    onClick={handleDelete}
+                    onClick={() => setConfirmAction("delete")}
                     style={{ padding: "4px 8px", fontSize: 12.5, color: "var(--color-again)" }}
                     title="Delete Note"
                   >
@@ -416,6 +416,58 @@ export const CardBrowser: React.FC<Props> = ({
                 <span>Ease: {Math.round(selectedCardItem.card.factor / 10)}%</span>
                 <span>Reviews: {selectedCardItem.card.reps}</span>
                 <span>Lapses: {selectedCardItem.card.lapses}</span>
+              </div>
+            </div>
+          )}
+
+          {confirmAction && selectedCardItem && (
+            <div className="modal-backdrop" onClick={() => setConfirmAction(null)}>
+              <div
+                className="modal-content"
+                style={{ maxWidth: 380 }}
+                onClick={e => e.stopPropagation()}
+              >
+                <div className="modal-header">
+                  <h3 style={{ fontSize: 16, fontWeight: 600 }}>
+                    {confirmAction === "reset" ? "Reset Card Progress" : "Delete Note"}
+                  </h3>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmAction(null)}
+                    style={{ border: "none", padding: 4, background: "transparent" }}
+                  >
+                    <X size={18} />
+                  </button>
+                </div>
+
+                <div style={{ fontSize: 14, color: "var(--text-secondary)", lineHeight: 1.5 }}>
+                  {confirmAction === "reset"
+                    ? "Reset this card's learning progress and interval back to New?"
+                    : "Delete this note and all of its associated cards?"}
+                </div>
+
+                <div className="modal-footer">
+                  <button type="button" onClick={() => setConfirmAction(null)}>
+                    Cancel
+                  </button>
+                  {confirmAction === "reset" ? (
+                    <button type="button" className="primary" onClick={executeResetCard}>
+                      Reset
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={executeDeleteNote}
+                      style={{
+                        background: "var(--color-again)",
+                        borderColor: "var(--color-again)",
+                        color: "#ffffff"
+                      }}
+                    >
+                      Delete
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           )}

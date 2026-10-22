@@ -24,6 +24,7 @@ export const AddNote: React.FC<Props> = ({
   const [fieldValues, setFieldValues] = useState<Record<number, string>>({});
   const [tagsStr, setTagsStr] = useState<string>("");
   const [addedStatus, setAddedStatus] = useState<boolean>(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const activeFieldIdxRef = useRef<number>(0);
 
@@ -31,6 +32,7 @@ export const AddNote: React.FC<Props> = ({
   const fieldRefs = useRef<Record<number, HTMLTextAreaElement | null>>({});
 
   const handleFieldChange = (idx: number, val: string) => {
+    if (idx === 0 && errorMsg) setErrorMsg(null);
     setFieldValues(prev => ({ ...prev, [idx]: val }));
   };
 
@@ -102,9 +104,11 @@ export const AddNote: React.FC<Props> = ({
     const fields = activeModel.flds.map((_, idx) => fieldValues[idx] || "");
     const firstField = fields[0] || "";
     if (!firstField.trim()) {
-      alert("First field cannot be empty.");
+      setErrorMsg(`${activeModel.flds[0]?.name || "First field"} is required.`);
+      fieldRefs.current[0]?.focus();
       return;
     }
+    setErrorMsg(null);
 
     const now = Math.floor(Date.now() / 1000);
     const noteId = Date.now();
@@ -296,6 +300,7 @@ export const AddNote: React.FC<Props> = ({
       </div>
 
       <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 12, marginTop: 8 }}>
+        {errorMsg && <span style={{ fontSize: 13, color: "var(--color-again)" }}>{errorMsg}</span>}
         {addedStatus && <span style={{ fontSize: 13, color: "var(--color-due)" }}>Added</span>}
         <button className="primary" onClick={handleAdd} style={{ padding: "8px 24px" }}>
           <Plus size={16} />

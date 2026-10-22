@@ -1,7 +1,7 @@
-import React, { useState } from "react";
-import { Collection, Deck } from "../core/types";
+import React, { useState, useEffect, useRef } from "react";
+import { Collection } from "../core/types";
 import { getDeckCounts } from "../core/scheduler";
-import { Settings, FolderPlus, Download, Upload } from "lucide-react";
+import { Settings, FolderPlus, Download, Upload, X } from "lucide-react";
 
 interface Props {
   collection: Collection;
@@ -15,6 +15,12 @@ interface Props {
   onExportCollectionApkg: () => void;
   onImportClick: () => void;
 }
+
+type DeckDialogState =
+  | { mode: "create"; name: string }
+  | { mode: "rename"; did: number; currentName: string; name: string }
+  | { mode: "delete"; did: number; name: string }
+  | null;
 
 export const DeckList: React.FC<Props> = ({
   collection,
@@ -33,31 +39,41 @@ export const DeckList: React.FC<Props> = ({
     top: number;
     right: number;
   } | null>(null);
+  const [dialog, setDialog] = useState<DeckDialogState>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (dialog && (dialog.mode === "create" || dialog.mode === "rename")) {
+      window.setTimeout(() => {
+        inputRef.current?.focus();
+        inputRef.current?.select();
+      }, 10);
+    }
+  }, [dialog?.mode]);
 
   const decks = Object.values(collection.decks).sort((a, b) =>
     a.name.localeCompare(b.name)
   );
 
-  const handleCreatePrompt = () => {
-    const name = window.prompt("Deck name:");
-    if (name && name.trim()) {
-      onCreateDeck(name.trim());
-    }
-  };
+  const handleDialogSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!dialog) return;
 
-  const handleRenamePrompt = (did: number, currentName: string) => {
-    const name = window.prompt("New deck name:", currentName);
-    if (name && name.trim() && name !== currentName) {
-      onRenameDeck(did, name.trim());
+    if (dialog.mode === "create") {
+      const trimmed = dialog.name.trim();
+      if (!trimmed) return;
+      onCreateDeck(trimmed);
+      setDialog(null);
+    } else if (dialog.mode === "rename") {
+      const trimmed = dialog.name.trim();
+      if (trimmed && trimmed !== dialog.currentName) {
+        onRenameDeck(dialog.did, trimmed);
+      }
+      setDialog(null);
+    } else if (dialog.mode === "delete") {
+      onDeleteDeck(dialog.did);
+      setDialog(null);
     }
-    setActiveMenu(null);
-  };
-
-  const handleDeleteConfirm = (did: number, name: string) => {
-    if (window.confirm(`Delete deck '${name}' and its cards?`)) {
-      onDeleteDeck(did);
-    }
-    setActiveMenu(null);
   };
 
   const activeDeck = activeMenu ? collection.decks[activeMenu.did] : null;
@@ -167,7 +183,15 @@ export const DeckList: React.FC<Props> = ({
             </button>
             <button
               style={{ border: "none", justifyContent: "flex-start", borderRadius: 0 }}
-              onClick={() => handleRenamePrompt(activeDeck.id, activeDeck.name)}
+              onClick={() => {
+                setDialog({
+                  mode: "rename",
+                  did: activeDeck.id,
+                  currentName: activeDeck.name,
+                  name: activeDeck.name
+                });
+                setActiveMenu(null);
+              }}
             >
               Rename
             </button>
@@ -199,7 +223,14 @@ export const DeckList: React.FC<Props> = ({
                   borderRadius: 0,
                   color: "var(--color-again)"
                 }}
-                onClick={() => handleDeleteConfirm(activeDeck.id, activeDeck.name)}
+                onClick={() => {
+                  setDialog({
+                    mode: "delete",
+                    did: activeDeck.id,
+                    name: activeDeck.name
+                  });
+                  setActiveMenu(null);
+                }}
               >
                 Delete
               </button>
@@ -210,7 +241,7 @@ export const DeckList: React.FC<Props> = ({
 
       {/* Bottom action buttons */}
       <div style={{ display: "flex", justifyContent: "center", gap: 10, marginTop: 16, flexWrap: "wrap", width: "100%", boxSizing: "border-box" }}>
-        <button onClick={handleCreatePrompt}>
+        <button onClick={() => setDialog({ mode: "create", name: "" })}>
           <FolderPlus size={16} />
           <span>Create Deck</span>
         </button>
@@ -223,6 +254,79 @@ export const DeckList: React.FC<Props> = ({
           <span>Export Collection (.apkg)</span>
         </button>
       </div>
+
+      {/* Native In-App Modal for Create / Rename / Delete Deck */}
+      {dialog && (
+        <div className="modal-backdrop" onClick={() => setDialog(null)}>
+          <form
+            className="modal-content"
+            style={{ maxWidth: 400 }}
+            onClick={e => e.stopPropagation()}
+            onSubmit={handleDialogSubmit}
+          >
+            <div className="modal-header">
+              <h3 style={{ fontSize: 16, fontWeight: 600 }}>
+                {dialog.mode === "create"
+                  ? "Create Deck"
+                  : dialog.mode === "rename"
+                  ? "Rename Deck"
+                  : "Delete Deck"}
+              </h3>
+              <button
+                type="button"
+                onClick={() => setDialog(null)}
+                style={{ border: "none", padding: 4, background: "transparent" }}
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {dialog.mode === "delete" ? (
+              <div style={{ fontSize: 14, color: "var(--text-secondary)", lineHeight: 1.5 }}>
+                Delete <strong style={{ color: "var(--text-primary)" }}>{dialog.name}</strong> and all of its cards?
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <label style={{ fontSize: 12.5, color: "var(--text-secondary)", fontWeight: 500 }}>
+                  Deck Name
+                </label>
+                <input
+                  ref={inputRef}
+                  type="text"
+                  placeholder="e.g. Biology or Languages::Spanish"
+                  value={dialog.name}
+                  onChange={e =>
+                    setDialog(prev => (prev && prev.mode !== "delete" ? { ...prev, name: e.target.value } : prev))
+                  }
+                  style={{ width: "100%" }}
+                />
+              </div>
+            )}
+
+            <div className="modal-footer">
+              <button type="button" onClick={() => setDialog(null)}>
+                Cancel
+              </button>
+              {dialog.mode === "delete" ? (
+                <button
+                  type="submit"
+                  style={{
+                    background: "var(--color-again)",
+                    borderColor: "var(--color-again)",
+                    color: "#ffffff"
+                  }}
+                >
+                  Delete
+                </button>
+              ) : (
+                <button type="submit" className="primary" disabled={!dialog.name.trim()}>
+                  {dialog.mode === "create" ? "Create" : "Save"}
+                </button>
+              )}
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   );
 };
