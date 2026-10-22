@@ -1,5 +1,12 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Show, SignIn, SignInButton, SignUpButton, useAuth } from "@clerk/react";
+import {
+  AuthenticateWithRedirectCallback,
+  Show,
+  SignInButton,
+  SignUpButton,
+  useAuth,
+  useClerk
+} from "@clerk/react";
 import { Collection, Deck, Note, Card, DeckConfig, RevlogEntry } from "./core/types";
 import { SyncClient, SyncStatus } from "./core/sync-client";
 import { exportDeckCsv, exportApkg } from "./core/import-export";
@@ -23,6 +30,7 @@ import { Sun, Moon } from "lucide-react";
 
 export const App: React.FC = () => {
   const { isLoaded, isSignedIn, userId, getToken } = useAuth();
+  const clerk = useClerk();
   const [collection, setCollection] = useState<Collection | null>(null);
   const [currentView, setCurrentView] = useState<NavView>("decks");
   const [selectedDeckId, setSelectedDeckId] = useState<number | null>(null);
@@ -81,6 +89,40 @@ export const App: React.FC = () => {
       }
     };
   }, [isLoaded, isSignedIn, userId]);
+
+  // Automatically finalize any pending OAuth / SSO handshake on first return
+  useEffect(() => {
+    if (!isLoaded || isSignedIn) return;
+    const client = (clerk as any)?.client;
+    const signInAttempt = client?.signIn;
+    const signUpAttempt = client?.signUp;
+
+    if (signInAttempt?.status === "complete" && signInAttempt?.createdSessionId) {
+      clerk.setActive({ session: signInAttempt.createdSessionId }).catch(() => {});
+    } else if (signUpAttempt?.status === "complete" && signUpAttempt?.createdSessionId) {
+      clerk.setActive({ session: signUpAttempt.createdSessionId }).catch(() => {});
+    }
+  }, [isLoaded, isSignedIn, clerk]);
+
+  const isOAuthCallbackRoute =
+    typeof window !== "undefined" &&
+    (window.location.pathname.startsWith("/sso-callback") ||
+      window.location.hash.includes("sso-callback") ||
+      window.location.search.includes("__clerk_status") ||
+      window.location.search.includes("__clerk_created_session"));
+
+  if (isOAuthCallbackRoute && !isSignedIn) {
+    return (
+      <div style={{ padding: 40, textAlign: "center" }}>
+        <AuthenticateWithRedirectCallback
+          signInForceRedirectUrl="/"
+          signUpForceRedirectUrl="/"
+          continueSignUpUrl="/"
+        />
+        Signing you in...
+      </div>
+    );
+  }
 
   if (!isLoaded) {
     return <div style={{ padding: 40, textAlign: "center" }}>Loading...</div>;

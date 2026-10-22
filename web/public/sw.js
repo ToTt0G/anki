@@ -1,5 +1,5 @@
-// Anki Web Service Worker (PWA & Web Push)
-const CACHE_NAME = "klanki-web-v14";
+// klanki Service Worker (PWA & Web Push)
+const CACHE_NAME = "klanki-web-v15";
 const PRECACHE_URLS = [
   "/",
   "/index.html",
@@ -37,16 +37,26 @@ self.addEventListener("activate", (event) => {
   );
 });
 
-// 3. Fetch handler: Cache-first for static assets, Network-only for /api/ and WebSockets
+// 3. Fetch handler: Same-origin static assets only; never intercept Clerk or API traffic
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
 
-  // Never cache API or WebSocket requests
-  if (url.pathname.startsWith("/api/") || event.request.headers.get("Upgrade") === "websocket") {
+  // Never intercept cross-origin requests (such as clerk.klanki.ezryder.us or OAuth providers)
+  if (url.origin !== self.location.origin) {
     return;
   }
 
-  // Handle navigation requests (SPA HTML)
+  // Never cache API, WebSocket, or OAuth callback requests
+  if (
+    url.pathname.startsWith("/api/") ||
+    url.pathname.startsWith("/sso-callback") ||
+    url.search.includes("__clerk") ||
+    event.request.headers.get("Upgrade") === "websocket"
+  ) {
+    return;
+  }
+
+  // Handle navigation requests (SPA HTML) — network first
   if (event.request.mode === "navigate") {
     event.respondWith(
       fetch(event.request).catch(() => caches.match("/index.html") || caches.match("/"))
@@ -54,7 +64,7 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // Static assets: Stale-While-Revalidate
+  // Same-origin static assets: Stale-While-Revalidate
   event.respondWith(
     caches.match(event.request).then((cachedResponse) => {
       const fetchPromise = fetch(event.request)
@@ -120,7 +130,6 @@ self.addEventListener("notificationclick", (event) => {
     self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clientList) => {
       for (const client of clientList) {
         if ("focus" in client) {
-          // If already on page, focus and optionally navigate
           if (client.url.includes(self.location.origin)) {
             client.focus();
             if (targetUrl !== "/") {
