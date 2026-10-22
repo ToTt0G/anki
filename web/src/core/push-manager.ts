@@ -125,7 +125,8 @@ export async function syncPushSubscriptionForUser(
             headers,
             body: JSON.stringify({
               endpoint: existingSub.endpoint,
-              keys: { p256dh, auth }
+              keys: { p256dh, auth },
+              tzOffsetMinutes: new Date().getTimezoneOffset()
             })
           });
           if (res.ok) {
@@ -205,7 +206,8 @@ export async function subscribeToPush(
       headers,
       body: JSON.stringify({
         endpoint: subscription.endpoint,
-        keys: { p256dh, auth }
+        keys: { p256dh, auth },
+        tzOffsetMinutes: new Date().getTimezoneOffset()
       })
     });
 
@@ -290,5 +292,62 @@ export async function sendNotifyDue(
     return { success: true, data };
   } catch (err: any) {
     return { success: false, error: err.message };
+  }
+}
+
+export interface ClientPushPreferences {
+  dailyMode: "adaptive" | "fixed";
+  dailyTime: string;
+  tzOffsetMinutes: number;
+  learningAlerts: boolean;
+}
+
+export interface PushStatusResponse {
+  subscriptions: number;
+  vapidConfigured: boolean;
+  preferences?: ClientPushPreferences;
+  nextAlarmAt?: number | null;
+  dueSummary?: {
+    learnDueCount: number;
+    reviewDueCount: number;
+    newCount: number;
+    topDeckName: string;
+    studiedToday: boolean;
+    streakDays: number;
+    adaptiveHour: number;
+  };
+}
+
+export async function getPushStatus(
+  getToken?: TokenGetter
+): Promise<PushStatusResponse | null> {
+  try {
+    const headers = await buildAuthHeaders(getToken);
+    const res = await fetch("/api/push/status", { headers });
+    if (!res.ok) return null;
+    return (await res.json()) as PushStatusResponse;
+  } catch {
+    return null;
+  }
+}
+
+export async function updatePushPreferences(
+  prefs: Partial<ClientPushPreferences>,
+  getToken?: TokenGetter
+): Promise<PushStatusResponse | null> {
+  try {
+    const headers = await buildAuthHeaders(getToken);
+    const res = await fetch("/api/push/preferences", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        ...prefs,
+        tzOffsetMinutes: new Date().getTimezoneOffset()
+      })
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as PushStatusResponse;
+  } catch {
+    return null;
   }
 }

@@ -24,7 +24,11 @@ import {
   subscribeToPush,
   unsubscribeFromPush,
   sendTestPush,
-  sendNotifyDue
+  sendNotifyDue,
+  getPushStatus,
+  updatePushPreferences,
+  ClientPushPreferences,
+  PushStatusResponse
 } from "../core/push-manager";
 import {
   isStandalone,
@@ -56,6 +60,14 @@ export const SyncModal: React.FC<Props> = ({
   const [pushFeedback, setPushFeedback] = useState<{ type: "success" | "error" | "info"; msg: string } | null>(null);
   const [standalone, setStandalone] = useState(false);
   const [canPrompt, setCanPrompt] = useState(false);
+  const [pushStatus, setPushStatus] = useState<PushStatusResponse | null>(null);
+
+  const refreshServerPushStatus = async () => {
+    const status = await getPushStatus(getToken);
+    if (status) {
+      setPushStatus(status);
+    }
+  };
 
   useEffect(() => {
     const supported = isPushSupported();
@@ -69,8 +81,19 @@ export const SyncModal: React.FC<Props> = ({
       getCurrentPushSubscription(userId || undefined).then(sub => {
         setHasSubscription(!!sub);
       });
+      refreshServerPushStatus();
     }
   }, [userId]);
+
+  const handlePrefChange = async (patch: Partial<ClientPushPreferences>) => {
+    const res = await updatePushPreferences(patch, getToken);
+    if (res) {
+      setPushStatus(prev => ({
+        ...(prev || { subscriptions: 1, vapidConfigured: true }),
+        ...res
+      }));
+    }
+  };
 
   const handleThemeChange = (newTheme: ThemeMode) => {
     setThemeMode(newTheme);
@@ -95,6 +118,7 @@ export const SyncModal: React.FC<Props> = ({
           setHasSubscription(true);
           setPermission("granted");
           setPushFeedback({ type: "success", msg: "Push notifications enabled! You'll receive due review reminders." });
+          await refreshServerPushStatus();
         } else {
           setPushFeedback({ type: "error", msg: res.error || "Failed to enable notifications." });
           setPermission(getNotificationPermission());
@@ -370,25 +394,71 @@ export const SyncModal: React.FC<Props> = ({
                 </div>
               )}
 
-              {/* Test Notification actions */}
+              {/* Test Notification & Schedule Controls */}
               {hasSubscription && (
-                <div style={{ display: "flex", gap: 8, paddingTop: 4, flexWrap: "wrap" }}>
-                  <button
-                    onClick={handleSendTest}
-                    disabled={isPushLoading}
-                    style={{ fontSize: 12, padding: "4px 10px" }}
-                  >
-                    <Send size={12} />
-                    <span>Send Test Notification</span>
-                  </button>
-                  <button
-                    onClick={handleNotifyDue}
-                    disabled={isPushLoading}
-                    style={{ fontSize: 12, padding: "4px 10px" }}
-                  >
-                    <Bell size={12} />
-                    <span>Simulate Due Reminder</span>
-                  </button>
+                <div style={{ display: "flex", flexDirection: "column", gap: 10, paddingTop: 6, borderTop: "1px solid var(--border-color)" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 12.5, color: "var(--text-secondary)" }}>Reminder Schedule</span>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <select
+                        value={pushStatus?.preferences?.dailyMode || "adaptive"}
+                        onChange={e =>
+                          handlePrefChange({
+                            dailyMode: e.target.value as "adaptive" | "fixed"
+                          })
+                        }
+                        style={{ padding: "4px 8px", fontSize: 12.5 }}
+                      >
+                        <option value="adaptive">
+                          Smart ({String(pushStatus?.dueSummary?.adaptiveHour ?? 9).padStart(2, "0")}:00 habit)
+                        </option>
+                        <option value="fixed">Custom Time</option>
+                      </select>
+
+                      {pushStatus?.preferences?.dailyMode === "fixed" && (
+                        <input
+                          type="time"
+                          value={pushStatus?.preferences?.dailyTime || "09:00"}
+                          onChange={e => handlePrefChange({ dailyTime: e.target.value })}
+                          style={{ padding: "3px 8px", fontSize: 12.5 }}
+                        />
+                      )}
+                    </div>
+                  </div>
+
+                  <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12.5, color: "var(--text-secondary)", cursor: "pointer" }}>
+                    <span>Notify when short-term learning steps finish</span>
+                    <input
+                      type="checkbox"
+                      checked={pushStatus?.preferences?.learningAlerts !== false}
+                      onChange={e => handlePrefChange({ learningAlerts: e.target.checked })}
+                    />
+                  </label>
+
+                  {pushStatus?.nextAlarmAt && (
+                    <div style={{ fontSize: 11.5, color: "var(--text-muted)" }}>
+                      Next check scheduled: {new Date(pushStatus.nextAlarmAt).toLocaleString()}
+                    </div>
+                  )}
+
+                  <div style={{ display: "flex", gap: 8, paddingTop: 2, flexWrap: "wrap" }}>
+                    <button
+                      onClick={handleSendTest}
+                      disabled={isPushLoading}
+                      style={{ fontSize: 12, padding: "4px 10px" }}
+                    >
+                      <Send size={12} />
+                      <span>Send Test Notification</span>
+                    </button>
+                    <button
+                      onClick={handleNotifyDue}
+                      disabled={isPushLoading}
+                      style={{ fontSize: 12, padding: "4px 10px" }}
+                    >
+                      <Bell size={12} />
+                      <span>Simulate Due Reminder</span>
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
