@@ -1,5 +1,5 @@
 // Anki Web Service Worker (PWA & Web Push)
-const CACHE_NAME = "klanki-web-v13";
+const CACHE_NAME = "klanki-web-v14";
 const PRECACHE_URLS = [
   "/",
   "/index.html",

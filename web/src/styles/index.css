@@ -927,15 +927,15 @@ input:focus, select:focus, textarea:focus {
 .landing-hero-copy {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  max-width: 640px;
+  gap: 14px;
+  max-width: 680px;
 }
 
 .landing-title {
-  font-size: clamp(28px, 4.2vw, 42px);
-  line-height: 1.12;
+  font-size: clamp(35px, 6.2vw, 48px);
+  line-height: 1.08;
   letter-spacing: -0.03em;
-  font-weight: 750;
+  font-weight: 800;
   color: var(--text-primary);
 }
 
@@ -944,14 +944,14 @@ input:focus, select:focus, textarea:focus {
 }
 
 .landing-subtitle {
-  font-size: 15.5px;
+  font-size: clamp(16.5px, 2.2vw, 18px);
   line-height: 1.55;
   color: var(--text-secondary);
   max-width: 56ch;
 }
 
 .landing-subtitle code {
-  font-size: 13.5px;
+  font-size: 14.5px;
   padding: 1px 6px;
   border-radius: 4px;
   background: var(--bg-secondary);
@@ -968,14 +968,14 @@ input:focus, select:focus, textarea:focus {
 }
 
 .landing-btn-primary {
-  padding: 9px 18px;
-  font-size: 14.5px;
+  padding: 11px 20px;
+  font-size: 15.5px;
   font-weight: 600;
 }
 
 .landing-btn-secondary {
-  padding: 9px 16px;
-  font-size: 14.5px;
+  padding: 11px 18px;
+  font-size: 15.5px;
   font-weight: 500;
 }
 
@@ -1433,7 +1433,7 @@ input:focus, select:focus, textarea:focus {
 }
 
 .landing-card-front {
-  font-size: 17px;
+  font-size: 18.5px;
   font-weight: 650;
   line-height: 1.38;
   color: var(--text-primary);
@@ -1444,7 +1444,7 @@ input:focus, select:focus, textarea:focus {
 }
 
 .landing-card-back {
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1.5;
   color: var(--text-secondary);
 }
@@ -1502,7 +1502,7 @@ input:focus, select:focus, textarea:focus {
 }
 
 .landing-spec-item {
-  padding: 13px 14px;
+  padding: 15px 16px;
   border-radius: 9px;
   border: 1px solid var(--border-color);
   background: var(--bg-primary);
@@ -1514,20 +1514,20 @@ input:focus, select:focus, textarea:focus {
 .landing-spec-head {
   display: flex;
   align-items: center;
-  gap: 7px;
-  font-size: 13.5px;
-  font-weight: 600;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 650;
   color: var(--text-primary);
 }
 
 .landing-spec-item p {
-  font-size: 12.5px;
-  line-height: 1.48;
+  font-size: 14px;
+  line-height: 1.5;
   color: var(--text-secondary);
 }
 
 .landing-spec-item code {
-  font-size: 11.5px;
+  font-size: 13px;
   padding: 1px 4px;
   border-radius: 4px;
   background: var(--bg-secondary);
