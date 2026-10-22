@@ -913,7 +913,7 @@ input:focus, select:focus, textarea:focus {
 .landing-shell {
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: 28px;
   width: 100%;
   box-sizing: border-box;
 }
@@ -921,28 +921,14 @@ input:focus, select:focus, textarea:focus {
 .landing-hero {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 16px;
 }
 
 .landing-hero-copy {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  max-width: 680px;
-}
-
-.landing-status-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  align-self: flex-start;
-  padding: 4px 11px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-secondary);
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-color);
+  max-width: 640px;
 }
 
 .landing-title {
@@ -961,7 +947,7 @@ input:focus, select:focus, textarea:focus {
   font-size: 15.5px;
   line-height: 1.55;
   color: var(--text-secondary);
-  max-width: 60ch;
+  max-width: 56ch;
 }
 
 .landing-subtitle code {
@@ -993,110 +979,159 @@ input:focus, select:focus, textarea:focus {
   font-weight: 500;
 }
 
-.landing-btn-ghost {
-  padding: 9px 12px;
-  font-size: 13px;
-  color: var(--text-secondary);
-  background: transparent;
-  border-color: transparent;
-}
-
-.landing-inline-auth {
-  display: flex;
-  justify-content: flex-start;
-  padding-top: 6px;
-}
-
-/* Interactive Dual-Device Stage */
+/* Interactive Desktop Monitor + Mobile Phone Stage */
 .landing-stage {
   border: 1px solid var(--border-color);
-  border-radius: 12px;
+  border-radius: 14px;
   background: var(--bg-secondary);
-  padding: 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
+  padding: 28px 24px;
 }
 
-.landing-stage-topbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  flex-wrap: wrap;
-  padding: 0 2px;
-  font-size: 12.5px;
-  color: var(--text-secondary);
-}
-
-.landing-stage-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  font-weight: 500;
-}
-
-.landing-stage-meta {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  font-variant-numeric: tabular-nums;
-}
-
-.landing-reset-btn {
-  padding: 2px 8px;
-  font-size: 11.5px;
-  border-radius: 5px;
-}
-
-.landing-devices-grid {
-  display: grid;
-  grid-template-columns: 1.15fr auto 0.95fr;
-  gap: 12px;
-  align-items: stretch;
-}
-
-@media (max-width: 780px) {
-  .landing-devices-grid {
-    grid-template-columns: 1fr;
+@media (max-width: 640px) {
+  .landing-stage {
+    padding: 18px 14px;
   }
 }
 
-.landing-device-card {
-  background: var(--bg-primary);
-  border: 1px solid var(--border-color);
-  border-radius: 10px;
-  padding: 14px;
+.landing-hardware-showcase {
+  display: grid;
+  grid-template-columns: 1fr 248px;
+  gap: 28px;
+  align-items: center;
+}
+
+@media (max-width: 780px) {
+  .landing-hardware-showcase {
+    grid-template-columns: 1fr;
+    justify-items: center;
+    gap: 24px;
+  }
+}
+
+/* Desktop Monitor Hardware */
+.landing-monitor-wrap {
+  width: 100%;
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
-  gap: 12px;
+  align-items: center;
   min-width: 0;
 }
 
-.landing-device-chrome {
+.landing-monitor-bezel {
+  width: 100%;
+  padding: 10px;
+  border-radius: 14px;
+  background: var(--text-primary);
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.12);
+}
+
+.landing-monitor-screen {
+  background: var(--bg-primary);
+  border-radius: 8px;
+  padding: 16px;
+  min-height: 310px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.landing-monitor-neck {
+  width: 56px;
+  height: 26px;
+  background: var(--border-color);
+  border-left: 2px solid var(--text-muted);
+  border-right: 2px solid var(--text-muted);
+}
+
+.landing-monitor-base {
+  width: 148px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--text-muted);
+}
+
+/* Mobile Phone Hardware */
+.landing-phone-wrap {
+  width: 248px;
+  max-width: 100%;
+  display: flex;
+  justify-content: center;
+}
+
+.landing-phone-bezel {
+  width: 100%;
+  padding: 10px 9px 12px;
+  border-radius: 30px;
+  background: var(--text-primary);
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.14);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.landing-phone-notch {
+  width: 68px;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.35);
+  margin-top: 2px;
+}
+
+.landing-phone-screen {
+  width: 100%;
+  min-height: 340px;
+  background: var(--bg-primary);
+  border-radius: 20px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.landing-phone-homebar {
+  width: 76px;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.45);
+  margin-top: 2px;
+}
+
+.landing-phone-toast {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.landing-screen-topbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding-bottom: 10px;
+  padding-bottom: 8px;
   border-bottom: 1px solid var(--border-light);
-  font-size: 12.5px;
 }
 
-.landing-device-title {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-weight: 600;
-  color: var(--text-secondary);
+.landing-screen-brand {
+  font-weight: 700;
+  font-size: 13.5px;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
 }
 
 .landing-counts-pill {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
-  font-size: 12.5px;
+  gap: 8px;
+  font-size: 12px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   padding: 2px 8px;
@@ -1109,13 +1144,14 @@ input:focus, select:focus, textarea:focus {
   display: flex;
   flex-direction: column;
   justify-content: center;
-  padding: 20px 16px;
+  align-items: center;
+  text-align: center;
+  padding: 20px 18px;
   border-radius: 8px;
-  border: 1px dashed var(--border-color);
+  border: 1px solid var(--border-color);
   background: var(--bg-primary);
   cursor: pointer;
   user-select: none;
-  min-height: 175px;
   transition: border-color 0.15s ease;
 }
 
@@ -1123,11 +1159,8 @@ input:focus, select:focus, textarea:focus {
   border-color: var(--color-new);
 }
 
-.landing-card-tag {
-  font-size: 11.5px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  color: var(--color-new);
-  margin-bottom: 8px;
+.landing-flashcard-phone {
+  padding: 14px 10px;
 }
 
 .landing-card-front {
@@ -1137,203 +1170,47 @@ input:focus, select:focus, textarea:focus {
   color: var(--text-primary);
 }
 
+.landing-card-front-phone {
+  font-size: 14px;
+}
+
 .landing-card-back {
   font-size: 14px;
-  line-height: 1.55;
+  line-height: 1.5;
   color: var(--text-secondary);
 }
 
-.landing-card-prompt {
-  margin-top: 18px;
+.landing-card-back-phone {
   font-size: 12.5px;
-  color: var(--text-muted);
+  line-height: 1.4;
 }
 
 .landing-device-footer {
-  padding-top: 4px;
+  padding-top: 2px;
 }
 
 .landing-show-btn {
   width: 100%;
-  padding: 11px;
-  font-size: 14px;
-  font-weight: 600;
-}
-
-/* Center WebSocket Bridge */
-.landing-sync-bridge {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  padding: 0 2px;
-}
-
-@media (max-width: 780px) {
-  .landing-sync-bridge {
-    flex-direction: row;
-    padding: 2px 0;
-  }
-}
-
-.landing-bridge-line {
-  width: 1px;
-  flex: 1;
-  background: var(--border-color);
-  transition: background 0.2s ease;
-}
-
-@media (max-width: 780px) {
-  .landing-bridge-line {
-    height: 1px;
-    width: auto;
-  }
-}
-
-.landing-sync-bridge.pulsing .landing-bridge-line {
-  background: var(--color-new);
-}
-
-.landing-bridge-node {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-  padding: 8px 10px;
-  border-radius: 8px;
-  background: var(--bg-primary);
-  border: 1px solid var(--border-color);
-  font-size: 11px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  color: var(--text-secondary);
-  white-space: nowrap;
-}
-
-.landing-sync-bridge.pulsing .landing-bridge-node {
-  border-color: var(--color-new);
-  color: var(--color-new);
-}
-
-.landing-bridge-latency {
-  font-size: 10.5px;
-  color: var(--color-due);
-  font-weight: 600;
-}
-
-/* Phone Mirror + Push + Curve */
-.landing-phone-push {
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-  padding: 9px 11px;
-  border-radius: 8px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-color);
-}
-
-.landing-phone-push-icon {
-  width: 24px;
-  height: 24px;
-  border-radius: 6px;
-  background: rgba(2, 132, 199, 0.12);
-  color: var(--color-new);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  margin-top: 1px;
-}
-
-.landing-phone-push-body {
-  flex: 1;
-  min-width: 0;
-}
-
-.landing-phone-push-title {
-  display: flex;
-  justify-content: space-between;
-  font-size: 11.5px;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.landing-phone-push-title span:last-child {
-  font-weight: 400;
-  color: var(--text-muted);
-}
-
-.landing-phone-push-text {
-  font-size: 12px;
-  color: var(--text-secondary);
-  line-height: 1.35;
-  margin-top: 2px;
-}
-
-.landing-phone-mirror {
-  padding: 11px 12px;
-  border-radius: 8px;
-  border: 1px solid var(--border-color);
-  background: var(--bg-primary);
-  cursor: pointer;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.landing-phone-mirror-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px;
-  font-size: 11.5px;
-  color: var(--text-secondary);
-}
-
-.landing-mirror-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  color: var(--color-due);
-  font-weight: 600;
-}
-
-.landing-phone-mirror-q {
+  padding: 10px;
   font-size: 13.5px;
   font-weight: 600;
-  color: var(--text-primary);
 }
 
-.landing-phone-mirror-a {
+.landing-show-btn.compact {
+  padding: 8px;
   font-size: 12.5px;
-  color: var(--text-secondary);
-  padding-top: 6px;
-  border-top: 1px dashed var(--border-color);
 }
 
-.landing-curve-box {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 8px 10px;
-  border-radius: 8px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-color);
+.landing-rating-compact .btn-rating {
+  padding: 6px 3px;
 }
 
-.landing-curve-header {
-  display: flex;
-  justify-content: space-between;
+.landing-rating-compact .btn-rating span:first-child {
   font-size: 11.5px;
-  color: var(--text-secondary);
-  font-weight: 500;
-  font-variant-numeric: tabular-nums;
 }
 
-.landing-curve-svg {
-  width: 100%;
-  height: 62px;
-  display: block;
+.landing-rating-compact .btn-rating span:last-child {
+  font-size: 10px;
 }
 
 /* 4-Pillar Spec Strip */
