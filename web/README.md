@@ -1,6 +1,6 @@
-# Anki Web Port
+# klanki
 
-A full-featured, zero-account, real-time syncing web port of Anki built for Cloudflare Workers with Durable Objects SQLite and WebSockets.
+A full-featured, zero-account, real-time syncing web port of Anki built for Cloudflare Workers with Durable Objects SQLite and WebSockets, hosted at **https://klanki.ezryder.us**.
 
 ## Architecture
 
