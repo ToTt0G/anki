@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { Collection, Deck } from "../core/types";
 import { getDeckCounts } from "../core/scheduler";
-import { Settings, FolderPlus, Download, MoreVertical } from "lucide-react";
+import { Settings, FolderPlus, Download, Upload } from "lucide-react";
 
 interface Props {
   collection: Collection;
@@ -10,7 +10,9 @@ interface Props {
   onRenameDeck: (did: number, newName: string) => void;
   onDeleteDeck: (did: number) => void;
   onOptionsDeck: (did: number) => void;
-  onExportDeck: (did: number) => void;
+  onExportDeckApkg: (did: number) => void;
+  onExportDeckCsv: (did: number) => void;
+  onExportCollectionApkg: () => void;
   onImportClick: () => void;
 }
 
@@ -21,7 +23,9 @@ export const DeckList: React.FC<Props> = ({
   onRenameDeck,
   onDeleteDeck,
   onOptionsDeck,
-  onExportDeck,
+  onExportDeckApkg,
+  onExportDeckCsv,
+  onExportCollectionApkg,
   onImportClick
 }) => {
   const [activeMenuDid, setActiveMenuDid] = useState<number | null>(null);
@@ -111,7 +115,7 @@ export const DeckList: React.FC<Props> = ({
                         borderRadius: 6,
                         boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
                         zIndex: 20,
-                        minWidth: 120,
+                        minWidth: 140,
                         display: "flex",
                         flexDirection: "column"
                       }}
@@ -135,10 +139,19 @@ export const DeckList: React.FC<Props> = ({
                         style={{ border: "none", justifyContent: "flex-start", borderRadius: 0 }}
                         onClick={() => {
                           setActiveMenuDid(null);
-                          onExportDeck(deck.id);
+                          onExportDeckApkg(deck.id);
                         }}
                       >
-                        Export
+                        Export (.apkg)
+                      </button>
+                      <button
+                        style={{ border: "none", justifyContent: "flex-start", borderRadius: 0 }}
+                        onClick={() => {
+                          setActiveMenuDid(null);
+                          onExportDeckCsv(deck.id);
+                        }}
+                      >
+                        Export (.tsv)
                       </button>
                       {deck.id !== 1 && (
                         <button
@@ -163,14 +176,18 @@ export const DeckList: React.FC<Props> = ({
       </table>
 
       {/* Bottom action buttons */}
-      <div style={{ display: "flex", justifyContent: "center", gap: 12, marginTop: 16 }}>
+      <div style={{ display: "flex", justifyContent: "center", gap: 10, marginTop: 16, flexWrap: "wrap" }}>
         <button onClick={handleCreatePrompt}>
           <FolderPlus size={16} />
           <span>Create Deck</span>
         </button>
         <button onClick={onImportClick}>
+          <Upload size={16} />
+          <span>Import (.apkg)</span>
+        </button>
+        <button onClick={onExportCollectionApkg}>
           <Download size={16} />
-          <span>Import File</span>
+          <span>Export Collection (.apkg)</span>
         </button>
       </div>
     </div>

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { Collection, Deck, Note, Card, DeckConfig, RevlogEntry } from "./core/types";
 import { SyncClient, SyncStatus } from "./core/sync-client";
-import { exportDeckCsv, exportCollectionJson } from "./core/import-export";
+import { exportDeckCsv, exportApkg } from "./core/import-export";
 import { Navbar, NavView } from "./components/Navbar";
 import { DeckList } from "./components/DeckList";
 import { DeckOverview } from "./components/DeckOverview";
@@ -76,7 +76,23 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleExportDeck = (did: number) => {
+  const handleExportDeckApkg = async (did?: number) => {
+    try {
+      const blob = await exportApkg(collection, did);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const deckName = did ? collection.decks[did]?.name?.replace(/::/g, "_") || "deck" : "collection";
+      a.download = `${deckName}.apkg`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error("Export error:", e);
+      alert("Failed to export .apkg");
+    }
+  };
+
+  const handleExportDeckCsv = (did: number) => {
     const csv = exportDeckCsv(collection, did);
     const blob = new Blob([csv], { type: "text/tab-separated-values" });
     const url = URL.createObjectURL(blob);
@@ -203,7 +219,9 @@ export const App: React.FC = () => {
                 onRenameDeck={handleRenameDeck}
                 onDeleteDeck={handleDeleteDeck}
                 onOptionsDeck={did => setOptionsDeckId(did)}
-                onExportDeck={handleExportDeck}
+                onExportDeckApkg={did => handleExportDeckApkg(did)}
+                onExportDeckCsv={handleExportDeckCsv}
+                onExportCollectionApkg={() => handleExportDeckApkg()}
                 onImportClick={() => setIsImportOpen(true)}
               />
             )}

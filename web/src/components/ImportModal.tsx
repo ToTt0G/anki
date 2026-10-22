@@ -100,7 +100,7 @@ export const ImportModal: React.FC<Props> = ({
               Choose or drop .apkg or CSV file
             </div>
             <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
-              Supports Anki .apkg packages and delimited text
+              Imports decks, notes, cards, learning progress & review history
             </div>
           </div>
 
@@ -120,8 +120,8 @@ export const ImportModal: React.FC<Props> = ({
             <div
               style={{
                 display: "flex",
-                alignItems: "center",
-                gap: 10,
+                flexDirection: "column",
+                gap: 4,
                 padding: "10px 14px",
                 background: "rgba(22, 163, 74, 0.1)",
                 borderRadius: 6,
@@ -129,10 +129,13 @@ export const ImportModal: React.FC<Props> = ({
                 fontSize: 13
               }}
             >
-              <CheckCircle size={18} />
-              <span>
-                Imported {result.cardCount} cards ({result.noteCount} notes, {result.deckCount} decks).
-              </span>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 600 }}>
+                <CheckCircle size={18} />
+                <span>Import successful</span>
+              </div>
+              <div style={{ fontSize: 12, opacity: 0.9 }}>
+                {result.cardCount} cards ({result.noteCount} notes, {result.deckCount} decks, {result.revlogCount} reviews)
+              </div>
             </div>
           )}
         </div>

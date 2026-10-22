@@ -102,8 +102,7 @@ export class AnkiSyncServer extends DurableObject {
   }
 
   private saveFullCollection(col: Collection) {
-    this.sql.exec("BEGIN TRANSACTION");
-    try {
+    (this.ctx.storage as any).transactionSync(() => {
       this.sql.exec("INSERT OR REPLACE INTO col_meta (key, val) VALUES ('mod', ?)", String(Date.now()));
 
       for (const deck of Object.values(col.decks)) {
@@ -127,11 +126,7 @@ export class AnkiSyncServer extends DurableObject {
       for (const [name, data] of Object.entries(col.media || {})) {
         this.sql.exec("INSERT OR REPLACE INTO media (name, data) VALUES (?, ?)", name, data);
       }
-      this.sql.exec("COMMIT");
-    } catch (e) {
-      this.sql.exec("ROLLBACK");
-      throw e;
-    }
+    });
   }
 
   private broadcast(msg: ServerMessage, senderWs?: WebSocket) {

@@ -1,12 +1,26 @@
 import JSZip from "jszip";
 import initSqlJs from "sql.js";
-import { Collection, Deck, Note, Card, NoteType, DeckConfig } from "./types";
+import { Collection, Deck, Note, Card, CardType, CardQueue, NoteType, DeckConfig, RevlogEntry } from "./types";
 
 export interface ImportResult {
   deckCount: number;
   noteCount: number;
   cardCount: number;
+  revlogCount: number;
   mediaCount: number;
+}
+
+async function getSql(): Promise<any> {
+  const isBrowser = typeof window !== "undefined";
+  const initSql = (isBrowser && (window as any).initSqlJs) || initSqlJs;
+  
+  if (isBrowser) {
+    return await initSql({
+      locateFile: (file: string) => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.12.0/${file}`
+    });
+  } else {
+    return await initSql();
+  }
 }
 
 export async function importApkg(
@@ -18,17 +32,13 @@ export async function importApkg(
   // 1. Find collection database
   let dbFile = zip.file("collection.anki21") || zip.file("collection.anki2");
   if (!dbFile) {
-    throw new Error("Invalid .apkg: missing collection.anki2 database");
+    throw new Error("Invalid .apkg: missing collection database (collection.anki2)");
   }
 
   const dbBuffer = await dbFile.async("uint8array");
 
   // 2. Initialize SQL.js
-  const SQL = await initSqlJs({
-    // Load wasm from public CDN if not bundled
-    locateFile: file => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.12.0/${file}`
-  });
-
+  const SQL = await getSql();
   const db = new SQL.Database(dbBuffer);
 
   // 3. Extract media map if present
@@ -39,137 +49,153 @@ export async function importApkg(
   if (mediaFile) {
     try {
       const mediaJsonStr = await mediaFile.async("string");
-      const mediaMapping: Record<string, string> = JSON.parse(mediaJsonStr);
-      for (const [archiveKey, originalName] of Object.entries(mediaMapping)) {
-        const itemFile = zip.file(archiveKey);
+      const mediaMap: Record<string, string> = JSON.parse(mediaJsonStr);
+      for (const [idxStr, originalFilename] of Object.entries(mediaMap)) {
+        const itemFile = zip.file(idxStr);
         if (itemFile) {
-          const blob = await itemFile.async("blob");
-          extractedMedia[originalName] = URL.createObjectURL(blob);
+          const itemBase64 = await itemFile.async("base64");
+          // Determine mime type
+          let mime = "application/octet-stream";
+          const lower = originalFilename.toLowerCase();
+          if (lower.endsWith(".png")) mime = "image/png";
+          else if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) mime = "image/jpeg";
+          else if (lower.endsWith(".gif")) mime = "image/gif";
+          else if (lower.endsWith(".svg")) mime = "image/svg+xml";
+          else if (lower.endsWith(".mp3")) mime = "audio/mpeg";
+          else if (lower.endsWith(".ogg")) mime = "audio/ogg";
+          else if (lower.endsWith(".wav")) mime = "audio/wav";
+
+          extractedMedia[originalFilename] = `data:${mime};base64,${itemBase64}`;
           mediaCount++;
         }
       }
     } catch (e) {
-      console.warn("Failed to parse apkg media map:", e);
+      console.warn("Failed to parse media map:", e);
     }
   }
 
-  // 4. Query collection metadata (decks, models, dconf)
+  // 4. Read decks and models from 'col' table
   let deckCount = 0;
   let noteCount = 0;
   let cardCount = 0;
+  let revlogCount = 0;
 
-  const colRes = db.exec("SELECT decks, models, dconf FROM col LIMIT 1");
+  const colRes = db.exec("SELECT id, crt, mod, scm, ver, dty, usn, ls, conf, models, decks, dconf FROM col LIMIT 1");
   if (colRes.length > 0 && colRes[0].values.length > 0) {
-    const [decksJson, modelsJson, dconfJson] = colRes[0].values[0];
-    try {
-      const importedDecks: Record<string, any> = JSON.parse(decksJson as string);
-      for (const [idStr, d] of Object.entries(importedDecks)) {
-        const id = parseInt(idStr, 10);
-        if (id && d.name) {
-          targetCol.decks[id] = {
-            id,
-            name: d.name,
-            desc: d.desc || "",
-            collapsed: !!d.collapsed,
-            conf: d.conf || 1,
-            dyn: d.dyn || 0,
-            mod: d.mod || Math.floor(Date.now() / 1000),
-            usn: 0
-          };
-          deckCount++;
-        }
-      }
-    } catch (e) {}
+    const row = colRes[0].values[0];
+    const modelsJson = row[9] as string;
+    const decksJson = row[10] as string;
+    const dconfJson = row[11] as string;
 
     try {
-      const importedModels: Record<string, any> = JSON.parse(modelsJson as string);
-      for (const [idStr, m] of Object.entries(importedModels)) {
-        const id = parseInt(idStr, 10);
-        if (id && m.name) {
-          targetCol.models[id] = {
-            id,
-            name: m.name,
-            type: m.type || 0,
-            mod: m.mod || Math.floor(Date.now() / 1000),
-            usn: 0,
-            flds: (m.flds || []).map((f: any, idx: number) => ({
-              name: f.name || `Field ${idx + 1}`,
-              ord: f.ord ?? idx,
-              sticky: !!f.sticky,
-              rtl: !!f.rtl,
-              font: f.font || "Arial",
-              size: f.size || 20
-            })),
-            tmpls: (m.tmpls || []).map((t: any, idx: number) => ({
-              name: t.name || `Card ${idx + 1}`,
-              ord: t.ord ?? idx,
-              qfmt: t.qfmt || "",
-              afmt: t.afmt || ""
-            })),
-            css: m.css || ""
-          };
-        }
+      const importedModels: Record<string, NoteType> = JSON.parse(modelsJson);
+      for (const [mid, model] of Object.entries(importedModels)) {
+        targetCol.models[Number(mid)] = model;
       }
-    } catch (e) {}
+    } catch (e) {
+      console.warn("Failed to parse models from col:", e);
+    }
+
+    try {
+      const importedDecks: Record<string, Deck> = JSON.parse(decksJson);
+      for (const [did, deck] of Object.entries(importedDecks)) {
+        targetCol.decks[Number(did)] = deck;
+        deckCount++;
+      }
+    } catch (e) {
+      console.warn("Failed to parse decks from col:", e);
+    }
+
+    try {
+      const importedDconf: Record<string, DeckConfig> = JSON.parse(dconfJson);
+      for (const [dcid, conf] of Object.entries(importedDconf)) {
+        targetCol.dconf[Number(dcid)] = conf;
+      }
+    } catch (e) {
+      console.warn("Failed to parse dconf from col:", e);
+    }
   }
 
-  // 5. Query notes
-  const notesRes = db.exec("SELECT id, guid, mid, mod, tags, flds, sfld, csum, flags, data FROM notes");
+  // 5. Read notes
+  const notesRes = db.exec("SELECT id, guid, mid, mod, usn, tags, flds, sfld, csum, flags, data FROM notes");
   if (notesRes.length > 0) {
     for (const row of notesRes[0].values) {
-      const [id, guid, mid, mod, tagsStr, fldsStr, sfld, csum, flags, data] = row;
-      const tags = (tagsStr as string || "").trim().split(/\s+/).filter(Boolean);
-      const fields = (fldsStr as string || "").split("\x1f");
+      const [id, guid, mid, mod, usn, tags, flds, sfld, csum, flags, data] = row;
+      const fieldList = (flds as string).split("\x1f");
+      const tagList = (tags as string).trim().split(/\s+/).filter(Boolean);
 
-      const note: Note = {
+      targetCol.notes[id as number] = {
         id: id as number,
-        guid: (guid as string) || String(id),
+        guid: guid as string,
         mid: mid as number,
         mod: mod as number,
-        usn: 0,
-        tags,
-        fields,
-        sfld: String(sfld || ""),
-        csum: (csum as number) || 0,
-        flags: (flags as number) || 0,
-        data: (data as string) || "{}"
+        usn: usn as number,
+        tags: tagList,
+        fields: fieldList,
+        sfld: sfld as string,
+        csum: csum as number,
+        flags: flags as number,
+        data: data as string
       };
-
-      targetCol.notes[note.id] = note;
       noteCount++;
     }
   }
 
-  // 6. Query cards
-  const cardsRes = db.exec("SELECT id, nid, did, ord, mod, type, queue, due, ivl, factor, reps, lapses, left, odue, odid, flags, data FROM cards");
+  // 6. Read cards
+  const cardsRes = db.exec("SELECT id, nid, did, ord, mod, usn, type, queue, due, ivl, factor, reps, lapses, left, odue, odid, flags, data FROM cards");
   if (cardsRes.length > 0) {
     for (const row of cardsRes[0].values) {
-      const [id, nid, did, ord, mod, type, queue, due, ivl, factor, reps, lapses, left, odue, odid, flags, data] = row;
+      const [id, nid, did, ord, mod, usn, type, queue, due, ivl, factor, reps, lapses, left, odue, odid, flags, data] = row;
 
-      const card: Card = {
+      targetCol.cards[id as number] = {
         id: id as number,
         nid: nid as number,
         did: did as number,
         ord: ord as number,
         mod: mod as number,
-        usn: 0,
-        type: (type as any) || 0,
-        queue: (queue as any) || 0,
+        usn: usn as number,
+        type: (type as number) as CardType,
+        queue: (queue as number) as CardQueue,
         due: due as number,
         ivl: ivl as number,
-        factor: (factor as number) || 2500,
-        reps: (reps as number) || 0,
-        lapses: (lapses as number) || 0,
-        left: (left as number) || 0,
+        factor: factor as number,
+        reps: reps as number,
+        lapses: lapses as number,
+        left: left as number,
         odue: (odue as number) || 0,
         odid: (odid as number) || 0,
         flags: (flags as number) || 0,
         data: (data as string) || "{}"
       };
-
-      targetCol.cards[card.id] = card;
       cardCount++;
     }
+  }
+
+  // 7. Read revlog (learning progress and review history)
+  try {
+    const revlogRes = db.exec("SELECT id, cid, usn, ease, ivl, lastIvl, factor, time, type FROM revlog");
+    if (revlogRes.length > 0) {
+      if (!targetCol.revlog) {
+        targetCol.revlog = [];
+      }
+      for (const row of revlogRes[0].values) {
+        const [id, cid, usn, ease, ivl, lastIvl, factor, time, type] = row;
+        targetCol.revlog.push({
+          id: id as number,
+          cid: cid as number,
+          usn: (usn as number) || 0,
+          ease: (ease as any) || 3,
+          ivl: ivl as number,
+          lastIvl: (lastIvl as number) || 0,
+          factor: (factor as number) || 2500,
+          time: (time as number) || 0,
+          type: (type as number) || 0
+        });
+        revlogCount++;
+      }
+    }
+  } catch (e) {
+    console.warn("Notice: revlog table not found or empty in apkg:", e);
   }
 
   // Merge media
@@ -181,36 +207,271 @@ export async function importApkg(
     deckCount,
     noteCount,
     cardCount,
+    revlogCount,
     mediaCount
   };
+}
+
+export async function exportApkg(col: Collection, did?: number): Promise<Blob> {
+  const SQL = await getSql();
+  const db = new SQL.Database();
+
+  // 1. Create standard Anki SQLite schema
+  db.exec(`
+    CREATE TABLE col (
+      id integer PRIMARY KEY,
+      crt integer NOT NULL,
+      mod integer NOT NULL,
+      scm integer NOT NULL,
+      ver integer NOT NULL,
+      dty integer NOT NULL,
+      usn integer NOT NULL,
+      ls integer NOT NULL,
+      conf text NOT NULL,
+      models text NOT NULL,
+      decks text NOT NULL,
+      dconf text NOT NULL,
+      tags text NOT NULL
+    );
+    CREATE TABLE notes (
+      id integer PRIMARY KEY,
+      guid text NOT NULL,
+      mid integer NOT NULL,
+      mod integer NOT NULL,
+      usn integer NOT NULL,
+      tags text NOT NULL,
+      flds text NOT NULL,
+      sfld integer NOT NULL,
+      csum integer NOT NULL,
+      flags integer NOT NULL,
+      data text NOT NULL
+    );
+    CREATE TABLE cards (
+      id integer PRIMARY KEY,
+      nid integer NOT NULL,
+      did integer NOT NULL,
+      ord integer NOT NULL,
+      mod integer NOT NULL,
+      usn integer NOT NULL,
+      type integer NOT NULL,
+      queue integer NOT NULL,
+      due integer NOT NULL,
+      ivl integer NOT NULL,
+      factor integer NOT NULL,
+      reps integer NOT NULL,
+      lapses integer NOT NULL,
+      left integer NOT NULL,
+      odue integer NOT NULL,
+      odid integer NOT NULL,
+      flags integer NOT NULL,
+      data text NOT NULL
+    );
+    CREATE TABLE revlog (
+      id integer PRIMARY KEY,
+      cid integer NOT NULL,
+      usn integer NOT NULL,
+      ease integer NOT NULL,
+      ivl integer NOT NULL,
+      lastIvl integer NOT NULL,
+      factor integer NOT NULL,
+      time integer NOT NULL,
+      type integer NOT NULL
+    );
+    CREATE TABLE graves (
+      usn integer NOT NULL,
+      oid integer NOT NULL,
+      type integer NOT NULL
+    );
+    CREATE INDEX ix_notes_usn ON notes (usn);
+    CREATE INDEX ix_cards_usn ON cards (usn);
+    CREATE INDEX ix_revlog_usn ON revlog (usn);
+    CREATE INDEX ix_cards_nid ON cards (nid);
+    CREATE INDEX ix_cards_sched ON cards (did, queue, due);
+    CREATE INDEX ix_revlog_cid ON revlog (cid);
+    CREATE INDEX ix_notes_csum ON notes (csum);
+  `);
+
+  // 2. Filter decks, cards, notes, models
+  const matchingDeckIds = new Set<number>();
+  if (did !== undefined) {
+    matchingDeckIds.add(did);
+    const targetDeck = col.decks[did];
+    const prefix = targetDeck ? `${targetDeck.name}::` : "";
+    for (const [idStr, d] of Object.entries(col.decks)) {
+      if (d.name.startsWith(prefix)) {
+        matchingDeckIds.add(Number(idStr));
+      }
+    }
+  } else {
+    for (const idStr of Object.keys(col.decks)) {
+      matchingDeckIds.add(Number(idStr));
+    }
+  }
+
+  const exportedCards = Object.values(col.cards).filter(c => matchingDeckIds.has(c.did));
+  const matchingNoteIds = new Set(exportedCards.map(c => c.nid));
+  const exportedNotes = Object.values(col.notes).filter(n => matchingNoteIds.has(n.id));
+  const matchingModelIds = new Set(exportedNotes.map(n => n.mid));
+
+  const exportedDecks: Record<string, any> = {};
+  for (const id of matchingDeckIds) {
+    if (col.decks[id]) exportedDecks[String(id)] = col.decks[id];
+  }
+
+  const exportedModels: Record<string, any> = {};
+  for (const id of matchingModelIds) {
+    if (col.models[id]) exportedModels[String(id)] = col.models[id];
+  }
+
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  // 3. Insert into col table
+  db.run(
+    "INSERT INTO col VALUES (1, ?, ?, ?, 11, 0, 0, 0, '{}', ?, ?, ?, '{}')",
+    [
+      col.crt || nowSec,
+      nowSec,
+      nowSec,
+      JSON.stringify(exportedModels),
+      JSON.stringify(exportedDecks),
+      JSON.stringify(col.dconf || {})
+    ]
+  );
+
+  // 4. Insert notes
+  const noteStmt = db.prepare("INSERT INTO notes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+  for (const note of exportedNotes) {
+    const tagsStr = note.tags.length > 0 ? ` ${note.tags.join(" ")} ` : "";
+    const fldsStr = note.fields.join("\x1f");
+    noteStmt.run([
+      note.id,
+      note.guid || String(note.id),
+      note.mid,
+      note.mod || nowSec,
+      note.usn || 0,
+      tagsStr,
+      fldsStr,
+      note.sfld || note.fields[0] || "",
+      note.csum || 0,
+      note.flags || 0,
+      note.data || "{}"
+    ]);
+  }
+  noteStmt.free();
+
+  // 5. Insert cards with full scheduling state
+  const cardStmt = db.prepare(
+    "INSERT INTO cards VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+  );
+  for (const card of exportedCards) {
+    cardStmt.run([
+      card.id,
+      card.nid,
+      card.did,
+      card.ord,
+      card.mod || nowSec,
+      card.usn || 0,
+      card.type,
+      card.queue,
+      card.due,
+      card.ivl,
+      card.factor,
+      card.reps,
+      card.lapses,
+      card.left,
+      card.odue || 0,
+      card.odid || 0,
+      card.flags || 0,
+      card.data || "{}"
+    ]);
+  }
+  cardStmt.free();
+
+  // 6. Insert revlogs
+  const revlogStmt = db.prepare(
+    "INSERT INTO revlog VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+  );
+  const cardIdSet = new Set(exportedCards.map(c => c.id));
+  for (const r of col.revlog || []) {
+    if (cardIdSet.has(r.cid)) {
+      revlogStmt.run([
+        r.id,
+        r.cid,
+        r.usn || 0,
+        r.ease,
+        r.ivl,
+        r.lastIvl || 0,
+        r.factor,
+        r.time || 0,
+        r.type || 0
+      ]);
+    }
+  }
+  revlogStmt.free();
+
+  // 7. Binary export of the database
+  const binaryDb = db.export();
+  db.close();
+
+  // 8. Package into ZIP with media
+  const zip = new JSZip();
+  zip.file("collection.anki2", binaryDb);
+  zip.file("collection.anki21", binaryDb);
+
+  const mediaMap: Record<string, string> = {};
+  let mediaIdx = 0;
+
+  for (const [filename, dataUrl] of Object.entries(col.media || {})) {
+    const idxStr = String(mediaIdx++);
+    mediaMap[idxStr] = filename;
+
+    if (dataUrl.startsWith("data:")) {
+      const base64 = dataUrl.split(",")[1];
+      zip.file(idxStr, base64, { base64: true });
+    } else if (dataUrl.startsWith("blob:") || dataUrl.startsWith("http")) {
+      try {
+        const resp = await fetch(dataUrl);
+        const ab = await resp.arrayBuffer();
+        zip.file(idxStr, ab);
+      } catch (e) {
+        console.warn(`Failed to package media ${filename}:`, e);
+      }
+    }
+  }
+
+  zip.file("media", JSON.stringify(mediaMap));
+
+  return await zip.generateAsync({ type: "blob", mimeType: "application/apkg" });
 }
 
 export function importCsv(
   text: string,
   targetCol: Collection,
-  targetDid: number,
-  targetMid: number,
-  delimiter = "\t"
+  deckId: number,
+  modelId: number,
+  delimiter: string = "\t"
 ): ImportResult {
-  const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
+  const lines = text.split(/\r?\n/).filter(line => line.trim().length > 0);
+  const model = targetCol.models[modelId];
+  if (!model) {
+    throw new Error(`Note type ${modelId} not found`);
+  }
+
   let noteCount = 0;
   let cardCount = 0;
-  const now = Math.floor(Date.now() / 1000);
   let nowMs = Date.now();
 
-  const model = targetCol.models[targetMid] || Object.values(targetCol.models)[0];
-
   for (const line of lines) {
-    const rawFields = line.includes(delimiter) ? line.split(delimiter) : line.split(",");
-    const fields = rawFields.map(f => f.trim().replace(/^"|"$/g, ""));
-    nowMs++;
+    const fields = line.split(delimiter);
+    while (fields.length < model.flds.length) {
+      fields.push("");
+    }
 
-    const noteId = nowMs;
     const note: Note = {
-      id: noteId,
-      guid: `csv_${noteId}`,
-      mid: model.id,
-      mod: now,
+      id: nowMs++,
+      guid: `csv_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
+      mid: modelId,
+      mod: Math.floor(Date.now() / 1000),
       usn: 0,
       tags: [],
       fields,
@@ -219,22 +480,22 @@ export function importCsv(
       flags: 0,
       data: "{}"
     };
+
     targetCol.notes[note.id] = note;
     noteCount++;
 
-    // Generate cards for templates
     for (let ord = 0; ord < model.tmpls.length; ord++) {
       nowMs++;
       const card: Card = {
         id: nowMs,
         nid: note.id,
-        did: targetDid,
+        did: deckId,
         ord,
-        mod: now,
+        mod: Math.floor(Date.now() / 1000),
         usn: 0,
-        type: 0,
+        type: 0, // New
         queue: 0,
-        due: Object.keys(targetCol.cards).length + 1,
+        due: cardCount + 1,
         ivl: 0,
         factor: 2500,
         reps: 0,
@@ -254,29 +515,15 @@ export function importCsv(
     deckCount: 1,
     noteCount,
     cardCount,
+    revlogCount: 0,
     mediaCount: 0
   };
 }
 
-export function exportCollectionJson(col: Collection): string {
-  return JSON.stringify(col, null, 2);
-}
-
 export function exportDeckCsv(col: Collection, did: number): string {
-  const matchingNotes = new Set<number>();
-  for (const card of Object.values(col.cards)) {
-    if (card.did === did) {
-      matchingNotes.add(card.nid);
-    }
-  }
+  const deckCards = Object.values(col.cards).filter(c => c.did === did);
+  const noteIds = new Set(deckCards.map(c => c.nid));
+  const notes = Object.values(col.notes).filter(n => noteIds.has(n.id));
 
-  const lines: string[] = [];
-  for (const nid of matchingNotes) {
-    const note = col.notes[nid];
-    if (note) {
-      lines.push(note.fields.join("\t"));
-    }
-  }
-
-  return lines.join("\n");
+  return notes.map(n => n.fields.join("\t")).join("\n");
 }
