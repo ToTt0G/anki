@@ -342,11 +342,19 @@ export async function exportApkg(col: Collection, did?: number): Promise<Blob> {
     ]
   );
 
-  // 4. Insert notes
+  // 4. Insert notes (and collect any static /ep1100/media/ references for .apkg export)
+  const staticMediaUrls = new Map<string, string>();
   const noteStmt = db.prepare("INSERT INTO notes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
   for (const note of exportedNotes) {
     const tagsStr = note.tags.length > 0 ? ` ${note.tags.join(" ")} ` : "";
-    const fldsStr = note.fields.join("\x1f");
+    const normalizedFields = note.fields.map(fld =>
+      fld.replace(/src=["'](\/ep1100\/media\/([^"']+))["']/gi, (_m, fullUrl, encodedName) => {
+        const decodedName = decodeURIComponent(encodedName);
+        staticMediaUrls.set(decodedName, fullUrl);
+        return `src="${decodedName}"`;
+      })
+    );
+    const fldsStr = normalizedFields.join("\x1f");
     noteStmt.run([
       note.id,
       note.guid || String(note.id),
@@ -355,7 +363,7 @@ export async function exportApkg(col: Collection, did?: number): Promise<Blob> {
       note.usn || 0,
       tagsStr,
       fldsStr,
-      note.sfld || note.fields[0] || "",
+      note.sfld || normalizedFields[0] || "",
       note.csum || 0,
       note.flags || 0,
       note.data || "{}"
@@ -432,7 +440,7 @@ export async function exportApkg(col: Collection, did?: number): Promise<Blob> {
     if (dataUrl.startsWith("data:")) {
       const base64 = dataUrl.split(",")[1];
       zip.file(idxStr, base64, { base64: true });
-    } else if (dataUrl.startsWith("blob:") || dataUrl.startsWith("http")) {
+    } else if (dataUrl.startsWith("blob:") || dataUrl.startsWith("http") || dataUrl.startsWith("/")) {
       try {
         const resp = await fetch(dataUrl);
         const ab = await resp.arrayBuffer();
@@ -443,9 +451,41 @@ export async function exportApkg(col: Collection, did?: number): Promise<Blob> {
     }
   }
 
+  for (const [filename, url] of staticMediaUrls.entries()) {
+    if (col.media && col.media[filename]) continue;
+    try {
+      const resp = await fetch(url);
+      if (resp.ok) {
+        const ab = await resp.arrayBuffer();
+        const idxStr = String(mediaIdx++);
+        mediaMap[idxStr] = filename;
+        zip.file(idxStr, ab);
+      }
+    } catch (e) {
+      console.warn(`Failed to package static media ${filename}:`, e);
+    }
+  }
+
   zip.file("media", JSON.stringify(mediaMap));
 
   return await zip.generateAsync({ type: "blob", mimeType: "application/apkg" });
+}
+
+export async function importEp1100Decks(targetCol: Collection): Promise<Collection> {
+  const res = await fetch("/ep1100/ep1100-bundle.json");
+  if (!res.ok) {
+    throw new Error(`Failed to fetch EP1100 bundle (HTTP ${res.status})`);
+  }
+  const bundle = await res.json();
+  const updated: Collection = {
+    ...targetCol,
+    mod: Math.floor(Date.now() / 1000),
+    decks: { ...targetCol.decks, ...(bundle.decks || {}) },
+    models: { ...targetCol.models, ...(bundle.models || {}) },
+    notes: { ...targetCol.notes, ...(bundle.notes || {}) },
+    cards: { ...targetCol.cards, ...(bundle.cards || {}) }
+  };
+  return updated;
 }
 
 export function importCsv(

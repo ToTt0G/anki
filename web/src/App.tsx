@@ -9,7 +9,7 @@ import {
 } from "@clerk/react";
 import { Collection, Deck, Note, Card, DeckConfig, RevlogEntry } from "./core/types";
 import { SyncClient, SyncStatus } from "./core/sync-client";
-import { exportDeckCsv, exportApkg } from "./core/import-export";
+import { exportDeckCsv, exportApkg, importEp1100Decks } from "./core/import-export";
 import { registerServiceWorker } from "./core/pwa";
 import { syncPushSubscriptionForUser } from "./core/push-manager";
 import { Navbar, NavView } from "./components/Navbar";
@@ -355,6 +355,10 @@ export const App: React.FC = () => {
                 onExportDeckCsv={handleExportDeckCsv}
                 onExportCollectionApkg={() => handleExportDeckApkg()}
                 onImportClick={() => setIsImportOpen(true)}
+                onImportEp1100={async () => {
+                  const updated = await importEp1100Decks(collection);
+                  syncClientRef.current?.importCollection(updated);
+                }}
               />
             )}
           </>

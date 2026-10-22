@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { Collection } from "../core/types";
 import { getDeckCounts } from "../core/scheduler";
-import { Settings, FolderPlus, Download, Upload, X } from "lucide-react";
+import { Settings, FolderPlus, Download, Upload, BookOpen, X } from "lucide-react";
 
 interface Props {
   collection: Collection;
@@ -14,6 +14,7 @@ interface Props {
   onExportDeckCsv: (did: number) => void;
   onExportCollectionApkg: () => void;
   onImportClick: () => void;
+  onImportEp1100?: () => Promise<void>;
 }
 
 type DeckDialogState =
@@ -32,7 +33,8 @@ export const DeckList: React.FC<Props> = ({
   onExportDeckApkg,
   onExportDeckCsv,
   onExportCollectionApkg,
-  onImportClick
+  onImportClick,
+  onImportEp1100
 }) => {
   const [activeMenu, setActiveMenu] = useState<{
     did: number;
@@ -40,6 +42,7 @@ export const DeckList: React.FC<Props> = ({
     right: number;
   } | null>(null);
   const [dialog, setDialog] = useState<DeckDialogState>(null);
+  const [isImportingEp1100, setIsImportingEp1100] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -53,6 +56,10 @@ export const DeckList: React.FC<Props> = ({
 
   const decks = Object.values(collection.decks).sort((a, b) =>
     a.name.localeCompare(b.name)
+  );
+
+  const hasEp1100 = decks.some(
+    d => d.name === "EP1100" || d.name.startsWith("EP1100::")
   );
 
   const handleDialogSubmit = (e: React.FormEvent) => {
@@ -249,6 +256,23 @@ export const DeckList: React.FC<Props> = ({
           <Upload size={16} />
           <span>Import (.apkg)</span>
         </button>
+        {!hasEp1100 && onImportEp1100 && (
+          <button
+            className="primary"
+            disabled={isImportingEp1100}
+            onClick={async () => {
+              setIsImportingEp1100(true);
+              try {
+                await onImportEp1100();
+              } finally {
+                setIsImportingEp1100(false);
+              }
+            }}
+          >
+            <BookOpen size={16} />
+            <span>{isImportingEp1100 ? "Importing EP1100..." : "Import EP1100"}</span>
+          </button>
+        )}
         <button onClick={onExportCollectionApkg}>
           <Download size={16} />
           <span>Export Collection (.apkg)</span>
