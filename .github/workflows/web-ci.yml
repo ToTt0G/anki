@@ -5,10 +5,12 @@ on:
     branches: [web-app, main]
     paths:
       - "web/**"
+      - ".dprint.json"
       - ".github/workflows/web-ci.yml"
   pull_request:
     paths:
       - "web/**"
+      - ".dprint.json"
       - ".github/workflows/web-ci.yml"
 
 jobs:
@@ -30,7 +32,10 @@ jobs:
           cache-dependency-path: web/package-lock.json
 
       - name: Install dependencies
-        run: npm ci --legacy-peer-deps
+        run: npm ci
+
+      - name: Check web source formatting
+        run: npm exec --yes --package=dprint@0.56.0 -- dprint check .
 
       - name: Typecheck client & Cloudflare Worker server (strict)
         run: npm run typecheck

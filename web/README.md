@@ -17,25 +17,25 @@ A minimalist, multi-device syncing web port of Anki built for Cloudflare Workers
   - Stores collections and media in **IndexedDB** alongside a persistent operation outbox (`opId` deduplication, monotonic server revisions, and per-operation `ack` responses).
   - Supports server-side pre-import backup snapshots (`POST /api/collection/restore-backup`), cascading deck/note deletions, local offline cache clearing, and full cloud account data deletion (`DELETE /api/account-data`).
 - **Import & Export (`src/core/import-export.ts`)**:
-  - Supports `.apkg` and `.colpkg` (`collection.anki21` / `collection.anki2` SQLite schemas; packages using Anki's newer compressed `.anki21b` format should be exported from desktop Anki with *"Support older Anki versions"* checked) and RFC 4180 CSV/TSV files, with pre-commit import preview and one-click undo/restore.
+  - Supports `.apkg` and `.colpkg` (`collection.anki21` / `collection.anki2` SQLite schemas; packages using Anki's newer compressed `.anki21b` format should be exported from desktop Anki with _"Support older Anki versions"_ checked) and RFC 4180 CSV/TSV files, with pre-commit import preview and one-click undo/restore.
 
 ## Running Locally (Requires Node.js >= 22)
 
 ```bash
-cd web
-npm install --legacy-peer-deps
-npm run typecheck
-npm test
-npm run build
-npm run worker:dev
+just web-ci-install
+just web-format check .
+just web-test
+just web-check
+just web-preview
 ```
 
 ## Deploying to Cloudflare Workers
 
 ```bash
-cd web
-npm run build
-npx wrangler deploy
+just web-check
+just web-test
+just web-deploy --dry-run
+just web-deploy
 ```
 
 ## License & Attribution

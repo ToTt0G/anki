@@ -1,39 +1,44 @@
 {
-  "name": "klanki",
-  "version": "1.0.0",
-  "private": true,
-  "type": "module",
-  "engines": {
-    "node": ">=22.0.0"
-  },
-  "scripts": {
-    "dev": "vite",
-    "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit",
-    "build": "npm run typecheck && vite build",
-    "test": "esbuild tests/audit-verification.test.ts --bundle --platform=node --format=esm --packages=external --outfile=.vite/audit-verification.test.mjs && node --test .vite/audit-verification.test.mjs",
-    "preview": "vite preview",
-    "worker:dev": "wrangler dev",
-    "worker:deploy": "wrangler deploy"
-  },
-  "dependencies": {
-    "@clerk/backend": "^3.4.0",
-    "@clerk/react": "^6.13.0",
-    "@types/web-push": "^3.6.4",
-    "jszip": "^3.10.1",
-    "lucide-react": "^1.16.0",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "sql.js": "^1.12.0",
-    "web-push": "^3.6.7"
-  },
-  "devDependencies": {
-    "@cloudflare/workers-types": "^4.20241205.0",
-    "@types/react": "^19.0.0",
-    "@types/react-dom": "^19.0.0",
-    "@types/sql.js": "^1.4.9",
-    "@vitejs/plugin-react": "^4.3.4",
-    "typescript": "^5.7.2",
-    "vite": "^6.0.3",
-    "wrangler": "^4.152.0"
-  }
+    "name": "klanki",
+    "version": "1.0.0",
+    "private": true,
+    "type": "module",
+    "engines": {
+        "node": ">=22.0.0"
+    },
+    "scripts": {
+        "dev": "vite",
+        "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit",
+        "build": "npm run typecheck && vite build",
+        "vendor:mathjax": "node scripts/vendor-mathjax.mjs",
+        "test": "esbuild tests/*.test.ts --bundle --platform=node --format=esm --packages=external --outdir=.vite --out-extension:.js=.mjs && node --test .vite/*.test.mjs",
+        "preview": "vite preview",
+        "worker:dev": "wrangler dev",
+        "worker:deploy": "wrangler deploy"
+    },
+    "dependencies": {
+        "@clerk/backend": "^3.4.0",
+        "@clerk/react": "^6.13.0",
+        "@types/web-push": "^3.6.4",
+        "jszip": "^3.10.1",
+        "lucide-react": "^1.16.0",
+        "mathjax": "^3.2.2",
+        "react": "^19.0.0",
+        "react-dom": "^19.0.0",
+        "sql.js": "^1.12.0",
+        "web-push": "^3.6.7"
+    },
+    "devDependencies": {
+        "@cloudflare/workers-types": "^5.20261023.1",
+        "@types/react": "^19.0.0",
+        "@types/react-dom": "^19.0.0",
+        "@types/sql.js": "^1.4.9",
+        "@vitejs/plugin-react": "^4.3.4",
+        "esbuild": "^0.28.2",
+        "fake-indexeddb": "^6.2.6",
+        "miniflare": "^5.20261019.2-beta",
+        "typescript": "^5.7.2",
+        "vite": "^6.0.3",
+        "wrangler": "^4.152.0"
+    }
 }

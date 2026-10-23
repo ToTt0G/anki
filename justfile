@@ -6,6 +6,51 @@ mod release
 default:
     @just --list
 
+# Install the pinned build runner used locally and in CI
+setup-build-runner:
+    ./tools/install-n2
+
+# Check the standalone React/Workers web app
+web-check:
+    cd web && npm run build
+
+# Run standalone web app regression tests
+web-test:
+    cd web && npm test
+
+# Format or check standalone web sources with the repository's dprint configuration
+web-format *args:
+    cd web && npm exec --yes --package=dprint@0.56.0 -- dprint {{ args }}
+
+# Install standalone web dependencies exactly as CI does
+web-ci-install:
+    cd web && npm ci
+
+# Refresh bundled offline math assets
+web-vendor-mathjax:
+    cd web && npm run vendor:mathjax
+
+# Install standalone web dependencies
+web-install *args:
+    cd web && npm install {{ args }}
+
+# Run the standalone Worker locally with the built web assets
+web-preview *args:
+    cd web && npm run worker:dev -- {{ args }}
+
+# Deploy the standalone web app with the project-local Wrangler
+web-deploy *args:
+    cd web && npm run worker:deploy -- {{ args }}
+
+# Inspect the standalone Worker's account and deployment state
+web-wrangler *args:
+    cd web && npm exec -- wrangler {{ args }}
+
+# Build a manual browser fixture for verifying sandboxed math offline
+web-math-fixture:
+    cd web && npm exec -- esbuild tests/fixtures/math-browser.tsx --bundle --format=esm --outfile=dist/math-check.js
+    cp web/tests/fixtures/math-browser.html web/dist/math-check.html
+
 # Build the project
 build:
     {{ ninja }} pylib qt

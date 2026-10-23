@@ -1,10 +1,14 @@
+// Copyright: Ankitects Pty Ltd and contributors
+// License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+
 import React, { useEffect, useRef, useState } from "react";
+import { loadMathJaxAssets, MathJaxAssets } from "../core/mathjax";
 import { sanitizeCardCss, sanitizeCardHtml } from "../core/sanitize";
 
 interface Props {
-  html: string;
-  css?: string;
-  onCardClick?: () => void;
+    html: string;
+    css?: string;
+    onCardClick?: () => void;
 }
 
 /**
@@ -16,67 +20,82 @@ interface Props {
  *   cookies, localStorage, or IndexedDB.
  * - Sanitizes HTML and CSS before injection for defense in depth.
  * - Supports Cloze hint toggles, model CSS (C12), and MathJax/LaTeX rendering (U09).
+ * - MathJax (v3.2.2) uses SVG output and is self-hosted from /vendor/mathjax and pre-cached by the service
+ *   worker, so LaTeX renders fully offline without any external CDN dependency (U01).
  */
 export const SandboxedCardFrame: React.FC<Props> = ({ html, css = "", onCardClick }) => {
-  const iframeRef = useRef<HTMLIFrameElement | null>(null);
-  const [frameHeight, setFrameHeight] = useState<number>(220);
-  const [isDark, setIsDark] = useState<boolean>(() =>
-    typeof document !== "undefined" &&
-    document.documentElement.getAttribute("data-theme") === "dark"
-  );
+    const [mathAssets, setMathAssets] = useState<MathJaxAssets | null>(null);
+    const hasMath = /\\\(|\\\[|\$\$/.test(html);
+    useEffect(() => {
+        if (!hasMath) { return; }
+        let active = true;
+        loadMathJaxAssets().then(assets => {
+            if (active) { setMathAssets(assets); }
+        }).catch(error => console.warn("Could not load offline math renderer:", error));
+        return () => {
+            active = false;
+        };
+    }, [hasMath]);
+    const iframeRef = useRef<HTMLIFrameElement | null>(null);
+    const [frameHeight, setFrameHeight] = useState<number>(220);
+    const [isDark, setIsDark] = useState<boolean>(() =>
+        typeof document !== "undefined"
+        && document.documentElement.getAttribute("data-theme") === "dark"
+    );
 
-  useEffect(() => {
-    if (typeof document === "undefined") return;
-    const observer = new MutationObserver(() => {
-      setIsDark(document.documentElement.getAttribute("data-theme") === "dark");
-    });
-    observer.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ["data-theme"]
-    });
-    return () => observer.disconnect();
-  }, []);
+    useEffect(() => {
+        if (typeof document === "undefined") { return; }
+        const observer = new MutationObserver(() => {
+            setIsDark(document.documentElement.getAttribute("data-theme") === "dark");
+        });
+        observer.observe(document.documentElement, {
+            attributes: true,
+            attributeFilter: ["data-theme"],
+        });
+        return () => observer.disconnect();
+    }, []);
 
-  useEffect(() => {
-    const handleMessage = (event: MessageEvent) => {
-      // Strictly validate message source is our exact sandboxed iframe window
-      if (!iframeRef.current || event.source !== iframeRef.current.contentWindow) {
-        return;
-      }
-      const data = event.data;
-      if (!data || typeof data !== "object") return;
+    useEffect(() => {
+        const handleMessage = (event: MessageEvent) => {
+            // Strictly validate message source is our exact sandboxed iframe window
+            if (!iframeRef.current || event.source !== iframeRef.current.contentWindow) {
+                return;
+            }
+            const data = event.data;
+            if (!data || typeof data !== "object") { return; }
 
-      if (data.type === "klanki-card-height" && typeof data.height === "number") {
-        const clamped = Math.max(160, Math.min(2400, Math.ceil(data.height)));
-        setFrameHeight(clamped);
-      } else if (data.type === "klanki-card-click") {
-        onCardClick?.();
-      }
-    };
+            if (data.type === "klanki-card-height" && typeof data.height === "number") {
+                const clamped = Math.max(160, Math.min(2400, Math.ceil(data.height)));
+                setFrameHeight(clamped);
+            } else if (data.type === "klanki-card-click") {
+                onCardClick?.();
+            }
+        };
 
-    window.addEventListener("message", handleMessage);
-    return () => window.removeEventListener("message", handleMessage);
-  }, [onCardClick]);
+        window.addEventListener("message", handleMessage);
+        return () => window.removeEventListener("message", handleMessage);
+    }, [onCardClick]);
 
-  const safeHtml = sanitizeCardHtml(html);
-  const safeCss = sanitizeCardCss(css);
-  const originUrl = typeof window !== "undefined" ? window.location.origin : "";
+    const safeHtml = sanitizeCardHtml(html);
+    const safeCss = sanitizeCardCss(css);
+    const activeMathAssets = hasMath ? mathAssets : null;
+    const originUrl = typeof window !== "undefined" ? window.location.origin : "";
 
-  const textColor = isDark ? "#f8fafc" : "#0f172a";
-  const bgColor = isDark ? "#0f172a" : "#ffffff";
-  const borderColor = isDark ? "#334155" : "#e2e8f0";
+    const textColor = isDark ? "#f8fafc" : "#0f172a";
+    const bgColor = isDark ? "#0f172a" : "#ffffff";
+    const borderColor = isDark ? "#334155" : "#e2e8f0";
 
-  // Rewrite root-relative image/audio URLs (/ep1100/media/...) to absolute origin URLs so they load inside the null-origin srcDoc
-  const resolvedHtml = safeHtml.replace(
-    /(\b(?:src|href)=["'])(\/[^"']*["'])/gi,
-    `$1${originUrl}$2`
-  );
+    // Rewrite root-relative image/audio URLs (/ep1100/media/...) to absolute origin URLs so they load inside the null-origin srcDoc
+    const resolvedHtml = safeHtml.replace(
+        /(\b(?:src|href)=["'])(\/[^"']*["'])/gi,
+        `$1${originUrl}$2`,
+    );
 
-  const srcDoc = `<!DOCTYPE html>
+    const srcDoc = `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${originUrl} data: blob:; media-src ${originUrl} data: blob:; style-src 'unsafe-inline'; font-src https://cdn.jsdelivr.net data:; script-src 'unsafe-inline' https://cdn.jsdelivr.net;" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${originUrl} data: blob:; media-src ${originUrl} data: blob:; style-src 'unsafe-inline'; font-src ${originUrl} data:; script-src 'unsafe-inline';" />
   <style>
     *, *::before, *::after { box-sizing: border-box; }
     html, body {
@@ -158,10 +177,32 @@ export const SandboxedCardFrame: React.FC<Props> = ({ html, css = "", onCardClic
       });
       reportHeight();
 
-      // Load MathJax inside sandbox ONLY when LaTeX delimiters exist (U09)
+      // Load MathJax inside sandbox ONLY when LaTeX delimiters exist (U09, U01).
+      // MathJax is self-hosted at /vendor/mathjax (bundled + service-worker pre-cached),
+      // so LaTeX cards render fully offline — no external CDN requests, ever.
       var text = root ? root.innerHTML : "";
-      if (/\\\\\\(|\\\\\\[|\\$\\$/.test(text)) {
+      if (${Boolean(activeMathAssets)}) {
+        function runEmbeddedScript(url) {
+          if (!url.startsWith("data:text/javascript;base64,")) throw new Error("Unknown math asset");
+          var binary = atob(url.slice(url.indexOf(",") + 1));
+          var bytes = Uint8Array.from(binary, function(c) { return c.charCodeAt(0); });
+          var script = document.createElement("script");
+          script.textContent = new TextDecoder().decode(bytes);
+          document.head.appendChild(script);
+        }
+        var mathSources = ${JSON.stringify(activeMathAssets?.sources || {})};
         window.MathJax = {
+          loader: {
+            paths: { mathjax: "${originUrl}/vendor/mathjax/es5" },
+            source: mathSources,
+            require: runEmbeddedScript,
+            // Stop normal path rewriting for sandbox-safe embedded extension URLs.
+            pathFilters: [[function(data) {
+              if (mathSources[data.name]) { data.name = mathSources[data.name]; return false; }
+              return true;
+            }, -10]]
+          },
+          svg: { fontCache: "local" },
           tex: { inlineMath: [["\\\\(", "\\\\)"]], displayMath: [["\\\\[", "\\\\]"], ["$$", "$$"]] },
           startup: {
             pageReady: function() {
@@ -169,29 +210,26 @@ export const SandboxedCardFrame: React.FC<Props> = ({ html, css = "", onCardClic
             }
           }
         };
-        var s = document.createElement("script");
-        s.src = "https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-chtml.js";
-        s.async = true;
-        document.head.appendChild(s);
+        runEmbeddedScript("${activeMathAssets?.script || ""}");
       }
     })();
   </script>
 </body>
 </html>`;
 
-  return (
-    <iframe
-      ref={iframeRef}
-      title="Flashcard content"
-      sandbox="allow-scripts"
-      srcDoc={srcDoc}
-      style={{
-        width: "100%",
-        height: `${frameHeight}px`,
-        border: "none",
-        background: "transparent",
-        display: "block"
-      }}
-    />
-  );
+    return (
+        <iframe
+            ref={iframeRef}
+            title="Flashcard content"
+            sandbox="allow-scripts"
+            srcDoc={srcDoc}
+            style={{
+                width: "100%",
+                height: `${frameHeight}px`,
+                border: "none",
+                background: "transparent",
+                display: "block",
+            }}
+        />
+    );
 };

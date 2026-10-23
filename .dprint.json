@@ -12,6 +12,12 @@
     "excludes": [
         ".vscode",
         "**/node_modules",
+        "web/dist",
+        "web/.vite",
+        "web/.wrangler",
+        "web/public/vendor",
+        "web/public/ep1100/ep1100-bundle.json",
+        "web/server/worker-configuration.d.ts",
         "out/**",
         "**/*-lock.json",
         "docs/*.md",
