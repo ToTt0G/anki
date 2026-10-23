@@ -579,6 +579,9 @@ export function validateClientMessage(raw: any): { ok: true; msg: ClientMessage 
             if (raw.deckId === 1) {
                 return { ok: false, error: "Default deck (id=1) cannot be deleted" };
             }
+            if (raw.expectedRevision !== undefined && !isNonNegativeInt(raw.expectedRevision)) {
+                return { ok: false, error: "Invalid delete_deck expectedRevision" };
+            }
             return { ok: true, msg: raw as ClientMessage };
         }
 
@@ -586,6 +589,9 @@ export function validateClientMessage(raw: any): { ok: true; msg: ClientMessage 
             const err = validateDeckConfigObject(raw.dconf);
             if (err) {
                 return { ok: false, error: err };
+            }
+            if (raw.expectedRevision !== undefined && !isNonNegativeInt(raw.expectedRevision)) {
+                return { ok: false, error: "Invalid deck-config expectedRevision" };
             }
             return { ok: true, msg: raw as ClientMessage };
         }
@@ -619,6 +625,9 @@ export function validateClientMessage(raw: any): { ok: true; msg: ClientMessage 
         case "delete_note": {
             if (!isPositiveInt(raw.noteId)) {
                 return { ok: false, error: "delete_note requires a positive integer noteId" };
+            }
+            if (raw.expectedRevision !== undefined && !isNonNegativeInt(raw.expectedRevision)) {
+                return { ok: false, error: "Invalid delete_note expectedRevision" };
             }
             return { ok: true, msg: raw as ClientMessage };
         }

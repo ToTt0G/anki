@@ -24,8 +24,8 @@ export type ClientMessage =
             expectedMod?: number;
             forceOverwrite?: boolean;
         }
-        | { type: "delete_deck"; opId?: string; deckId: number }
-        | { type: "upsert_deck_config"; opId?: string; dconf: DeckConfig }
+        | { type: "delete_deck"; opId?: string; deckId: number; expectedRevision?: number }
+        | { type: "upsert_deck_config"; opId?: string; dconf: DeckConfig; expectedRevision?: number }
         | {
             type: "upsert_note";
             opId?: string;
@@ -35,7 +35,7 @@ export type ClientMessage =
             expectedMod?: number;
             forceOverwrite?: boolean;
         }
-        | { type: "delete_note"; opId?: string; noteId: number; cardIds?: number[] }
+        | { type: "delete_note"; opId?: string; noteId: number; cardIds?: number[]; expectedRevision?: number }
         | {
             type: "update_card";
             opId?: string;
@@ -91,6 +91,7 @@ export type ServerMessage =
         cardState?: Card;
         revlogEntry?: RevlogEntry;
         originalRevlogId?: number;
+        updatedMod?: number;
     }
     | {
         type: "op_error";

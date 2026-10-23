@@ -74,7 +74,28 @@ export const CardBrowser: React.FC<Props> = ({
     const [draftFields, setDraftFields] = useState<string[]>([]);
     const [draftTags, setDraftTags] = useState<string>("");
     const [saveState, setSaveState] = useState<"saved" | "saving">("saved");
-    const debounceTimerRef = useRef<any>(null);
+    const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const pendingDraftRef = useRef<{ note: Note; fields: string[]; tags: string } | null>(null);
+    const onUpdateNoteRef = useRef(onUpdateNote);
+    onUpdateNoteRef.current = onUpdateNote;
+
+    const flushPendingDraft = () => {
+        const pending = pendingDraftRef.current;
+        if (debounceTimerRef.current) {
+            clearTimeout(debounceTimerRef.current);
+            debounceTimerRef.current = null;
+        }
+        pendingDraftRef.current = null;
+        if (!pending) { return; }
+        const fields = pending.fields.map(f => sanitizeCardHtml(f));
+        onUpdateNoteRef.current({
+            ...pending.note,
+            fields,
+            sfld: fields[0] || "",
+            tags: pending.tags.trim().split(/\s+/).filter(Boolean),
+            mod: Math.floor(Date.now() / 1000),
+        });
+    };
     const browserFileRef = useRef<HTMLInputElement | null>(null);
     const editingFieldIdxRef = useRef<number>(0);
     const confirmDialogRef = useAccessibleModal<HTMLDivElement>(
@@ -108,10 +129,8 @@ export const CardBrowser: React.FC<Props> = ({
 
     // Synchronize local draft fields when selected note changes
     useEffect(() => {
-        if (debounceTimerRef.current) {
-            clearTimeout(debounceTimerRef.current);
-            debounceTimerRef.current = null;
-        }
+        // A pending note draft belongs to the previous note: flush rather than discard.
+        flushPendingDraft();
         setUploadError(null);
         if (selectedCardItem) {
             setDraftFields([...selectedCardItem.note.fields]);
@@ -125,6 +144,7 @@ export const CardBrowser: React.FC<Props> = ({
         nextFields: string[],
         nextTagsStr: string,
     ) => {
+        pendingDraftRef.current = null;
         const sanitizedFields = nextFields.map(f => sanitizeCardHtml(f));
         const tags = nextTagsStr.trim().split(/\s+/).filter(Boolean);
         const updatedNote: Note = {
@@ -144,14 +164,15 @@ export const CardBrowser: React.FC<Props> = ({
         nextTagsStr: string,
     ) => {
         setSaveState("saving");
-        if (debounceTimerRef.current) {
-            clearTimeout(debounceTimerRef.current);
-        }
-        debounceTimerRef.current = setTimeout(() => {
-            commitNoteUpdate(note, nextFields, nextTagsStr);
-            debounceTimerRef.current = null;
-        }, 320);
+        pendingDraftRef.current = { note, fields: [...nextFields], tags: nextTagsStr };
+        if (debounceTimerRef.current) { clearTimeout(debounceTimerRef.current); }
+        debounceTimerRef.current = setTimeout(flushPendingDraft, 320);
     };
+
+    useEffect(() => () => {
+        // Preserve the final draft when the browser pane unmounts.
+        flushPendingDraft();
+    }, []);
 
     const handleFieldChange = (fieldIdx: number, val: string) => {
         if (!selectedCardItem) { return; }

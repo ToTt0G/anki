@@ -3,8 +3,8 @@
 
 // Shared Media Content, Signature, Dimension & Filename Validation (SEC-13, UX-10)
 
-export const MAX_SINGLE_MEDIA_BYTES = 10 * 1024 * 1024; // 10 MB decoded bytes
-export const MAX_MEDIA_DATA_URL_LEN = 15 * 1024 * 1024; // ~15 MB base64 data URL
+export const MAX_SINGLE_MEDIA_BYTES = 1 * 1024 * 1024; // Conservative SQLite-backed storage limit; larger files require R2
+export const MAX_MEDIA_DATA_URL_LEN = 1_450_000; // Base64 limit leaves headroom below 2 MiB SQLite value ceiling
 export const MAX_IMAGE_DIMENSION = 8192; // Max width or height in pixels
 export const MAX_IMAGE_PIXELS = 33_554_432; // 32 megapixels max decoded area
 export const MAX_MEDIA_FILENAME_LEN = 200;
