@@ -1,9 +1,11 @@
 import { AnkiSyncServer } from "./sync-server";
 import {
   AuthEnv,
+  isAllowedRequestOrigin,
   issueSignedWsTicket,
   verifyClerkRequest,
-  verifySignedWsTicket
+  verifySignedWsTicket,
+  withSecurityHeaders
 } from "./auth";
 
 export { AnkiSyncServer };
@@ -26,14 +28,25 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname.startsWith("/api/")) {
+      // Enforce Origin/CSRF protection on all state-changing API requests (S02)
+      if (!isAllowedRequestOrigin(request, env)) {
+        return withSecurityHeaders(
+          Response.json({ error: "Cross-origin request forbidden" }, { status: 403 })
+        );
+      }
+
       // 1. Issue a short-lived, single-use WebSocket connection ticket for an authenticated user
       if (url.pathname === "/api/ws-ticket" && request.method === "POST") {
         const session = await verifyClerkRequest(request, env);
         if (!session) {
-          return Response.json({ error: "Authentication required" }, { status: 401 });
+          return withSecurityHeaders(
+            Response.json({ error: "Authentication required" }, { status: 401 })
+          );
         }
         if (!env.CLERK_SECRET_KEY) {
-          return Response.json({ error: "Server auth secret not configured" }, { status: 500 });
+          return withSecurityHeaders(
+            Response.json({ error: "Server auth secret not configured" }, { status: 500 })
+          );
         }
 
         const { ticket, nonce, exp } = await issueSignedWsTicket(
@@ -48,28 +61,36 @@ export default {
           body: JSON.stringify({ nonce, exp })
         });
         if (!regRes.ok) {
-          return Response.json({ error: "Failed to register WebSocket ticket" }, { status: 500 });
+          return withSecurityHeaders(
+            Response.json({ error: "Failed to register WebSocket ticket" }, { status: 500 })
+          );
         }
 
-        return Response.json({
-          ticket,
-          userId: session.userId,
-          expiresAt: exp
-        });
+        return withSecurityHeaders(
+          Response.json({
+            ticket,
+            userId: session.userId,
+            expiresAt: exp
+          })
+        );
       }
 
       // 2. Authenticate WebSocket connections using the short-lived connection ticket
       if (url.pathname === "/api/ws" || request.headers.get("Upgrade") === "websocket") {
         const ticket = url.searchParams.get("ticket") || "";
         if (!env.CLERK_SECRET_KEY) {
-          return Response.json({ error: "Server auth secret not configured" }, { status: 500 });
+          return withSecurityHeaders(
+            Response.json({ error: "Server auth secret not configured" }, { status: 500 })
+          );
         }
 
         const verifiedTicket = await verifySignedWsTicket(ticket, env.CLERK_SECRET_KEY);
         if (!verifiedTicket) {
-          return Response.json(
-            { error: "Invalid or expired WebSocket connection ticket" },
-            { status: 401 }
+          return withSecurityHeaders(
+            Response.json(
+              { error: "Invalid or expired WebSocket connection ticket" },
+              { status: 401 }
+            )
           );
         }
 
@@ -80,25 +101,59 @@ export default {
 
         const doUrl = new URL(request.url);
         doUrl.pathname = "/ws";
-        doUrl.search = "";
-        return stub.fetch(new Request(doUrl.toString(), {
-          method: request.method,
-          headers
-        }));
+        doUrl.search = ""; // Redact ticket query string before forwarding (S11)
+        return stub.fetch(
+          new Request(doUrl.toString(), {
+            method: request.method,
+            headers
+          })
+        );
       }
 
       // 3. Block direct external access to /api/internal/*
       if (url.pathname.startsWith("/api/internal/")) {
-        return Response.json({ error: "Not Found" }, { status: 404 });
+        return withSecurityHeaders(Response.json({ error: "Not Found" }, { status: 404 }));
       }
 
-      // 4. Authenticate every HTTP API request using a verified Clerk session token
+      // 4. Detach a push endpoint from a previous user's Durable Object during account switch (S03)
+      if (url.pathname === "/api/push/detach-previous" && request.method === "POST") {
+        const session = await verifyClerkRequest(request, env);
+        if (!session) {
+          return withSecurityHeaders(
+            Response.json({ error: "Authentication required" }, { status: 401 })
+          );
+        }
+        try {
+          const body: { previousUserId?: string; endpoint?: string } = await request.json();
+          if (
+            body.previousUserId &&
+            typeof body.previousUserId === "string" &&
+            body.endpoint &&
+            typeof body.endpoint === "string"
+          ) {
+            const prevStub = getUserStub(env, body.previousUserId);
+            await prevStub.fetch("https://do.internal/push/unsubscribe", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ endpoint: body.endpoint })
+            });
+          }
+          return withSecurityHeaders(Response.json({ success: true }));
+        } catch {
+          return withSecurityHeaders(
+            Response.json({ error: "Invalid detach request" }, { status: 400 })
+          );
+        }
+      }
+
+      // 5. Authenticate every HTTP API request using a verified Clerk session token
       const session = await verifyClerkRequest(request, env);
       if (!session) {
-        return Response.json({ error: "Authentication required" }, { status: 401 });
+        return withSecurityHeaders(
+          Response.json({ error: "Authentication required" }, { status: 401 })
+        );
       }
 
-      // Derive Durable Object ID strictly from the verified Clerk user ID
       const stub = getUserStub(env, session.userId);
       const doUrl = new URL(request.url);
       doUrl.pathname = url.pathname.replace(/^\/api/, "");
@@ -107,20 +162,22 @@ export default {
       const headers = new Headers(request.headers);
       headers.set("X-Verified-User-Id", session.userId);
 
-      return stub.fetch(
+      const res = await stub.fetch(
         new Request(doUrl.toString(), {
           method: request.method,
           headers,
           body: request.body
         })
       );
+      return withSecurityHeaders(res);
     }
 
-    // 5. Serve static assets (HTML, JS, CSS, fonts)
+    // 6. Serve static assets with security headers (S08)
     if (env.ASSETS) {
-      return env.ASSETS.fetch(request);
+      const assetRes = await env.ASSETS.fetch(request);
+      return withSecurityHeaders(assetRes);
     }
 
-    return new Response("klanki Web Server running.", { status: 200 });
+    return withSecurityHeaders(new Response("klanki Web Server running.", { status: 200 }));
   }
 };

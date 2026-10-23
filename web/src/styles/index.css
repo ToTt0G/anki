@@ -1690,3 +1690,37 @@ input:focus, select:focus, textarea:focus {
   0%, 92%, 100% { transform: scaleY(1); }
   96% { transform: scaleY(0.08); }
 }
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[role="gridcell"]:focus-visible {
+  outline: 2px solid #0284c7;
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .cyborg-duck-svg #leg-front,
+  .cyborg-duck-svg #leg-back,
+  .cyborg-duck-svg #torso,
+  .cyborg-duck-svg #head,
+  .cyborg-duck-svg #wing,
+  .cyborg-duck-svg #tail,
+  .cyborg-duck-svg #shadow,
+  .cyborg-duck-svg #cyber-core,
+  .cyborg-duck-svg #chest-core,
+  .cyborg-duck-svg #eye-lid,
+  .spin,
+  .sync-status.connecting {
+    animation: none !important;
+  }
+}

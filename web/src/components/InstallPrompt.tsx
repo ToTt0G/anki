@@ -9,15 +9,25 @@ import {
 } from "../core/pwa";
 
 interface Props {
-  onOpenManualModal?: () => void;
+  externalOpenGuide?: boolean;
+  onCloseExternalGuide?: () => void;
 }
 
-export const InstallPrompt: React.FC<Props> = () => {
+export const InstallPrompt: React.FC<Props> = ({
+  externalOpenGuide,
+  onCloseExternalGuide
+}) => {
   const [standalone, setStandalone] = useState(true);
   const [canPrompt, setCanPrompt] = useState(false);
   const [dismissed, setDismissed] = useState(true);
   const [showIosGuide, setShowIosGuide] = useState(false);
   const [installedSuccess, setInstalledSuccess] = useState(false);
+
+  const isGuideVisible = showIosGuide || Boolean(externalOpenGuide);
+  const closeGuide = () => {
+    setShowIosGuide(false);
+    onCloseExternalGuide?.();
+  };
 
   useEffect(() => {
     const isApp = isStandalone();
@@ -34,7 +44,7 @@ export const InstallPrompt: React.FC<Props> = () => {
     return () => unsub();
   }, []);
 
-  if (standalone) return null;
+  if (standalone && !externalOpenGuide) return null;
 
   const handleInstallClick = async () => {
     if (isIosDevice()) {
@@ -184,9 +194,12 @@ export const InstallPrompt: React.FC<Props> = () => {
       )}
 
       {/* iOS & Manual Installation Instructions Modal */}
-      {showIosGuide && (
-        <div className="modal-backdrop" style={{ zIndex: 1001 }} onClick={() => setShowIosGuide(false)}>
+      {isGuideVisible && (
+        <div className="modal-backdrop" style={{ zIndex: 1001 }} onClick={closeGuide}>
           <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="install-guide-title"
             className="modal-content"
             style={{ maxWidth: 460 }}
             onClick={e => e.stopPropagation()}
@@ -194,10 +207,14 @@ export const InstallPrompt: React.FC<Props> = () => {
             <div className="modal-header">
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <Smartphone size={20} color="var(--color-new)" />
-                <h3 style={{ fontSize: 16, fontWeight: 600 }}>Install klanki as an App</h3>
+                <h3 id="install-guide-title" style={{ fontSize: 16, fontWeight: 600 }}>
+                  Install klanki as an App
+                </h3>
               </div>
               <button
-                onClick={() => setShowIosGuide(false)}
+                type="button"
+                aria-label="Close install instructions"
+                onClick={closeGuide}
                 style={{ border: "none", padding: 4, background: "transparent" }}
               >
                 <X size={18} />
@@ -342,7 +359,7 @@ export const InstallPrompt: React.FC<Props> = () => {
             </div>
 
             <div className="modal-footer" style={{ marginTop: 12 }}>
-              <button className="primary" onClick={() => setShowIosGuide(false)}>
+              <button type="button" className="primary" onClick={closeGuide}>
                 Got it
               </button>
             </div>

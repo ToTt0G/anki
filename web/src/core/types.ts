@@ -16,7 +16,7 @@ export interface Card {
   usn: number;
   type: CardType;
   queue: CardQueue;
-  due: number; // new: position; learn: unix sec; review: day offset
+  due: number; // new: position; learn(q=1): unix sec; review(q=2)/day-learn(q=3): epoch day (or crt-relative day if <10000)
   ivl: number; // positive = days, negative = seconds
   factor: number; // permille, e.g. 2500
   reps: number;
@@ -25,7 +25,7 @@ export interface Card {
   odue: number;
   odid: number;
   flags: number;
-  data: string; // JSON FSRS memory state
+  data: string; // JSON FSRS memory state { s, d, lastRevDay }
 }
 
 export interface Note {
@@ -42,6 +42,12 @@ export interface Note {
   data: string;
 }
 
+export interface CustomStudyOverride {
+  day: number;
+  extraNew: number;
+  extraRev: number;
+}
+
 export interface Deck {
   id: number;
   name: string;
@@ -51,6 +57,7 @@ export interface Deck {
   dyn: number; // 0 = standard, 1 = filtered/cram
   mod: number;
   usn: number;
+  customStudy?: CustomStudyOverride;
 }
 
 export interface DeckConfig {
@@ -58,7 +65,7 @@ export interface DeckConfig {
   name: string;
   new: {
     delays: number[]; // learning steps in minutes [1, 10]
-    ints: number[];   // [graduating: 1, easy: 4] days
+    ints: number[]; // [graduating: 1, easy: 4] days
     initialFactor: number; // 2500
     perDay: number;
     order: number; // 0 = random, 1 = order added
@@ -125,9 +132,10 @@ export interface RevlogEntry {
 }
 
 export interface Collection {
-  id: number;
+  id?: number;
   crt: number; // creation timestamp in seconds
   mod: number;
+  scm?: number;
   decks: Record<number, Deck>;
   dconf: Record<number, DeckConfig>;
   models: Record<number, NoteType>;

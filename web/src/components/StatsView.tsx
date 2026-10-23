@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useMemo } from "react";
 import { Collection } from "../core/types";
 import {
   calculateTodayStats,
@@ -12,10 +12,10 @@ interface Props {
 }
 
 export const StatsView: React.FC<Props> = ({ collection }) => {
-  const today = calculateTodayStats(collection);
-  const cardStates = calculateCardStateStats(collection);
-  const forecast = calculateDueForecast(collection, 14);
-  const history = calculateReviewHistory(collection, 30);
+  const today = useMemo(() => calculateTodayStats(collection), [collection]);
+  const cardStates = useMemo(() => calculateCardStateStats(collection), [collection]);
+  const forecast = useMemo(() => calculateDueForecast(collection, 14), [collection]);
+  const history = useMemo(() => calculateReviewHistory(collection, 30), [collection]);
 
   const formatMinutes = (sec: number) => {
     const mins = Math.round(sec / 60);
@@ -23,6 +23,8 @@ export const StatsView: React.FC<Props> = ({ collection }) => {
   };
 
   const maxDueInForecast = Math.max(1, ...forecast.map(f => f.dueCount));
+  const activeDays30 = history.filter(d => d.count > 0).length;
+  const totalReviews30 = history.reduce((sum, d) => sum + d.count, 0);
 
   return (
     <div style={{ maxWidth: 720, width: "100%", margin: "0 auto", display: "flex", flexDirection: "column", gap: 20, boxSizing: "border-box" }}>
@@ -39,9 +41,9 @@ export const StatsView: React.FC<Props> = ({ collection }) => {
             <div style={{ fontSize: 20, fontWeight: 700 }}>{formatMinutes(today.totalTimeSec)}</div>
           </div>
           <div>
-            <div style={{ fontSize: 13, color: "var(--text-secondary)" }}>Retention</div>
+            <div style={{ fontSize: 13, color: "var(--text-secondary)" }}>Pass Rate</div>
             <div style={{ fontSize: 20, fontWeight: 700, color: "var(--color-due)" }}>
-              {today.retentionRate}%
+              {today.retentionRate !== null ? `${today.retentionRate}%` : "—"}
             </div>
           </div>
         </div>
@@ -77,6 +79,7 @@ export const StatsView: React.FC<Props> = ({ collection }) => {
               return (
                 <div
                   key={item.dayOffset}
+                  aria-label={`${item.dateStr}: ${item.dueCount} cards due`}
                   style={{
                     flex: 1,
                     display: "flex",
@@ -132,24 +135,46 @@ export const StatsView: React.FC<Props> = ({ collection }) => {
         </div>
       </section>
 
-      {/* Review History Calendar Grid */}
+      {/* Accessible Review History Calendar Grid (U11) */}
       <section style={{ border: "1px solid var(--border-color)", borderRadius: 8, padding: 16, boxSizing: "border-box", maxWidth: "100%" }}>
-        <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 12 }}>History (30 Days)</h3>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(10, 1fr)", gap: 6, maxWidth: "100%" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 6 }}>
+          <h3 style={{ fontSize: 16, fontWeight: 600 }}>History (30 Days)</h3>
+          <span style={{ fontSize: 12.5, color: "var(--text-secondary)" }}>
+            {activeDays30} / 30 days studied · {totalReviews30} reviews
+          </span>
+        </div>
+        <div
+          role="grid"
+          aria-label="30-day review history"
+          style={{ display: "grid", gridTemplateColumns: "repeat(10, 1fr)", gap: 6, maxWidth: "100%" }}
+        >
           {history.map(day => {
-            const opacity = day.count === 0 ? 0.08 : Math.min(1, 0.25 + day.count * 0.15);
+            const opacity = day.count === 0 ? 0.12 : Math.min(1, 0.28 + day.count * 0.12);
+            const label = `${day.dateStr}: ${day.count} reviews (${formatMinutes(day.timeSec)})`;
             return (
               <div
                 key={day.dateStr}
-                title={`${day.dateStr}: ${day.count} cards (${formatMinutes(day.timeSec)})`}
+                role="gridcell"
+                tabIndex={0}
+                aria-label={label}
+                title={label}
                 style={{
                   aspectRatio: "1",
-                  borderRadius: 4,
-                  background: "var(--color-due)",
-                  opacity,
-                  border: "1px solid var(--border-color)"
+                  borderRadius: 5,
+                  background: day.count > 0 ? "rgba(22, 163, 74, 0.18)" : "var(--bg-secondary)",
+                  border: `1px solid ${day.count > 0 ? "var(--color-due)" : "var(--border-color)"}`,
+                  opacity: day.count > 0 ? Math.max(0.55, opacity) : 1,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontSize: 10,
+                  fontWeight: 600,
+                  color: day.count > 0 ? "var(--color-due)" : "var(--text-muted)",
+                  fontVariantNumeric: "tabular-nums"
                 }}
-              />
+              >
+                {day.count > 0 ? day.count : ""}
+              </div>
             );
           })}
         </div>

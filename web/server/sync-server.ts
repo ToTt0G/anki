@@ -9,11 +9,17 @@ import {
   sendWebPush,
   VapidConfig
 } from "./push-service";
+import {
+  validateClientMessage,
+  validateCollectionPayload,
+  validatePushSubscriptionInput
+} from "./validation";
 
 export interface PushPreferences {
   dailyMode: "adaptive" | "fixed";
   dailyTime: string; // "HH:MM", e.g. "09:00"
-  tzOffsetMinutes: number; // JS Date.getTimezoneOffset() (minutes behind UTC)
+  tzOffsetMinutes: number;
+  timeZone?: string; // IANA timezone, e.g. "Europe/Stockholm" (N05, N06)
   learningAlerts: boolean;
 }
 
@@ -21,6 +27,7 @@ const DEFAULT_PUSH_PREFS: PushPreferences = {
   dailyMode: "adaptive",
   dailyTime: "09:00",
   tzOffsetMinutes: 0,
+  timeZone: "UTC",
   learningAlerts: true
 };
 
@@ -33,6 +40,75 @@ export interface DueSummary {
   studiedToday: boolean;
   streakDays: number;
   adaptiveHour: number;
+}
+
+function isValidTimeZone(tz?: string): tz is string {
+  if (!tz || typeof tz !== "string" || tz.length > 64) return false;
+  try {
+    Intl.DateTimeFormat(undefined, { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Get YYYY-MM-DD and hour (0..23) and minute (0..59) in the user's IANA timeZone (N05).
+ */
+function getLocalTimeParts(
+  epochMs: number,
+  prefs: PushPreferences
+): { dateStr: string; hour: number; minute: number; midnightUtcMs: number } {
+  const tz = isValidTimeZone(prefs.timeZone) ? prefs.timeZone : null;
+  if (tz) {
+    try {
+      const parts = new Intl.DateTimeFormat("en-CA", {
+        timeZone: tz,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hourCycle: "h23"
+      }).formatToParts(new Date(epochMs));
+
+      const map: Record<string, string> = {};
+      for (const p of parts) {
+        map[p.type] = p.value;
+      }
+      const dateStr = `${map.year}-${map.month}-${map.day}`;
+      const hour = Number(map.hour) || 0;
+      const minute = Number(map.minute) || 0;
+      const sec = Number(map.second) || 0;
+      const elapsedTodayMs = ((hour * 60 + minute) * 60 + sec) * 1000;
+      return {
+        dateStr,
+        hour,
+        minute,
+        midnightUtcMs: epochMs - elapsedTodayMs
+      };
+    } catch {
+      // Fall through to tzOffsetMinutes
+    }
+  }
+
+  const offsetMs = (prefs.tzOffsetMinutes || 0) * 60_000;
+  const localNow = new Date(epochMs - offsetMs);
+  const dateStr = localNow.toISOString().slice(0, 10);
+  const hour = localNow.getUTCHours();
+  const minute = localNow.getUTCMinutes();
+  const midnightUtcMs =
+    Date.UTC(
+      localNow.getUTCFullYear(),
+      localNow.getUTCMonth(),
+      localNow.getUTCDate(),
+      0,
+      0,
+      0
+    ) + offsetMs;
+
+  return { dateStr, hour, minute, midnightUtcMs };
 }
 
 export class AnkiSyncServer extends DurableObject {
@@ -89,6 +165,11 @@ export class AnkiSyncServer extends DurableObject {
         nonce TEXT PRIMARY KEY,
         exp INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS applied_ops (
+        op_id TEXT PRIMARY KEY,
+        revision INTEGER NOT NULL,
+        applied_at INTEGER NOT NULL
+      );
     `);
   }
 
@@ -101,6 +182,45 @@ export class AnkiSyncServer extends DurableObject {
     this.sql.exec("INSERT OR REPLACE INTO col_meta (key, val) VALUES (?, ?)", key, val);
   }
 
+  private getRevision(): number {
+    return Number(this.getMeta("col_revision") || 0);
+  }
+
+  private isInitialized(): boolean {
+    if (this.getMeta("col_initialized") === "1") return true;
+    const deckRows = this.sql.exec("SELECT COUNT(*) as c FROM decks").toArray();
+    if (Number(deckRows[0]?.c || 0) > 0) {
+      this.setMeta("col_initialized", "1");
+      return true;
+    }
+    return false;
+  }
+
+  private bumpRevision(opId?: string): number {
+    const next = this.getRevision() + 1;
+    this.setMeta("col_revision", String(next));
+    this.setMeta("col_initialized", "1");
+    if (opId) {
+      const now = Date.now();
+      this.sql.exec("DELETE FROM applied_ops WHERE applied_at < ?", now - 86_400_000);
+      this.sql.exec(
+        "INSERT OR REPLACE INTO applied_ops (op_id, revision, applied_at) VALUES (?, ?, ?)",
+        opId,
+        next,
+        now
+      );
+    }
+    return next;
+  }
+
+  private getAlreadyAppliedRevision(opId?: string): number | null {
+    if (!opId) return null;
+    const rows = this.sql
+      .exec("SELECT revision FROM applied_ops WHERE op_id = ?", opId)
+      .toArray();
+    return rows.length > 0 ? Number(rows[0].revision) : null;
+  }
+
   private getPushPreferences(): PushPreferences {
     const raw = this.getMeta("push_preferences");
     if (!raw) return { ...DEFAULT_PUSH_PREFS };
@@ -108,10 +228,12 @@ export class AnkiSyncServer extends DurableObject {
       const parsed = JSON.parse(raw);
       return {
         dailyMode: parsed.dailyMode === "fixed" ? "fixed" : "adaptive",
-        dailyTime: typeof parsed.dailyTime === "string" && /^\d{2}:\d{2}$/.test(parsed.dailyTime)
-          ? parsed.dailyTime
-          : "09:00",
+        dailyTime:
+          typeof parsed.dailyTime === "string" && /^\d{2}:\d{2}$/.test(parsed.dailyTime)
+            ? parsed.dailyTime
+            : "09:00",
         tzOffsetMinutes: typeof parsed.tzOffsetMinutes === "number" ? parsed.tzOffsetMinutes : 0,
+        timeZone: isValidTimeZone(parsed.timeZone) ? parsed.timeZone : undefined,
         learningAlerts: parsed.learningAlerts !== false
       };
     } catch {
@@ -131,7 +253,12 @@ export class AnkiSyncServer extends DurableObject {
     };
   }
 
-  private getFullCollection(): Collection {
+  private isVapidReady(): boolean {
+    const cfg = this.getVapidConfig();
+    return Boolean(cfg.publicKey && cfg.privateKey && cfg.subject);
+  }
+
+  private getFullCollection(includeMedia: boolean = true): Collection {
     const decks: Record<number, Deck> = {};
     const dconf: Record<number, DeckConfig> = {};
     const models: Record<number, NoteType> = {};
@@ -164,16 +291,18 @@ export class AnkiSyncServer extends DurableObject {
       const r: RevlogEntry = JSON.parse(row.json);
       revlog.push(r);
     }
-    for (const row of this.sql.exec("SELECT name, data FROM media").toArray()) {
-      media[row.name] = row.data;
+    if (includeMedia) {
+      for (const row of this.sql.exec("SELECT name, data FROM media").toArray()) {
+        media[row.name] = row.data;
+      }
     }
 
     const crtMeta = Number(this.getMeta("col_crt")) || Math.floor(Date.now() / 1000);
 
     return {
+      id: 1,
       crt: crtMeta,
       mod: Math.floor(Date.now() / 1000),
-      scm: Math.floor(Date.now() / 1000),
       dconf,
       models,
       decks,
@@ -184,7 +313,24 @@ export class AnkiSyncServer extends DurableObject {
     };
   }
 
-  private saveFullCollection(col: Collection) {
+  /**
+   * Save a recoverable backup snapshot of core tables before a full collection overwrite (D07).
+   */
+  private saveBackupSnapshot() {
+    if (!this.isInitialized()) return;
+    try {
+      const current = this.getFullCollection(false);
+      if (Object.keys(current.cards).length > 0 || Object.keys(current.notes).length > 0) {
+        this.setMeta("backup_snapshot", JSON.stringify(current));
+      }
+    } catch (e) {
+      console.warn("Could not save pre-import backup snapshot:", e);
+    }
+  }
+
+  private saveFullCollection(col: Collection, opId?: string): number {
+    this.saveBackupSnapshot();
+    let nextRev = 0;
     this.ctx.storage.transactionSync(() => {
       if (col.crt) {
         this.setMeta("col_crt", String(col.crt));
@@ -195,46 +341,50 @@ export class AnkiSyncServer extends DurableObject {
       this.sql.exec("DELETE FROM notes");
       this.sql.exec("DELETE FROM cards");
       this.sql.exec("DELETE FROM revlog");
-      this.sql.exec("DELETE FROM media");
 
-      for (const d of Object.values(col.decks)) {
+      for (const d of Object.values(col.decks || {})) {
         this.sql.exec("INSERT INTO decks (id, json) VALUES (?, ?)", d.id, JSON.stringify(d));
       }
-      for (const dc of Object.values(col.dconf)) {
+      for (const dc of Object.values(col.dconf || {})) {
         this.sql.exec("INSERT INTO dconf (id, json) VALUES (?, ?)", dc.id, JSON.stringify(dc));
       }
-      for (const m of Object.values(col.models)) {
+      for (const m of Object.values(col.models || {})) {
         this.sql.exec("INSERT INTO models (id, json) VALUES (?, ?)", m.id, JSON.stringify(m));
       }
-      for (const n of Object.values(col.notes)) {
+      for (const n of Object.values(col.notes || {})) {
         this.sql.exec("INSERT INTO notes (id, json) VALUES (?, ?)", n.id, JSON.stringify(n));
       }
-      for (const c of Object.values(col.cards)) {
+      for (const c of Object.values(col.cards || {})) {
         this.sql.exec("INSERT INTO cards (id, json) VALUES (?, ?)", c.id, JSON.stringify(c));
       }
       for (const r of col.revlog || []) {
-        this.sql.exec("INSERT INTO revlog (id, json) VALUES (?, ?)", r.id, JSON.stringify(r));
+        this.sql.exec("INSERT OR REPLACE INTO revlog (id, json) VALUES (?, ?)", r.id, JSON.stringify(r));
       }
-      for (const [name, data] of Object.entries(col.media || {})) {
-        this.sql.exec("INSERT INTO media (name, data) VALUES (?, ?)", name, data);
+      if (col.media && Object.keys(col.media).length > 0) {
+        for (const [name, data] of Object.entries(col.media)) {
+          this.sql.exec("INSERT OR REPLACE INTO media (name, data) VALUES (?, ?)", name, data);
+        }
       }
+      nextRev = this.bumpRevision(opId);
     });
+    return nextRev;
   }
 
   /**
-   * Analyze the collection, review history, and user timezone to compute:
-   * - Due learning cards (exact Unix seconds)
-   * - Due review cards (epoch day <= today)
-   * - Available new cards
-   * - Whether the user has already studied today
-   * - Current consecutive-day study streak
-   * - Adaptive habitual study hour (0..23) learned from revlog timestamps
+   * Lightweight due summary calculation that reads only decks, cards, and revlog (never media) (P01, C05, N05).
    */
-  private computeDueSummary(col: Collection, prefs: PushPreferences): DueSummary {
+  private computeDueSummary(prefs: PushPreferences): DueSummary {
     const nowMs = Date.now();
     const nowSec = Math.floor(nowMs / 1000);
     const todayEpochDay = Math.floor(nowMs / 86_400_000);
-    const crtDay = Math.floor((col.crt || nowSec) / 86400);
+    const crtSec = Number(this.getMeta("col_crt")) || nowSec;
+    const crtDay = Math.floor(crtSec / 86400);
+
+    const decks: Record<number, Deck> = {};
+    for (const row of this.sql.exec("SELECT json FROM decks").toArray()) {
+      const d: Deck = JSON.parse(row.json);
+      decks[d.id] = d;
+    }
 
     let learnDueCount = 0;
     let reviewDueCount = 0;
@@ -242,10 +392,12 @@ export class AnkiSyncServer extends DurableObject {
     let earliestLearnDueSec: number | null = null;
     const duePerDeck: Record<number, number> = {};
 
-    for (const card of Object.values(col.cards)) {
-      if (card.queue < 0) continue; // Suspended or buried
+    for (const row of this.sql.exec("SELECT json FROM cards").toArray()) {
+      const card: Card = JSON.parse(row.json);
+      if (card.queue < 0) continue;
 
-      if (card.queue === 1 || card.queue === 3) {
+      if (card.queue === 1) {
+        // Intraday learning (Unix seconds)
         if (earliestLearnDueSec === null || card.due < earliestLearnDueSec) {
           earliestLearnDueSec = card.due;
         }
@@ -253,8 +405,17 @@ export class AnkiSyncServer extends DurableObject {
           learnDueCount++;
           duePerDeck[card.did] = (duePerDeck[card.did] || 0) + 1;
         }
+      } else if (card.queue === 3) {
+        // Day-learning queue (C05): due is in days (or Unix sec if legacy klanki card)
+        const isDayDue =
+          card.due > 1_000_000_000
+            ? card.due <= nowSec + 60
+            : (card.due < 10000 ? crtDay + card.due : card.due) <= todayEpochDay;
+        if (isDayDue) {
+          learnDueCount++;
+          duePerDeck[card.did] = (duePerDeck[card.did] || 0) + 1;
+        }
       } else if (card.queue === 2) {
-        // Handle both epoch-day due numbers and imported relative-day due numbers
         const effectiveDueDay = card.due < 10000 ? crtDay + card.due : card.due;
         if (effectiveDueDay <= todayEpochDay) {
           reviewDueCount++;
@@ -265,7 +426,6 @@ export class AnkiSyncServer extends DurableObject {
       }
     }
 
-    // Find the deck with the most due cards
     let topDeckId = 1;
     let maxDeckDue = -1;
     for (const [didStr, count] of Object.entries(duePerDeck)) {
@@ -275,57 +435,42 @@ export class AnkiSyncServer extends DurableObject {
       }
     }
     const topDeckName =
-      col.decks[topDeckId]?.name || Object.values(col.decks)[0]?.name || "Default";
+      decks[topDeckId]?.name || Object.values(decks)[0]?.name || "Default";
 
-    // Local time calculations using tzOffsetMinutes (minutes behind UTC)
-    const offsetMs = (prefs.tzOffsetMinutes || 0) * 60_000;
-    const localNow = new Date(nowMs - offsetMs);
-    const localMidnightUtcMs =
-      Date.UTC(
-        localNow.getUTCFullYear(),
-        localNow.getUTCMonth(),
-        localNow.getUTCDate(),
-        0,
-        0,
-        0
-      ) + offsetMs;
-
+    const localNowParts = getLocalTimeParts(nowMs, prefs);
     const studiedDaySet = new Set<string>();
     const hourBuckets = new Array<number>(24).fill(0);
     let studiedToday = false;
+    let totalRevlogs = 0;
 
-    for (const entry of col.revlog || []) {
+    for (const row of this.sql.exec("SELECT json FROM revlog").toArray()) {
+      totalRevlogs++;
+      const entry: RevlogEntry = JSON.parse(row.json);
       const ts = entry.id;
-      if (ts >= localMidnightUtcMs) {
+      if (ts >= localNowParts.midnightUtcMs) {
         studiedToday = true;
       }
-      const localDate = new Date(ts - offsetMs);
-      const dayKey = localDate.toISOString().slice(0, 10);
-      studiedDaySet.add(dayKey);
-      const hr = localDate.getUTCHours();
-      if (hr >= 0 && hr < 24) {
-        hourBuckets[hr]++;
+      const entryParts = getLocalTimeParts(ts, prefs);
+      studiedDaySet.add(entryParts.dateStr);
+      if (entryParts.hour >= 0 && entryParts.hour < 24) {
+        hourBuckets[entryParts.hour]++;
       }
     }
 
-    // Compute streak (consecutive days up to today or yesterday)
     let streakDays = 0;
     for (let d = 0; d < 365; d++) {
-      const checkDate = new Date(nowMs - offsetMs - d * 86_400_000);
-      const key = checkDate.toISOString().slice(0, 10);
-      if (studiedDaySet.has(key)) {
+      const checkParts = getLocalTimeParts(nowMs - d * 86_400_000, prefs);
+      if (studiedDaySet.has(checkParts.dateStr)) {
         streakDays++;
       } else if (d === 0) {
-        // Haven't studied yet today; check if streak is alive from yesterday
         continue;
       } else {
         break;
       }
     }
 
-    // Learn user's habitual study hour (defaults to 9 AM if < 5 reviews)
     let adaptiveHour = 9;
-    if ((col.revlog || []).length >= 5) {
+    if (totalRevlogs >= 5) {
       let bestCount = -1;
       for (let h = 6; h <= 22; h++) {
         if (hourBuckets[h] > bestCount) {
@@ -347,12 +492,6 @@ export class AnkiSyncServer extends DurableObject {
     };
   }
 
-  /**
-   * Compute and schedule the exact next Durable Object alarm timestamp (`setAlarm`)
-   * combining:
-   * 1. Intraday Learning / Relearning step completion alerts (when the user has unfinished learning steps)
-   * 2. Daily Review / Study reminder at the user's adaptive or fixed daily study time
-   */
   private async recomputeAndScheduleAlarm(): Promise<number | null> {
     const subRows = this.sql
       .exec("SELECT COUNT(*) as count FROM push_subscriptions")
@@ -366,29 +505,15 @@ export class AnkiSyncServer extends DurableObject {
     }
 
     const prefs = this.getPushPreferences();
-    const col = this.getFullCollection();
-    const summary = this.computeDueSummary(col, prefs);
+    const summary = this.computeDueSummary(prefs);
 
     const nowMs = Date.now();
-    const offsetMs = (prefs.tzOffsetMinutes || 0) * 60_000;
-    const localNow = new Date(nowMs - offsetMs);
-    const localDateStr = localNow.toISOString().slice(0, 10);
-    const localMidnightUtcMs =
-      Date.UTC(
-        localNow.getUTCFullYear(),
-        localNow.getUTCMonth(),
-        localNow.getUTCDate(),
-        0,
-        0,
-        0
-      ) + offsetMs;
+    const localParts = getLocalTimeParts(nowMs, prefs);
 
-    // 1. Candidate A: Intraday learning step reminder
     let learnCandidateMs: number | null = null;
     const lastActivityMs = Number(this.getMeta("last_activity_ms") || 0);
     const lastLearnPushMs = Number(this.getMeta("last_learn_push_ms") || 0);
 
-    // Only schedule a learning-step alert if the user has studied since the last learning alert
     if (
       prefs.learningAlerts &&
       summary.earliestLearnDueSec !== null &&
@@ -407,7 +532,6 @@ export class AnkiSyncServer extends DurableObject {
       );
     }
 
-    // 2. Candidate B: Daily study reminder
     let targetHour = summary.adaptiveHour;
     let targetMinute = 0;
     if (prefs.dailyMode === "fixed") {
@@ -417,13 +541,13 @@ export class AnkiSyncServer extends DurableObject {
     }
 
     const todayTargetUtcMs =
-      localMidnightUtcMs + (targetHour * 60 + targetMinute) * 60_000;
+      localParts.midnightUtcMs + (targetHour * 60 + targetMinute) * 60_000;
     const lastDailySentDate = this.getMeta("last_daily_push_date") || "";
 
     let dailyCandidateMs: number;
     if (
       !summary.studiedToday &&
-      lastDailySentDate !== localDateStr &&
+      lastDailySentDate !== localParts.dateStr &&
       todayTargetUtcMs > nowMs + 15_000
     ) {
       dailyCandidateMs = todayTargetUtcMs;
@@ -441,30 +565,22 @@ export class AnkiSyncServer extends DurableObject {
     return nextAlarmMs;
   }
 
-  /**
-   * Durable Object Alarm Handler:
-   * Wakes up automatically at the scheduled millisecond even when all browsers/phones are closed,
-   * evaluates due learning steps & daily study goals, dispatches Web Push notifications,
-   * and schedules the next alarm.
-   */
   async alarm(): Promise<void> {
     const subRows = this.sql
       .exec("SELECT COUNT(*) as count FROM push_subscriptions")
       .toArray();
-    if (!Number(subRows[0]?.count || 0)) {
+    if (!Number(subRows[0]?.count || 0) || !this.isVapidReady()) {
       return;
     }
 
     const prefs = this.getPushPreferences();
-    const col = this.getFullCollection();
-    const summary = this.computeDueSummary(col, prefs);
+    const summary = this.computeDueSummary(prefs);
     const config = this.getVapidConfig();
 
     const nowMs = Date.now();
     const lastActivityMs = Number(this.getMeta("last_activity_ms") || 0);
     const lastLearnPushMs = Number(this.getMeta("last_learn_push_ms") || 0);
 
-    // If user is actively reviewing cards right now (activity within last 90s and socket open), snooze alarm
     const hasOpenSockets = this.ctx
       .getWebSockets()
       .some(ws => ws.readyState === WebSocket.OPEN);
@@ -473,19 +589,7 @@ export class AnkiSyncServer extends DurableObject {
       return;
     }
 
-    const offsetMs = (prefs.tzOffsetMinutes || 0) * 60_000;
-    const localNow = new Date(nowMs - offsetMs);
-    const localDateStr = localNow.toISOString().slice(0, 10);
-    const localMidnightUtcMs =
-      Date.UTC(
-        localNow.getUTCFullYear(),
-        localNow.getUTCMonth(),
-        localNow.getUTCDate(),
-        0,
-        0,
-        0
-      ) + offsetMs;
-
+    const localParts = getLocalTimeParts(nowMs, prefs);
     let targetHour = summary.adaptiveHour;
     let targetMinute = 0;
     if (prefs.dailyMode === "fixed") {
@@ -494,10 +598,11 @@ export class AnkiSyncServer extends DurableObject {
       targetMinute = Math.min(59, Math.max(0, Number(mStr) || 0));
     }
     const todayTargetUtcMs =
-      localMidnightUtcMs + (targetHour * 60 + targetMinute) * 60_000;
+      localParts.midnightUtcMs + (targetHour * 60 + targetMinute) * 60_000;
     const lastDailySentDate = this.getMeta("last_daily_push_date") || "";
 
-    // Check Tier 1: Intraday Learning Step Ready
+    let transientFailure = false;
+
     if (
       prefs.learningAlerts &&
       summary.learnDueCount > 0 &&
@@ -505,48 +610,79 @@ export class AnkiSyncServer extends DurableObject {
     ) {
       const count = summary.learnDueCount;
       const payload: PushPayload = {
-        title: `klanki · ${count} Learning ${count === 1 ? "Card" : "Cards"} Due`,
-        body: `Your learning step in ${summary.topDeckName} is ready — review now to lock it into memory.`,
+        title: `klanki: ${count} Learning ${count === 1 ? "Card" : "Cards"} Due`,
+        body: `Your learning step in ${summary.topDeckName} is ready to review.`,
         url: "/",
         tag: "klanki-learn-due"
       };
-      await this.broadcastPushNotification(payload, config);
-      this.setMeta("last_learn_push_ms", String(nowMs));
+      const results = await this.broadcastPushNotification(payload, config);
+      // Only mark delivered if at least one subscription succeeded (N08)
+      if (results.sent > 0) {
+        this.setMeta("last_learn_push_ms", String(nowMs));
+      } else if (results.failed > 0) {
+        transientFailure = true;
+      }
     } else if (
-      // Check Tier 2: Daily Study Reminder
       nowMs >= todayTargetUtcMs - 60_000 &&
       !summary.studiedToday &&
-      lastDailySentDate !== localDateStr
+      lastDailySentDate !== localParts.dateStr
     ) {
       const dueTotal = summary.learnDueCount + summary.reviewDueCount;
       const streakSuffix =
         summary.streakDays >= 2 ? ` (${summary.streakDays}-day streak)` : "";
 
-      if (dueTotal > 0) {
-        const payload: PushPayload = {
-          title: `klanki · ${dueTotal} ${dueTotal === 1 ? "Card" : "Cards"} Due Today`,
-          body: `Ready in ${summary.topDeckName}${
-            summary.newCount > 0 ? ` + ${ Math.min(20, summary.newCount) } new` : ""
-          }${streakSuffix}.`,
-          url: "/",
-          tag: "klanki-daily-due"
-        };
-        await this.broadcastPushNotification(payload, config);
-        this.setMeta("last_daily_push_date", localDateStr);
-      } else if (summary.newCount > 0) {
-        const batch = Math.min(20, summary.newCount);
-        const payload: PushPayload = {
-          title: "klanki · Daily Study Reminder",
-          body: `${batch} new ${batch === 1 ? "card" : "cards"} waiting in ${summary.topDeckName}${streakSuffix}.`,
-          url: "/",
-          tag: "klanki-daily-due"
-        };
-        await this.broadcastPushNotification(payload, config);
-        this.setMeta("last_daily_push_date", localDateStr);
+      if (dueTotal > 0 || summary.newCount > 0) {
+        const payload: PushPayload =
+          dueTotal > 0
+            ? {
+                title: `klanki: ${dueTotal} ${dueTotal === 1 ? "Card" : "Cards"} Due Today`,
+                body: `Ready in ${summary.topDeckName}${
+                  summary.newCount > 0 ? ` + ${Math.min(20, summary.newCount)} new` : ""
+                }${streakSuffix}.`,
+                url: "/",
+                tag: "klanki-daily-due"
+              }
+            : {
+                title: "klanki: Daily Study Reminder",
+                body: `${Math.min(20, summary.newCount)} new cards waiting in ${summary.topDeckName}${streakSuffix}.`,
+                url: "/",
+                tag: "klanki-daily-due"
+              };
+
+        const results = await this.broadcastPushNotification(payload, config);
+        if (results.sent > 0) {
+          this.setMeta("last_daily_push_date", localParts.dateStr);
+        } else if (results.failed > 0) {
+          transientFailure = true;
+        }
       }
     }
 
+    if (transientFailure) {
+      // Retry in 15 minutes on transient push delivery failure (N08)
+      const retryAt = Date.now() + 15 * 60_000;
+      await this.ctx.storage.setAlarm(retryAt);
+      this.setMeta("next_alarm_ms", String(retryAt));
+      return;
+    }
+
     await this.recomputeAndScheduleAlarm();
+  }
+
+  /**
+   * Enforce rate limit on manual push trigger endpoints (S05).
+   */
+  private checkPushTriggerRateLimit(): { allowed: boolean; error?: string } {
+    const now = Date.now();
+    const lastTrigger = Number(this.getMeta("last_push_trigger_ms") || 0);
+    if (now - lastTrigger < 5_000) {
+      return {
+        allowed: false,
+        error: "Please wait a few seconds before sending another notification."
+      };
+    }
+    this.setMeta("last_push_trigger_ms", String(now));
+    return { allowed: true };
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -587,34 +723,101 @@ export class AnkiSyncServer extends DurableObject {
       return new Response(null, { status: 101, webSocket: client });
     }
 
-    // 2. HTTP Collection Endpoints
+    // 2. Complete Account Data Deletion Lifecycle (S10)
+    if (url.pathname === "/account-data" && request.method === "DELETE") {
+      await this.ctx.storage.deleteAlarm();
+      this.ctx.storage.transactionSync(() => {
+        this.sql.exec("DELETE FROM col_meta");
+        this.sql.exec("DELETE FROM decks");
+        this.sql.exec("DELETE FROM dconf");
+        this.sql.exec("DELETE FROM models");
+        this.sql.exec("DELETE FROM notes");
+        this.sql.exec("DELETE FROM cards");
+        this.sql.exec("DELETE FROM revlog");
+        this.sql.exec("DELETE FROM media");
+        this.sql.exec("DELETE FROM push_subscriptions");
+        this.sql.exec("DELETE FROM ws_tickets");
+        this.sql.exec("DELETE FROM applied_ops");
+      });
+      for (const ws of this.ctx.getWebSockets()) {
+        try {
+          ws.close(1000, "Account data deleted");
+        } catch {
+          // ignore
+        }
+      }
+      return Response.json({ success: true });
+    }
+
+    // 3. HTTP Collection & Backup Restore Endpoints (D07)
     if (url.pathname === "/collection") {
       if (request.method === "GET") {
         const col = this.getFullCollection();
-        return Response.json(col);
+        return Response.json({
+          ...col,
+          revision: this.getRevision(),
+          initialized: this.isInitialized(),
+          hasBackup: Boolean(this.getMeta("backup_snapshot"))
+        });
       }
       if (request.method === "POST") {
         const col: Collection = await request.json();
-        this.saveFullCollection(col);
+        const valErr = validateCollectionPayload(col);
+        if (valErr) {
+          return Response.json({ error: valErr }, { status: 400 });
+        }
+        const revision = this.saveFullCollection(col);
         this.setMeta("last_activity_ms", String(Date.now()));
         await this.recomputeAndScheduleAlarm();
-        this.broadcast({ type: "full_state", collection: col });
-        return Response.json({ success: true });
+        this.broadcast({
+          type: "full_state",
+          collection: col,
+          revision,
+          initialized: true,
+          hasBackup: Boolean(this.getMeta("backup_snapshot"))
+        });
+        return Response.json({ success: true, revision });
       }
     }
 
-    // 3. Web Push API Endpoints
+    if (url.pathname === "/collection/restore-backup" && request.method === "POST") {
+      const backupRaw = this.getMeta("backup_snapshot");
+      if (!backupRaw) {
+        return Response.json({ error: "No backup snapshot available" }, { status: 404 });
+      }
+      const backupCol: Collection = JSON.parse(backupRaw);
+      const currentMedia = this.getFullCollection(true).media;
+      backupCol.media = { ...currentMedia, ...(backupCol.media || {}) };
+      const revision = this.saveFullCollection(backupCol);
+      await this.recomputeAndScheduleAlarm();
+      this.broadcast({
+        type: "full_state",
+        collection: backupCol,
+        revision,
+        initialized: true,
+        hasBackup: true
+      });
+      return Response.json({ success: true, revision, collection: backupCol });
+    }
+
+    // 4. Web Push API Endpoints
     if (url.pathname === "/push/vapid-public-key") {
       const config = this.getVapidConfig();
-      return Response.json({ publicKey: config.publicKey });
+      return Response.json({
+        publicKey: config.publicKey,
+        vapidConfigured: this.isVapidReady()
+      });
     }
 
     if (url.pathname === "/push/subscribe" && request.method === "POST") {
       try {
-        const sub: PushSubscriptionData & { tzOffsetMinutes?: number } = await request.json();
-        if (!sub?.endpoint || !sub?.keys?.p256dh || !sub?.keys?.auth) {
-          return Response.json({ error: "Invalid subscription format" }, { status: 400 });
+        const sub: PushSubscriptionData & { tzOffsetMinutes?: number; timeZone?: string } =
+          await request.json();
+        const validation = validatePushSubscriptionInput(sub);
+        if (!validation.ok) {
+          return Response.json({ error: validation.error }, { status: 400 });
         }
+
         const now = Date.now();
         this.sql.exec(
           "INSERT OR REPLACE INTO push_subscriptions (endpoint, p256dh, auth, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
@@ -624,11 +827,32 @@ export class AnkiSyncServer extends DurableObject {
           now,
           now
         );
-        if (typeof sub.tzOffsetMinutes === "number") {
-          const prefs = this.getPushPreferences();
-          prefs.tzOffsetMinutes = sub.tzOffsetMinutes;
+
+        // Enforce maximum 10 subscriptions per user, pruning oldest (S04)
+        this.sql.exec(`
+          DELETE FROM push_subscriptions
+          WHERE endpoint NOT IN (
+            SELECT endpoint FROM push_subscriptions ORDER BY updated_at DESC LIMIT 10
+          )
+        `);
+
+        // Only initialize timezone if not already explicitly configured (N05, N06)
+        const prefs = this.getPushPreferences();
+        let prefsChanged = false;
+        if (!prefs.timeZone || prefs.timeZone === "UTC") {
+          if (isValidTimeZone(sub.timeZone)) {
+            prefs.timeZone = sub.timeZone;
+            prefsChanged = true;
+          }
+          if (typeof sub.tzOffsetMinutes === "number") {
+            prefs.tzOffsetMinutes = sub.tzOffsetMinutes;
+            prefsChanged = true;
+          }
+        }
+        if (prefsChanged) {
           this.savePushPreferences(prefs);
         }
+
         const nextAlarmAt = await this.recomputeAndScheduleAlarm();
         return Response.json({ success: true, nextAlarmAt });
       } catch (err: any) {
@@ -639,7 +863,7 @@ export class AnkiSyncServer extends DurableObject {
     if (url.pathname === "/push/unsubscribe" && request.method === "POST") {
       try {
         const body: { endpoint: string } = await request.json();
-        if (body?.endpoint) {
+        if (body?.endpoint && typeof body.endpoint === "string") {
           this.sql.exec("DELETE FROM push_subscriptions WHERE endpoint = ?", body.endpoint);
         }
         await this.recomputeAndScheduleAlarm();
@@ -654,7 +878,12 @@ export class AnkiSyncServer extends DurableObject {
         const incoming: Partial<PushPreferences> = await request.json();
         const current = this.getPushPreferences();
         const updated: PushPreferences = {
-          dailyMode: incoming.dailyMode === "fixed" ? "fixed" : incoming.dailyMode === "adaptive" ? "adaptive" : current.dailyMode,
+          dailyMode:
+            incoming.dailyMode === "fixed"
+              ? "fixed"
+              : incoming.dailyMode === "adaptive"
+              ? "adaptive"
+              : current.dailyMode,
           dailyTime:
             typeof incoming.dailyTime === "string" && /^\d{2}:\d{2}$/.test(incoming.dailyTime)
               ? incoming.dailyTime
@@ -663,6 +892,7 @@ export class AnkiSyncServer extends DurableObject {
             typeof incoming.tzOffsetMinutes === "number"
               ? incoming.tzOffsetMinutes
               : current.tzOffsetMinutes,
+          timeZone: isValidTimeZone(incoming.timeZone) ? incoming.timeZone : current.timeZone,
           learningAlerts:
             typeof incoming.learningAlerts === "boolean"
               ? incoming.learningAlerts
@@ -670,8 +900,7 @@ export class AnkiSyncServer extends DurableObject {
         };
         this.savePushPreferences(updated);
         const nextAlarmAt = await this.recomputeAndScheduleAlarm();
-        const col = this.getFullCollection();
-        const dueSummary = this.computeDueSummary(col, updated);
+        const dueSummary = this.computeDueSummary(updated);
         return Response.json({
           success: true,
           preferences: updated,
@@ -686,12 +915,11 @@ export class AnkiSyncServer extends DurableObject {
     if (url.pathname === "/push/status") {
       const rows = this.sql.exec("SELECT COUNT(*) as count FROM push_subscriptions").toArray();
       const prefs = this.getPushPreferences();
-      const col = this.getFullCollection();
-      const dueSummary = this.computeDueSummary(col, prefs);
+      const dueSummary = this.computeDueSummary(prefs);
       const nextAlarmAt = await this.recomputeAndScheduleAlarm();
       return Response.json({
         subscriptions: rows[0]?.count || 0,
-        vapidConfigured: !!this.getVapidConfig().publicKey,
+        vapidConfigured: this.isVapidReady(),
         preferences: prefs,
         nextAlarmAt,
         dueSummary
@@ -699,11 +927,19 @@ export class AnkiSyncServer extends DurableObject {
     }
 
     if (url.pathname === "/push/send-test" && request.method === "POST") {
+      const rateLimit = this.checkPushTriggerRateLimit();
+      if (!rateLimit.allowed) {
+        return Response.json({ error: rateLimit.error }, { status: 429 });
+      }
       try {
-        const body: { endpoint?: string; title?: string; body?: string } = await request.json().catch(() => ({}));
+        const body = (await request.json().catch(() => ({}))) as {
+          endpoint?: string;
+          title?: string;
+          body?: string;
+        };
         const payload: PushPayload = {
-          title: body.title || "klanki Test Notification",
-          body: body.body || "Web Push is fully working on this device!",
+          title: String(body.title || "klanki Test Notification").slice(0, 120),
+          body: String(body.body || "Web Push is working on this device.").slice(0, 300),
           url: "/",
           tag: "klanki-test"
         };
@@ -717,26 +953,34 @@ export class AnkiSyncServer extends DurableObject {
     }
 
     if (url.pathname === "/push/notify-due" && request.method === "POST") {
+      const rateLimit = this.checkPushTriggerRateLimit();
+      if (!rateLimit.allowed) {
+        return Response.json({ error: rateLimit.error }, { status: 429 });
+      }
       try {
-        const body: { title?: string; body?: string } = await request.json().catch(() => ({}));
-        const col = this.getFullCollection();
+        const body = (await request.json().catch(() => ({}))) as {
+          title?: string;
+          body?: string;
+        };
         const prefs = this.getPushPreferences();
-        const summary = this.computeDueSummary(col, prefs);
+        const summary = this.computeDueSummary(prefs);
         const dueTotal = summary.learnDueCount + summary.reviewDueCount;
 
         const payload: PushPayload = {
-          title:
+          title: String(
             body.title ||
-            (dueTotal > 0
-              ? `klanki · ${dueTotal} ${dueTotal === 1 ? "Card" : "Cards"} Due`
-              : "klanki · Study Reminder"),
-          body:
+              (dueTotal > 0
+                ? `klanki: ${dueTotal} ${dueTotal === 1 ? "Card" : "Cards"} Due`
+                : "klanki: Study Reminder")
+          ).slice(0, 120),
+          body: String(
             body.body ||
-            (dueTotal > 0
-              ? `${dueTotal} due in ${summary.topDeckName}${
-                  summary.newCount > 0 ? ` + ${Math.min(20, summary.newCount)} new` : ""
-                }.`
-              : `${Math.min(20, summary.newCount)} new cards ready in ${summary.topDeckName}.`),
+              (dueTotal > 0
+                ? `${dueTotal} due in ${summary.topDeckName}${
+                    summary.newCount > 0 ? ` + ${Math.min(20, summary.newCount)} new` : ""
+                  }.`
+                : `${Math.min(20, summary.newCount)} new cards ready in ${summary.topDeckName}.`)
+          ).slice(0, 300),
           url: "/",
           tag: "klanki-due-review"
         };
@@ -793,12 +1037,50 @@ export class AnkiSyncServer extends DurableObject {
     return { sent, failed, pruned, total: rows.length };
   }
 
+  private sendAck(ws: WebSocket, opId: string | undefined, revision: number) {
+    if (!opId) return;
+    try {
+      ws.send(JSON.stringify({ type: "ack", opId, revision } satisfies ServerMessage));
+    } catch {
+      // ignore
+    }
+  }
+
+  private sendOpError(ws: WebSocket, opId: string | undefined, error: string) {
+    try {
+      ws.send(
+        JSON.stringify({
+          type: "op_error",
+          opId,
+          error,
+          revision: this.getRevision()
+        } satisfies ServerMessage)
+      );
+    } catch {
+      // ignore
+    }
+  }
+
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
     if (typeof message !== "string") return;
 
+    let raw: any;
     try {
-      const msg: ClientMessage = JSON.parse(message);
+      raw = JSON.parse(message);
+    } catch {
+      this.sendOpError(ws, undefined, "Invalid JSON payload");
+      return;
+    }
 
+    const validation = validateClientMessage(raw);
+    if (!validation.ok) {
+      this.sendOpError(ws, raw?.opId, validation.error);
+      return;
+    }
+
+    const msg = validation.msg;
+
+    try {
       if (msg.type === "ping") {
         ws.send(JSON.stringify({ type: "pong" }));
         return;
@@ -806,96 +1088,290 @@ export class AnkiSyncServer extends DurableObject {
 
       if (msg.type === "init") {
         const col = this.getFullCollection();
-        ws.send(JSON.stringify({ type: "full_state", collection: col }));
+        ws.send(
+          JSON.stringify({
+            type: "full_state",
+            collection: col,
+            revision: this.getRevision(),
+            initialized: this.isInitialized(),
+            hasBackup: Boolean(this.getMeta("backup_snapshot"))
+          } satisfies ServerMessage)
+        );
+        return;
+      }
+
+      // Deduplicate replayed operations by opId (D01, D05, D12)
+      const opId = "opId" in msg ? msg.opId : undefined;
+      const alreadyRev = this.getAlreadyAppliedRevision(opId);
+      if (alreadyRev !== null) {
+        this.sendAck(ws, opId, alreadyRev);
         return;
       }
 
       if (msg.type === "answer_card") {
-        const row = this.sql.exec("SELECT json FROM cards WHERE id = ?", msg.cardId).toArray();
-        if (row.length > 0) {
-          const card: Card = JSON.parse(row[0].json);
-          Object.assign(card, msg.nextState, { mod: Math.floor(Date.now() / 1000) });
-          this.sql.exec("UPDATE cards SET json = ? WHERE id = ?", JSON.stringify(card), card.id);
-        }
-        this.sql.exec(
-          "INSERT OR REPLACE INTO revlog (id, json) VALUES (?, ?)",
-          msg.revlogEntry.id,
-          JSON.stringify(msg.revlogEntry)
-        );
-        this.setMeta("last_activity_ms", String(Date.now()));
+        let rev = 0;
+        let finalState: Partial<Card> = msg.nextState;
+        const revlogEntry: RevlogEntry = { ...msg.revlogEntry };
+
+        this.ctx.storage.transactionSync(() => {
+          const row = this.sql.exec("SELECT json FROM cards WHERE id = ?", msg.cardId).toArray();
+          if (row.length > 0) {
+            const card: Card = JSON.parse(row[0].json);
+            // Reconcile concurrent reviews (D05): ensure reps never regresses
+            const nextReps = Math.max((card.reps || 0) + 1, msg.nextState.reps || 0);
+            Object.assign(card, msg.nextState, {
+              reps: nextReps,
+              mod: Math.floor(Date.now() / 1000)
+            });
+            finalState = card;
+            this.sql.exec("UPDATE cards SET json = ? WHERE id = ?", JSON.stringify(card), card.id);
+          }
+
+          // Prevent revlog ID collision from overwriting prior history (D11)
+          while (
+            this.sql
+              .exec("SELECT id FROM revlog WHERE id = ?", revlogEntry.id)
+              .toArray().length > 0
+          ) {
+            revlogEntry.id++;
+          }
+
+          this.sql.exec(
+            "INSERT INTO revlog (id, json) VALUES (?, ?)",
+            revlogEntry.id,
+            JSON.stringify(revlogEntry)
+          );
+          this.setMeta("last_activity_ms", String(Date.now()));
+          rev = this.bumpRevision(opId);
+        });
+
+        this.sendAck(ws, opId, rev);
         await this.recomputeAndScheduleAlarm();
-        this.broadcast(msg, ws);
+        this.broadcast(
+          {
+            type: "answer_card",
+            opId,
+            cardId: msg.cardId,
+            nextState: finalState,
+            revlogEntry,
+            revision: rev
+          },
+          ws
+        );
         return;
       }
 
       if (msg.type === "upsert_deck") {
-        this.sql.exec("INSERT OR REPLACE INTO decks (id, json) VALUES (?, ?)", msg.deck.id, JSON.stringify(msg.deck));
-        this.broadcast(msg, ws);
+        let rev = 0;
+        this.ctx.storage.transactionSync(() => {
+          this.sql.exec(
+            "INSERT OR REPLACE INTO decks (id, json) VALUES (?, ?)",
+            msg.deck.id,
+            JSON.stringify(msg.deck)
+          );
+          rev = this.bumpRevision(opId);
+        });
+        this.sendAck(ws, opId, rev);
+        this.broadcast({ type: "upsert_deck", opId, deck: msg.deck, revision: rev }, ws);
         return;
       }
 
       if (msg.type === "delete_deck") {
-        this.sql.exec("DELETE FROM decks WHERE id = ?", msg.deckId);
+        // Transactional cascading deletion of deck, subdecks, associated cards, and orphaned notes (D03)
+        let rev = 0;
+        const deletedDeckIds: number[] = [];
+        const deletedCardIds: number[] = [];
+        const deletedNoteIds: number[] = [];
+
+        this.ctx.storage.transactionSync(() => {
+          const allDecks: Deck[] = this.sql
+            .exec("SELECT json FROM decks")
+            .toArray()
+            .map((r: any) => JSON.parse(r.json));
+          const target = allDecks.find(d => d.id === msg.deckId);
+          const prefix = target ? `${target.name}::` : null;
+
+          const deckSet = new Set<number>([msg.deckId]);
+          if (prefix) {
+            for (const d of allDecks) {
+              if (d.name.startsWith(prefix)) {
+                deckSet.add(d.id);
+              }
+            }
+          }
+
+          for (const did of deckSet) {
+            if (did === 1) continue;
+            this.sql.exec("DELETE FROM decks WHERE id = ?", did);
+            deletedDeckIds.push(did);
+          }
+
+          const remainingNoteIds = new Set<number>();
+          const affectedNoteIds = new Set<number>();
+
+          for (const row of this.sql.exec("SELECT id, json FROM cards").toArray()) {
+            const c: Card = JSON.parse(row.json);
+            if (deckSet.has(c.did)) {
+              this.sql.exec("DELETE FROM cards WHERE id = ?", c.id);
+              deletedCardIds.push(c.id);
+              affectedNoteIds.add(c.nid);
+            } else {
+              remainingNoteIds.add(c.nid);
+            }
+          }
+
+          for (const nid of affectedNoteIds) {
+            if (!remainingNoteIds.has(nid)) {
+              this.sql.exec("DELETE FROM notes WHERE id = ?", nid);
+              deletedNoteIds.push(nid);
+            }
+          }
+
+          rev = this.bumpRevision(opId);
+        });
+
+        this.sendAck(ws, opId, rev);
         await this.recomputeAndScheduleAlarm();
-        this.broadcast(msg, ws);
+        // Broadcast authoritative cascading delete to all clients (including sender so state matches)
+        this.broadcast({
+          type: "delete_deck",
+          opId,
+          deckId: msg.deckId,
+          deletedDeckIds,
+          deletedCardIds,
+          deletedNoteIds,
+          revision: rev
+        });
         return;
       }
 
       if (msg.type === "upsert_deck_config") {
-        this.sql.exec("INSERT OR REPLACE INTO dconf (id, json) VALUES (?, ?)", msg.dconf.id, JSON.stringify(msg.dconf));
-        this.broadcast(msg, ws);
+        let rev = 0;
+        this.ctx.storage.transactionSync(() => {
+          this.sql.exec(
+            "INSERT OR REPLACE INTO dconf (id, json) VALUES (?, ?)",
+            msg.dconf.id,
+            JSON.stringify(msg.dconf)
+          );
+          rev = this.bumpRevision(opId);
+        });
+        this.sendAck(ws, opId, rev);
+        this.broadcast({ type: "upsert_deck_config", opId, dconf: msg.dconf, revision: rev }, ws);
         return;
       }
 
       if (msg.type === "upsert_note") {
-        this.sql.exec("INSERT OR REPLACE INTO notes (id, json) VALUES (?, ?)", msg.note.id, JSON.stringify(msg.note));
-        for (const card of msg.cards) {
-          this.sql.exec("INSERT OR REPLACE INTO cards (id, json) VALUES (?, ?)", card.id, JSON.stringify(card));
-        }
-        this.setMeta("last_activity_ms", String(Date.now()));
+        let rev = 0;
+        this.ctx.storage.transactionSync(() => {
+          this.sql.exec(
+            "INSERT OR REPLACE INTO notes (id, json) VALUES (?, ?)",
+            msg.note.id,
+            JSON.stringify(msg.note)
+          );
+          for (const card of msg.cards) {
+            this.sql.exec(
+              "INSERT OR REPLACE INTO cards (id, json) VALUES (?, ?)",
+              card.id,
+              JSON.stringify(card)
+            );
+          }
+          this.setMeta("last_activity_ms", String(Date.now()));
+          rev = this.bumpRevision(opId);
+        });
+        this.sendAck(ws, opId, rev);
         await this.recomputeAndScheduleAlarm();
-        this.broadcast(msg, ws);
+        this.broadcast(
+          { type: "upsert_note", opId, note: msg.note, cards: msg.cards, revision: rev },
+          ws
+        );
         return;
       }
 
       if (msg.type === "delete_note") {
-        this.sql.exec("DELETE FROM notes WHERE id = ?", msg.noteId);
-        for (const cid of msg.cardIds) {
-          this.sql.exec("DELETE FROM cards WHERE id = ?", cid);
-        }
+        // Derive all associated card IDs directly from server storage by nid (D04)
+        let rev = 0;
+        const removedCardIds = new Set<number>(msg.cardIds || []);
+
+        this.ctx.storage.transactionSync(() => {
+          for (const row of this.sql.exec("SELECT id, json FROM cards").toArray()) {
+            const c: Card = JSON.parse(row.json);
+            if (c.nid === msg.noteId) {
+              removedCardIds.add(c.id);
+            }
+          }
+          for (const cid of removedCardIds) {
+            this.sql.exec("DELETE FROM cards WHERE id = ?", cid);
+          }
+          this.sql.exec("DELETE FROM notes WHERE id = ?", msg.noteId);
+          rev = this.bumpRevision(opId);
+        });
+
+        const authoritativeCardIds = Array.from(removedCardIds);
+        this.sendAck(ws, opId, rev);
         await this.recomputeAndScheduleAlarm();
-        this.broadcast(msg, ws);
+        this.broadcast({
+          type: "delete_note",
+          opId,
+          noteId: msg.noteId,
+          cardIds: authoritativeCardIds,
+          revision: rev
+        });
         return;
       }
 
       if (msg.type === "update_card") {
-        this.sql.exec("INSERT OR REPLACE INTO cards (id, json) VALUES (?, ?)", msg.card.id, JSON.stringify(msg.card));
-        this.setMeta("last_activity_ms", String(Date.now()));
+        let rev = 0;
+        this.ctx.storage.transactionSync(() => {
+          this.sql.exec(
+            "INSERT OR REPLACE INTO cards (id, json) VALUES (?, ?)",
+            msg.card.id,
+            JSON.stringify(msg.card)
+          );
+          this.setMeta("last_activity_ms", String(Date.now()));
+          rev = this.bumpRevision(opId);
+        });
+        this.sendAck(ws, opId, rev);
         await this.recomputeAndScheduleAlarm();
-        this.broadcast(msg, ws);
+        this.broadcast({ type: "update_card", opId, card: msg.card, revision: rev }, ws);
         return;
       }
 
       if (msg.type === "save_media") {
-        this.sql.exec("INSERT OR REPLACE INTO media (name, data) VALUES (?, ?)", msg.filename, msg.dataUrl);
-        this.broadcast(msg, ws);
+        let rev = 0;
+        this.ctx.storage.transactionSync(() => {
+          this.sql.exec(
+            "INSERT OR REPLACE INTO media (name, data) VALUES (?, ?)",
+            msg.filename,
+            msg.dataUrl
+          );
+          rev = this.bumpRevision(opId);
+        });
+        this.sendAck(ws, opId, rev);
+        this.broadcast(
+          { type: "save_media", opId, filename: msg.filename, dataUrl: msg.dataUrl, revision: rev },
+          ws
+        );
         return;
       }
 
       if (msg.type === "import_collection") {
-        this.saveFullCollection(msg.collection);
+        const rev = this.saveFullCollection(msg.collection, opId);
         this.setMeta("last_activity_ms", String(Date.now()));
+        this.sendAck(ws, opId, rev);
         await this.recomputeAndScheduleAlarm();
-        this.broadcast(msg, ws);
+        this.broadcast(
+          { type: "import_collection", opId, collection: msg.collection, revision: rev },
+          ws
+        );
         return;
       }
-    } catch (e) {
+    } catch (e: any) {
       console.error("Error processing websocket message:", e);
+      this.sendOpError(ws, "opId" in msg ? msg.opId : undefined, e?.message || "Server error");
     }
   }
 
   async webSocketClose(_ws: WebSocket) {
-    // When a client closes the app, recompute the alarm without the active-session buffer
     await this.recomputeAndScheduleAlarm();
   }
 

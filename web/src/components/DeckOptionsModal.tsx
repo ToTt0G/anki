@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { DeckConfig } from "../core/types";
 import { X } from "lucide-react";
 
@@ -21,31 +21,48 @@ export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) =
   const [fsrsEnabled, setFsrsEnabled] = useState<boolean>(!!config.fsrsEnabled);
   const [retention, setRetention] = useState<number>(config.desiredRetention || 0.9);
 
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
   const handleSave = () => {
-    const delays = learningSteps.split(/\s+/).map(Number).filter(n => !isNaN(n) && n > 0);
-    const lapseDelays = relearnSteps.split(/\s+/).map(Number).filter(n => !isNaN(n) && n > 0);
+    const delays = learningSteps
+      .split(/\s+/)
+      .map(Number)
+      .filter(n => !isNaN(n) && n > 0);
+    const lapseDelays = relearnSteps
+      .split(/\s+/)
+      .map(Number)
+      .filter(n => !isNaN(n) && n > 0);
 
     const updated: DeckConfig = {
       ...config,
       new: {
         ...config.new,
-        perDay: newPerDay,
+        perDay: Math.max(0, newPerDay),
         delays: delays.length > 0 ? delays : [1, 10],
-        ints: [graduatingInt, easyInt],
-        initialFactor: startingEase * 10
+        ints: [Math.max(1, graduatingInt), Math.max(1, easyInt)],
+        initialFactor: Math.max(1300, startingEase * 10)
       },
       rev: {
         ...config.rev,
-        perDay: revPerDay
+        perDay: Math.max(0, revPerDay)
       },
       lapse: {
         ...config.lapse,
         delays: lapseDelays.length > 0 ? lapseDelays : [10],
-        leechFails: leechThreshold,
+        leechFails: Math.max(1, leechThreshold),
         leechAction
       },
       fsrsEnabled,
-      desiredRetention: retention
+      desiredRetention: Math.min(0.97, Math.max(0.7, retention))
     };
 
     onSave(updated);
@@ -53,11 +70,24 @@ export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) =
   };
 
   return (
-    <div className="modal-backdrop">
-      <div className="modal-content">
+    <div className="modal-backdrop" onClick={onClose}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="deck-options-title"
+        className="modal-content"
+        onClick={e => e.stopPropagation()}
+      >
         <div className="modal-header">
-          <h3 style={{ fontSize: 16, fontWeight: 600 }}>Deck Options</h3>
-          <button onClick={onClose} style={{ border: "none", padding: 4 }}>
+          <h3 id="deck-options-title" style={{ fontSize: 16, fontWeight: 600 }}>
+            Deck Options
+          </h3>
+          <button
+            type="button"
+            aria-label="Close dialog"
+            onClick={onClose}
+            style={{ border: "none", padding: 4, background: "transparent" }}
+          >
             <X size={18} />
           </button>
         </div>
@@ -66,7 +96,7 @@ export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) =
           {/* Daily Limits */}
           <div>
             <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text-secondary)", marginBottom: 6 }}>
-              DAILY LIMITS
+              Daily Limits
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
               <div>
@@ -75,6 +105,7 @@ export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) =
                 </label>
                 <input
                   type="number"
+                  min={0}
                   value={newPerDay}
                   onChange={e => setNewPerDay(Number(e.target.value))}
                   style={{ width: "100%" }}
@@ -86,6 +117,7 @@ export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) =
                 </label>
                 <input
                   type="number"
+                  min={0}
                   value={revPerDay}
                   onChange={e => setRevPerDay(Number(e.target.value))}
                   style={{ width: "100%" }}
@@ -94,10 +126,43 @@ export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) =
             </div>
           </div>
 
+          {/* FSRS Scheduler Section (C03) */}
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text-secondary)", marginBottom: 6 }}>
+              FSRS Scheduler
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <label style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 13.5, cursor: "pointer" }}>
+                <span>Enable FSRS (Free Spaced Repetition Scheduler)</span>
+                <input
+                  type="checkbox"
+                  checked={fsrsEnabled}
+                  onChange={e => setFsrsEnabled(e.target.checked)}
+                />
+              </label>
+              {fsrsEnabled && (
+                <div>
+                  <label style={{ fontSize: 13, color: "var(--text-secondary)", display: "block", marginBottom: 4 }}>
+                    Desired retention (0.70 – 0.97)
+                  </label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0.70"
+                    max="0.97"
+                    value={retention}
+                    onChange={e => setRetention(Number(e.target.value))}
+                    style={{ width: "100%" }}
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+
           {/* New Cards */}
           <div>
             <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text-secondary)", marginBottom: 6 }}>
-              NEW CARDS
+              New Cards
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               <div>
@@ -152,7 +217,7 @@ export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) =
           {/* Lapses */}
           <div>
             <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text-secondary)", marginBottom: 6 }}>
-              LAPSES
+              Lapses
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               <div>
@@ -197,8 +262,12 @@ export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) =
         </div>
 
         <div className="modal-footer">
-          <button onClick={onClose}>Cancel</button>
-          <button className="primary" onClick={handleSave}>Save</button>
+          <button type="button" onClick={onClose}>
+            Cancel
+          </button>
+          <button type="button" className="primary" onClick={handleSave}>
+            Save
+          </button>
         </div>
       </div>
     </div>

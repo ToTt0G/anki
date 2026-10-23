@@ -2,7 +2,9 @@ import React, { useState, useEffect, useRef } from "react";
 import { Card, Collection, Deck, Rating, RevlogEntry } from "../core/types";
 import { calculateScheduling, getDeckCounts, getNextStudyCard } from "../core/scheduler";
 import { renderCardTemplate } from "../core/template";
-import { ArrowLeft, MoreHorizontal } from "lucide-react";
+import { generateUniqueId } from "../core/ids";
+import { SandboxedCardFrame } from "./SandboxedCardFrame";
+import { ArrowLeft, MoreHorizontal, X } from "lucide-react";
 
 interface Props {
   collection: Collection;
@@ -30,12 +32,14 @@ export const Reviewer: React.FC<Props> = ({
   );
   const [isAnswerShown, setIsAnswerShown] = useState<boolean>(false);
   const [showMoreMenu, setShowMoreMenu] = useState<boolean>(false);
+  const [confirmDeleteNote, setConfirmDeleteNote] = useState<boolean>(false);
   const cardStartTimeRef = useRef<number>(Date.now());
 
   useEffect(() => {
     const next = getNextStudyCard(collection, deck.id);
     setCurrentCard(next);
     setIsAnswerShown(false);
+    setConfirmDeleteNote(false);
     cardStartTimeRef.current = Date.now();
   }, [collection, deck.id]);
 
@@ -54,8 +58,9 @@ export const Reviewer: React.FC<Props> = ({
     if (!chosen) return;
 
     const timeSpentMs = Math.max(500, Date.now() - cardStartTimeRef.current);
+    const existingRevIds = new Set((collection.revlog || []).map(r => r.id));
     const revlog: RevlogEntry = {
-      id: Date.now(),
+      id: generateUniqueId(existingRevIds),
       cid: currentCard.id,
       usn: 0,
       ease: rating,
@@ -69,9 +74,34 @@ export const Reviewer: React.FC<Props> = ({
     onAnswerCard(currentCard.id, chosen.nextState, revlog);
   };
 
+  // Scoped keyboard shortcuts that never hijack focused buttons/selects/inputs or modals (U03)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (["INPUT", "TEXTAREA"].includes((e.target as HTMLElement)?.tagName)) {
+      if (e.ctrlKey || e.altKey || e.metaKey) return;
+
+      if (confirmDeleteNote) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          setConfirmDeleteNote(false);
+        }
+        return;
+      }
+
+      if (showMoreMenu) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          setShowMoreMenu(false);
+        }
+        return;
+      }
+
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName || "";
+      if (
+        ["INPUT", "TEXTAREA", "SELECT", "BUTTON", "A"].includes(tag) ||
+        target?.isContentEditable ||
+        target?.closest("[role='dialog']")
+      ) {
         return;
       }
 
@@ -97,6 +127,7 @@ export const Reviewer: React.FC<Props> = ({
           handleRate(4);
         }
       } else if (e.key.toLowerCase() === "e" && currentCard) {
+        e.preventDefault();
         onEditNote(currentCard.nid);
       } else if (e.key === "Escape") {
         onExitStudy();
@@ -105,7 +136,7 @@ export const Reviewer: React.FC<Props> = ({
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isAnswerShown, currentCard]);
+  }, [isAnswerShown, currentCard, showMoreMenu, confirmDeleteNote]);
 
   if (!currentCard) {
     return (
@@ -114,7 +145,9 @@ export const Reviewer: React.FC<Props> = ({
         <p style={{ color: "var(--text-secondary)", marginBottom: 24, fontSize: 14 }}>
           You have finished this deck for now.
         </p>
-        <button onClick={onExitStudy}>Decks</button>
+        <button type="button" onClick={onExitStudy}>
+          Decks
+        </button>
       </div>
     );
   }
@@ -131,17 +164,34 @@ export const Reviewer: React.FC<Props> = ({
   const tmpl = model.tmpls[currentCard.ord] || model.tmpls[0];
   const backIncludesFrontSide = Boolean(tmpl?.afmt?.includes("FrontSide"));
 
+  const displayedHtml = !isAnswerShown
+    ? rendered.frontHtml
+    : backIncludesFrontSide
+    ? rendered.backHtml
+    : `${rendered.frontHtml}<hr id="answer" class="card-divider" />${rendered.backHtml}`;
+
+  const siblingCardCount = Object.values(collection.cards).filter(
+    c => c.nid === currentCard.nid
+  ).length;
+
   return (
     <div className="reviewer-container">
       {/* Minimal Header */}
       <div className="reviewer-header">
-        <button onClick={onExitStudy} style={{ padding: "5px 9px" }} title="Back to Decks">
+        <button
+          type="button"
+          onClick={onExitStudy}
+          aria-label="Back to Decks"
+          style={{ padding: "5px 9px" }}
+          title="Back to Decks"
+        >
           <ArrowLeft size={16} />
         </button>
 
-        <div className="reviewer-counts">
+        <div className="reviewer-counts" aria-label="Remaining card counts">
           <span
             className={`count-new ${currentCard.queue === 0 ? "active-queue" : ""}`}
+            title="New cards"
           >
             {counts.newCount}
           </span>
@@ -149,11 +199,13 @@ export const Reviewer: React.FC<Props> = ({
             className={`count-learn ${
               currentCard.queue === 1 || currentCard.queue === 3 ? "active-queue" : ""
             }`}
+            title="Learning cards"
           >
             {counts.learnCount}
           </span>
           <span
             className={`count-due ${currentCard.queue === 2 ? "active-queue" : ""}`}
+            title="Review cards due"
           >
             {counts.reviewCount}
           </span>
@@ -161,7 +213,10 @@ export const Reviewer: React.FC<Props> = ({
 
         <div style={{ position: "relative" }}>
           <button
+            type="button"
             onClick={() => setShowMoreMenu(!showMoreMenu)}
+            aria-label="More card actions"
+            aria-expanded={showMoreMenu}
             style={{ padding: "5px 9px" }}
             title="Card actions"
           >
@@ -179,6 +234,7 @@ export const Reviewer: React.FC<Props> = ({
                 }}
               />
               <div
+                role="menu"
                 style={{
                   position: "absolute",
                   right: 0,
@@ -188,40 +244,48 @@ export const Reviewer: React.FC<Props> = ({
                   borderRadius: 6,
                   boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
                   zIndex: 20,
-                  minWidth: 120,
+                  minWidth: 135,
                   overflow: "hidden",
                   display: "flex",
                   flexDirection: "column"
                 }}
               >
                 <button
+                  type="button"
+                  role="menuitem"
                   style={{ border: "none", justifyContent: "flex-start", borderRadius: 0 }}
                   onClick={() => {
                     setShowMoreMenu(false);
                     onEditNote(currentCard.nid);
                   }}
                 >
-                  Edit
+                  Edit Note
                 </button>
                 <button
+                  type="button"
+                  role="menuitem"
                   style={{ border: "none", justifyContent: "flex-start", borderRadius: 0 }}
                   onClick={() => {
                     setShowMoreMenu(false);
                     onBuryCard(currentCard.id);
                   }}
                 >
-                  Bury
+                  Bury Card
                 </button>
                 <button
+                  type="button"
+                  role="menuitem"
                   style={{ border: "none", justifyContent: "flex-start", borderRadius: 0 }}
                   onClick={() => {
                     setShowMoreMenu(false);
                     onSuspendCard(currentCard.id);
                   }}
                 >
-                  Suspend
+                  Suspend Card
                 </button>
                 <button
+                  type="button"
+                  role="menuitem"
                   style={{
                     border: "none",
                     justifyContent: "flex-start",
@@ -230,10 +294,10 @@ export const Reviewer: React.FC<Props> = ({
                   }}
                   onClick={() => {
                     setShowMoreMenu(false);
-                    onDeleteCard(currentCard.id);
+                    setConfirmDeleteNote(true);
                   }}
                 >
-                  Delete
+                  Delete Note
                 </button>
               </div>
             </>
@@ -241,36 +305,27 @@ export const Reviewer: React.FC<Props> = ({
         </div>
       </div>
 
-      {/* Card Body */}
+      {/* Sandboxed Card Body (S01, C12, U09) */}
       <div
         className="review-card-area"
         onClick={() => {
           if (!isAnswerShown) handleShowAnswer();
         }}
       >
-        {!isAnswerShown ? (
-          <div
-            className="reviewer-card-content"
-            dangerouslySetInnerHTML={{ __html: rendered.frontHtml }}
-          />
-        ) : backIncludesFrontSide ? (
-          <div
-            className="reviewer-card-content"
-            dangerouslySetInnerHTML={{ __html: rendered.backHtml }}
-          />
-        ) : (
-          <div className="reviewer-card-content">
-            <div dangerouslySetInnerHTML={{ __html: rendered.frontHtml }} />
-            <hr id="answer" className="card-divider" />
-            <div dangerouslySetInnerHTML={{ __html: rendered.backHtml }} />
-          </div>
-        )}
+        <SandboxedCardFrame
+          html={displayedHtml}
+          css={rendered.css}
+          onCardClick={() => {
+            if (!isAnswerShown) handleShowAnswer();
+          }}
+        />
       </div>
 
       {/* Footer Rating Controls */}
       <div className="reviewer-footer">
         {!isAnswerShown ? (
           <button
+            type="button"
             className="primary btn-show-answer"
             onClick={handleShowAnswer}
           >
@@ -291,6 +346,7 @@ export const Reviewer: React.FC<Props> = ({
               return (
                 <button
                   key={opt.rating}
+                  type="button"
                   className={`btn-rating ${btnClass}`}
                   onClick={() => handleRate(opt.rating)}
                 >
@@ -302,6 +358,61 @@ export const Reviewer: React.FC<Props> = ({
           </div>
         )}
       </div>
+
+      {/* Delete Note Confirmation Dialog (U13, U08) */}
+      {confirmDeleteNote && (
+        <div
+          className="modal-backdrop"
+          onClick={() => setConfirmDeleteNote(false)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="reviewer-delete-note-title"
+            className="modal-content"
+            style={{ maxWidth: 380 }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="modal-header">
+              <h3 id="reviewer-delete-note-title" style={{ fontSize: 16, fontWeight: 600 }}>
+                Delete Note
+              </h3>
+              <button
+                type="button"
+                aria-label="Close dialog"
+                onClick={() => setConfirmDeleteNote(false)}
+                style={{ border: "none", padding: 4, background: "transparent" }}
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div style={{ fontSize: 14, color: "var(--text-secondary)", lineHeight: 1.5 }}>
+              Delete this note and {siblingCardCount === 1 ? "its card" : `all ${siblingCardCount} of its cards`} permanently?
+            </div>
+
+            <div className="modal-footer">
+              <button type="button" onClick={() => setConfirmDeleteNote(false)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                style={{
+                  background: "var(--color-again)",
+                  borderColor: "var(--color-again)",
+                  color: "#ffffff"
+                }}
+                onClick={() => {
+                  setConfirmDeleteNote(false);
+                  onDeleteCard(currentCard.id);
+                }}
+              >
+                Delete Note
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

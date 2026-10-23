@@ -3,16 +3,21 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit",
+    "build": "npm run typecheck && vite build",
+    "test": "esbuild tests/audit-verification.test.ts --bundle --platform=node --format=esm --packages=external --outfile=.vite/audit-verification.test.mjs && node --test .vite/audit-verification.test.mjs",
     "preview": "vite preview",
     "worker:dev": "wrangler dev",
     "worker:deploy": "wrangler deploy"
   },
   "dependencies": {
-    "@clerk/backend": "^3.26.1",
-    "@clerk/react": "^6.18.0",
+    "@clerk/backend": "^3.4.0",
+    "@clerk/react": "^6.13.0",
     "@types/web-push": "^3.6.4",
     "jszip": "^3.10.1",
     "lucide-react": "^1.16.0",

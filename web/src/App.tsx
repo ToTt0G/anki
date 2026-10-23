@@ -12,6 +12,8 @@ import { SyncClient, SyncStatus } from "./core/sync-client";
 import { exportDeckCsv, exportApkg, importEp1100Decks } from "./core/import-export";
 import { registerServiceWorker } from "./core/pwa";
 import { syncPushSubscriptionForUser } from "./core/push-manager";
+import { getLocalDayStartMs, getTodayDay } from "./core/scheduler";
+import { generateUniqueId } from "./core/ids";
 import { Navbar, NavView } from "./components/Navbar";
 import { DeckList } from "./components/DeckList";
 import { DeckOverview } from "./components/DeckOverview";
@@ -26,23 +28,35 @@ import { SyncModal } from "./components/SyncModal";
 import { InstallPrompt } from "./components/InstallPrompt";
 import { LandingPage } from "./components/LandingPage";
 import { CyborgDuckLoader } from "./components/CyborgDuckLoader";
-import { getStoredTheme, setStoredTheme } from "./core/theme";
+import { setStoredTheme } from "./core/theme";
 import { Sun, Moon } from "lucide-react";
+
+function readViewFromUrl(): NavView {
+  if (typeof window === "undefined") return "decks";
+  const view = new URLSearchParams(window.location.search).get("view");
+  if (view === "add" || view === "browse" || view === "stats" || view === "decks") {
+    return view;
+  }
+  return "decks";
+}
 
 export const App: React.FC = () => {
   const { isLoaded, isSignedIn, userId, getToken } = useAuth();
   const clerk = useClerk();
   const [collection, setCollection] = useState<Collection | null>(null);
-  const [currentView, setCurrentView] = useState<NavView>("decks");
+  const [currentView, setCurrentView] = useState<NavView>(() => readViewFromUrl());
   const [selectedDeckId, setSelectedDeckId] = useState<number | null>(null);
+  const [editingNoteId, setEditingNoteId] = useState<number | null>(null);
   const [isStudying, setIsStudying] = useState<boolean>(false);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>("offline");
+  const [syncBannerError, setSyncBannerError] = useState<string | null>(null);
 
   // Modals state
   const [optionsDeckId, setOptionsDeckId] = useState<number | null>(null);
   const [isCustomStudyOpen, setIsCustomStudyOpen] = useState<boolean>(false);
   const [isImportOpen, setIsImportOpen] = useState<boolean>(false);
   const [isSyncModalOpen, setIsSyncModalOpen] = useState<boolean>(false);
+  const [showManualInstallGuide, setShowManualInstallGuide] = useState<boolean>(false);
 
   const syncClientRef = useRef<SyncClient | null>(null);
   const getTokenRef = useRef(getToken);
@@ -52,7 +66,34 @@ export const App: React.FC = () => {
     registerServiceWorker().catch(err => {
       console.warn("Service Worker initialization error:", err);
     });
+
+    // Synchronize view state with URL query string for PWA shortcuts & browser back/forward (U04)
+    const onPopState = () => {
+      setCurrentView(readViewFromUrl());
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
   }, []);
+
+  const handleSelectView = (view: NavView) => {
+    setCurrentView(view);
+    setIsStudying(false);
+    setSelectedDeckId(null);
+    if (view !== "browse") {
+      setEditingNoteId(null);
+    }
+    try {
+      const url = new URL(window.location.href);
+      if (view === "decks") {
+        url.searchParams.delete("view");
+      } else {
+        url.searchParams.set("view", view);
+      }
+      window.history.replaceState({}, "", url.toString());
+    } catch {
+      // ignore
+    }
+  };
 
   useEffect(() => {
     if (!isLoaded) return;
@@ -75,7 +116,11 @@ export const App: React.FC = () => {
       userId,
       tokenGetter,
       col => setCollection(col),
-      status => setSyncStatus(status)
+      status => setSyncStatus(status),
+      err => {
+        setSyncBannerError(err);
+        window.setTimeout(() => setSyncBannerError(null), 5000);
+      }
     );
     syncClientRef.current = client;
     setCollection(client.getCollection());
@@ -91,7 +136,6 @@ export const App: React.FC = () => {
     };
   }, [isLoaded, isSignedIn, userId]);
 
-  // Automatically finalize any pending OAuth / SSO handshake on first return
   useEffect(() => {
     if (!isLoaded || isSignedIn) return;
     const client = (clerk as any)?.client;
@@ -137,6 +181,7 @@ export const App: React.FC = () => {
             <div className="nav-right" style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <button
                 type="button"
+                aria-label="Toggle theme"
                 onClick={() => {
                   const current = document.documentElement.getAttribute("data-theme");
                   const isDark =
@@ -152,10 +197,12 @@ export const App: React.FC = () => {
               </button>
               <Show when="signed-out">
                 <SignInButton mode="modal">
-                  <button>Sign In</button>
+                  <button type="button">Sign In</button>
                 </SignInButton>
                 <SignUpButton mode="modal">
-                  <button className="primary">Sign Up</button>
+                  <button type="button" className="primary">
+                    Sign Up
+                  </button>
                 </SignUpButton>
               </Show>
             </div>
@@ -166,7 +213,21 @@ export const App: React.FC = () => {
           <LandingPage />
         </main>
 
-        <InstallPrompt />
+        <footer style={{ textAlign: "center", padding: "12px 16px 24px", fontSize: 12, color: "var(--text-muted)" }}>
+          <a
+            href="https://github.com/ToTt0G/anki"
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: "var(--text-muted)", textDecoration: "none" }}
+          >
+            Open Source (AGPL-3.0) · Source Code
+          </a>
+        </footer>
+
+        <InstallPrompt
+          externalOpenGuide={showManualInstallGuide}
+          onCloseExternalGuide={() => setShowManualInstallGuide(false)}
+        />
       </div>
     );
   }
@@ -177,9 +238,9 @@ export const App: React.FC = () => {
 
   const activeDeck = selectedDeckId ? collection.decks[selectedDeckId] || null : null;
 
-  // Deck mutations
+  // Deck mutations using collision-resistant IDs (D06)
   const handleCreateDeck = (name: string) => {
-    const id = Date.now();
+    const id = generateUniqueId(collection.decks);
     const newDeck: Deck = {
       id,
       name,
@@ -218,8 +279,9 @@ export const App: React.FC = () => {
       a.download = `${deckName}.apkg`;
       a.click();
       URL.revokeObjectURL(url);
-    } catch (e) {
+    } catch (e: any) {
       console.error("Export error:", e);
+      setSyncBannerError(e?.message || "Failed to export .apkg");
     }
   };
 
@@ -234,7 +296,6 @@ export const App: React.FC = () => {
     URL.revokeObjectURL(url);
   };
 
-  // Card reviews
   const handleAnswerCard = (cardId: number, nextState: any, revlog: RevlogEntry) => {
     syncClientRef.current?.answerCard(cardId, nextState, revlog);
   };
@@ -259,7 +320,6 @@ export const App: React.FC = () => {
     syncClientRef.current?.deleteNote(card.nid);
   };
 
-  // Note actions
   const handleAddNote = (note: Note, cards: Card[]) => {
     syncClientRef.current?.upsertNote(note, cards);
   };
@@ -281,24 +341,53 @@ export const App: React.FC = () => {
     syncClientRef.current?.upsertDeckConfig(config);
   };
 
-  // Custom study
+  // Ephemeral per-day, per-deck Custom Study extra limit override (C09)
   const handleApplyExtraLimit = (extraNew: number, extraRev: number) => {
     if (!activeDeck) return;
-    const conf = collection.dconf[activeDeck.conf] || collection.dconf[1];
-    if (!conf) return;
-    const updated = {
-      ...conf,
-      new: { ...conf.new, perDay: conf.new.perDay + extraNew },
-      rev: { ...conf.rev, perDay: conf.rev.perDay + extraRev }
+    const today = getTodayDay();
+    const prevCustom =
+      activeDeck.customStudy && activeDeck.customStudy.day === today
+        ? activeDeck.customStudy
+        : { day: today, extraNew: 0, extraRev: 0 };
+
+    const updatedDeck: Deck = {
+      ...activeDeck,
+      mod: Math.floor(Date.now() / 1000),
+      customStudy: {
+        day: today,
+        extraNew: prevCustom.extraNew + Math.max(0, extraNew),
+        extraRev: prevCustom.extraRev + Math.max(0, extraRev)
+      }
     };
-    syncClientRef.current?.upsertDeckConfig(updated);
+    syncClientRef.current?.upsertDeck(updatedDeck);
   };
 
+  // Non-destructive review of cards lapsed today (C10)
   const handleResetForgotten = () => {
     if (!activeDeck) return;
+    const startOfTodayMs = getLocalDayStartMs();
+    const lapsedTodayCardIds = new Set<number>();
+    for (const r of collection.revlog || []) {
+      if (r.id >= startOfTodayMs && r.ease === 1) {
+        lapsedTodayCardIds.add(r.cid);
+      }
+    }
+
+    const nowSec = Math.floor(Date.now() / 1000);
     for (const card of Object.values(collection.cards)) {
-      if (card.did === activeDeck.id && card.lapses > 0) {
-        const updated = { ...card, queue: 1 as const, due: Math.floor(Date.now() / 1000) };
+      if (
+        card.did === activeDeck.id &&
+        card.lapses > 0 &&
+        (lapsedTodayCardIds.has(card.id) || card.queue === 1)
+      ) {
+        const updated: Card = {
+          ...card,
+          odue: card.odue || card.due,
+          odid: card.odid || card.did,
+          queue: 1,
+          due: nowSec,
+          mod: nowSec
+        };
         syncClientRef.current?.updateCard(updated);
       }
     }
@@ -308,15 +397,29 @@ export const App: React.FC = () => {
     <div className="app-container">
       <Navbar
         currentView={currentView}
-        onSelectView={view => {
-          setCurrentView(view);
-          setIsStudying(false);
-          setSelectedDeckId(null);
-        }}
+        onSelectView={handleSelectView}
         syncStatus={syncStatus}
         onSyncClick={() => setIsSyncModalOpen(true)}
-        onInstallClick={() => setIsSyncModalOpen(true)}
+        onInstallClick={() => setShowManualInstallGuide(true)}
       />
+
+      {syncBannerError && (
+        <div
+          role="alert"
+          style={{
+            maxWidth: 900,
+            margin: "8px auto 0",
+            padding: "8px 14px",
+            borderRadius: 6,
+            background: "rgba(220, 38, 38, 0.1)",
+            border: "1px solid var(--color-again)",
+            color: "var(--color-again)",
+            fontSize: 13
+          }}
+        >
+          {syncBannerError}
+        </div>
+      )}
 
       <main className="main-content">
         {currentView === "decks" && (
@@ -327,8 +430,11 @@ export const App: React.FC = () => {
                 deck={activeDeck}
                 onExitStudy={() => setIsStudying(false)}
                 onAnswerCard={handleAnswerCard}
-                onEditNote={_nid => {
-                  setCurrentView("browse");
+                onEditNote={nid => {
+                  setEditingNoteId(nid);
+                  setIsStudying(false);
+                  handleSelectView("browse");
+                  setEditingNoteId(nid);
                 }}
                 onSuspendCard={handleSuspendCard}
                 onBuryCard={handleBuryCard}
@@ -376,6 +482,7 @@ export const App: React.FC = () => {
         {currentView === "browse" && (
           <CardBrowser
             collection={collection}
+            initialNoteId={editingNoteId}
             onUpdateNote={handleUpdateNote}
             onUpdateCard={handleUpdateCard}
             onDeleteNote={handleDeleteNote}
@@ -386,8 +493,10 @@ export const App: React.FC = () => {
         {currentView === "stats" && <StatsView collection={collection} />}
       </main>
 
-      {/* Non-intrusive PWA install banner / prompt */}
-      <InstallPrompt />
+      <InstallPrompt
+        externalOpenGuide={showManualInstallGuide}
+        onCloseExternalGuide={() => setShowManualInstallGuide(false)}
+      />
 
       {/* Modals */}
       {optionsDeckId !== null && (
@@ -413,8 +522,12 @@ export const App: React.FC = () => {
       {isImportOpen && (
         <ImportModal
           collection={collection}
+          hasBackup={syncClientRef.current?.getHasServerBackup()}
           onImportComplete={updated => {
             syncClientRef.current?.importCollection(updated);
+          }}
+          onRestoreBackup={async () => {
+            return (await syncClientRef.current?.restoreServerBackup()) || false;
           }}
           onClose={() => setIsImportOpen(false)}
         />
@@ -423,9 +536,29 @@ export const App: React.FC = () => {
       {isSyncModalOpen && (
         <SyncModal
           syncStatus={syncStatus}
-          onForceSync={() => syncClientRef.current?.connect()}
+          pendingOutboxCount={syncClientRef.current?.getPendingOutboxCount() || 0}
+          onForceSync={() => {
+            syncClientRef.current?.syncNow();
+          }}
+          onClearOfflineData={async () => {
+            await syncClientRef.current?.clearOfflineStorage();
+          }}
+          onDeleteAccountData={async () => {
+            const token = await getToken();
+            if (token) {
+              await fetch("/api/account-data", {
+                method: "DELETE",
+                headers: { Authorization: `Bearer ${token}` }
+              });
+            }
+            await syncClientRef.current?.clearOfflineStorage();
+            window.location.reload();
+          }}
           onClose={() => setIsSyncModalOpen(false)}
-          onShowInstallGuide={() => {}}
+          onShowInstallGuide={() => {
+            setIsSyncModalOpen(false);
+            setShowManualInstallGuide(true);
+          }}
         />
       )}
     </div>

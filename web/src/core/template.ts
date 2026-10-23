@@ -1,5 +1,6 @@
 import { Card, Note, NoteType } from "./types";
 import { renderClozeFront, renderClozeBack } from "./cloze";
+import { sanitizeCardCss, sanitizeCardHtml } from "./sanitize";
 
 export interface RenderedCard {
   frontHtml: string;
@@ -127,12 +128,12 @@ export function renderCardTemplate(
     return out;
   }
 
-  const frontHtml = processTemplate(tmpl.qfmt, false, "");
-  const backHtml = processTemplate(tmpl.afmt, true, frontHtml);
+  const frontHtml = sanitizeCardHtml(processTemplate(tmpl.qfmt, false, ""));
+  const backHtml = sanitizeCardHtml(processTemplate(tmpl.afmt, true, frontHtml));
 
   return {
     frontHtml,
     backHtml,
-    css: model.css || ""
+    css: sanitizeCardCss(model.css || "")
   };
 }

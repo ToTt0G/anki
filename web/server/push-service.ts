@@ -1,4 +1,5 @@
 import webpush from "web-push";
+import { validatePushSubscriptionInput } from "./validation";
 
 export interface VapidConfig {
   publicKey: string;
@@ -35,16 +36,14 @@ export interface PushDeliveryResult {
 }
 
 /**
- * Send Web Push notification to a subscription using RFC 8291 / RFC 8292.
- * Uses webpush.generateRequestDetails to encrypt payload and sign VAPID JWT,
- * then dispatches using the native fetch() API.
+ * Send Web Push notification to a validated subscription using RFC 8291 / RFC 8292 (S04).
  */
 export async function sendWebPush(
   sub: PushSubscriptionData,
   payload: PushPayload,
   config: VapidConfig
 ): Promise<PushDeliveryResult> {
-  if (!config.publicKey || !config.privateKey) {
+  if (!config.publicKey || !config.privateKey || !config.subject) {
     return {
       endpoint: sub.endpoint,
       success: false,
@@ -52,17 +51,35 @@ export async function sendWebPush(
     };
   }
 
+  const validation = validatePushSubscriptionInput(sub);
+  if (!validation.ok) {
+    return {
+      endpoint: sub.endpoint,
+      success: false,
+      expired: true,
+      error: validation.error
+    };
+  }
+
+  // Enforce strict payload size cap (S04, S05)
+  const sanitizedPayload: PushPayload = {
+    title: String(payload.title || "klanki").slice(0, 120),
+    body: String(payload.body || "").slice(0, 300),
+    url: typeof payload.url === "string" && payload.url.startsWith("/") ? payload.url : "/",
+    tag: String(payload.tag || "klanki").slice(0, 64)
+  };
+
   try {
     const details = webpush.generateRequestDetails(
       sub,
-      JSON.stringify(payload),
+      JSON.stringify(sanitizedPayload),
       {
         vapidDetails: {
           subject: config.subject || DEFAULT_VAPID_SUBJECT,
           publicKey: config.publicKey,
           privateKey: config.privateKey
         },
-        TTL: 60 * 60 * 24 // 24 hours
+        TTL: 60 * 60 * 24
       }
     );
 
@@ -74,14 +91,14 @@ export async function sendWebPush(
     const res = await fetch(details.endpoint, {
       method: details.method,
       headers,
-      body: details.body
+      body: details.body as unknown as BodyInit,
+      redirect: "manual"
     });
 
     if (res.status === 200 || res.status === 201 || res.status === 204) {
       return { endpoint: sub.endpoint, success: true, statusCode: res.status };
     }
 
-    // 404 Not Found or 410 Gone means the subscription has expired or was unsubscribed
     const isExpired = res.status === 404 || res.status === 410;
     const errorText = await res.text().catch(() => "");
 
@@ -90,7 +107,7 @@ export async function sendWebPush(
       success: false,
       statusCode: res.status,
       expired: isExpired,
-      error: `Push service rejected (${res.status}): ${errorText}`
+      error: `Push service rejected (${res.status}): ${errorText.slice(0, 200)}`
     };
   } catch (err: any) {
     return {

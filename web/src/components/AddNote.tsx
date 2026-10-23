@@ -1,6 +1,8 @@
 import React, { useState, useRef } from "react";
 import { Collection, Note, Card } from "../core/types";
 import { findClozeNumbers, wrapInCloze } from "../core/cloze";
+import { generateUniqueId } from "../core/ids";
+import { sanitizeCardHtml } from "../core/sanitize";
 import { Plus, Image as ImageIcon } from "lucide-react";
 
 interface Props {
@@ -45,7 +47,6 @@ export const AddNote: React.FC<Props> = ({
     const currentVal = fieldValues[idx] || "";
     const selectedText = currentVal.substring(start, end) || "text";
 
-    // Determine next cloze number
     const existingNums = findClozeNumbers(currentVal);
     const nextClozeNum = existingNums.length > 0 ? Math.max(...existingNums) + 1 : 1;
 
@@ -68,7 +69,7 @@ export const AddNote: React.FC<Props> = ({
     reader.onload = () => {
       const dataUrl = reader.result as string;
       const cleanName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-      const filename = `paste_${Date.now()}_${cleanName}`;
+      const filename = `paste_${generateUniqueId()}_${cleanName}`;
 
       if (onSaveMedia) {
         onSaveMedia(filename, dataUrl);
@@ -76,7 +77,6 @@ export const AddNote: React.FC<Props> = ({
         collection.media[filename] = dataUrl;
       }
 
-      // Insert img tag into active field
       const targetIdx = activeFieldIdxRef.current;
       const currentVal = fieldValues[targetIdx] || "";
       const imgTag = `<img src="${filename}">`;
@@ -101,7 +101,7 @@ export const AddNote: React.FC<Props> = ({
   const handleAdd = () => {
     if (!activeModel) return;
 
-    const fields = activeModel.flds.map((_, idx) => fieldValues[idx] || "");
+    const fields = activeModel.flds.map((_, idx) => sanitizeCardHtml(fieldValues[idx] || ""));
     const firstField = fields[0] || "";
     if (!firstField.trim()) {
       setErrorMsg(`${activeModel.flds[0]?.name || "First field"} is required.`);
@@ -111,7 +111,7 @@ export const AddNote: React.FC<Props> = ({
     setErrorMsg(null);
 
     const now = Math.floor(Date.now() / 1000);
-    const noteId = Date.now();
+    const noteId = generateUniqueId(collection.notes);
     const tags = tagsStr.trim().split(/\s+/).filter(Boolean);
 
     const note: Note = {
@@ -130,14 +130,15 @@ export const AddNote: React.FC<Props> = ({
 
     const cards: Card[] = [];
     const isCloze = activeModel.type === 1;
+    const allocatedCardIds = new Set<number>(Object.keys(collection.cards).map(Number));
 
     if (isCloze) {
-      // Find all cloze numbers in first field
       const clozeNums = findClozeNumbers(fields[0]);
       const numsToGenerate = clozeNums.length > 0 ? clozeNums : [1];
 
       numsToGenerate.forEach((num, i) => {
-        const cardId = noteId + i + 1;
+        const cardId = generateUniqueId(allocatedCardIds);
+        allocatedCardIds.add(cardId);
         cards.push({
           id: cardId,
           nid: note.id,
@@ -160,9 +161,9 @@ export const AddNote: React.FC<Props> = ({
         });
       });
     } else {
-      // Standard templates
-      activeModel.tmpls.forEach((tmpl, ord) => {
-        const cardId = noteId + ord + 1;
+      activeModel.tmpls.forEach((_tmpl, ord) => {
+        const cardId = generateUniqueId(allocatedCardIds);
+        allocatedCardIds.add(cardId);
         cards.push({
           id: cardId,
           nid: note.id,
@@ -188,7 +189,6 @@ export const AddNote: React.FC<Props> = ({
 
     onAddNote(note, cards);
 
-    // Clear fields except sticky ones
     const newFieldVals: Record<number, string> = {};
     activeModel.flds.forEach((fld, idx) => {
       if (fld.sticky) {
@@ -226,7 +226,8 @@ export const AddNote: React.FC<Props> = ({
           <label style={{ fontSize: 13, color: "var(--text-secondary)" }}>Type</label>
           <select
             value={selectedMid}
-            onChange={e => setSelectedMid(Number(e.target.value))}>
+            onChange={e => setSelectedMid(Number(e.target.value))}
+          >
             {models.map(m => (
               <option key={m.id} value={m.id}>
                 {m.name}
@@ -259,7 +260,13 @@ export const AddNote: React.FC<Props> = ({
               <button
                 type="button"
                 onClick={() => triggerImageUpload(idx)}
-                style={{ padding: "3px 8px", fontSize: 12, display: "inline-flex", alignItems: "center", gap: 4 }}
+                style={{
+                  padding: "3px 8px",
+                  fontSize: 12,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 4
+                }}
                 title="Insert Image"
               >
                 <ImageIcon size={13} />
@@ -281,7 +288,12 @@ export const AddNote: React.FC<Props> = ({
             ref={el => {
               fieldRefs.current[idx] = el;
             }}
-            rows={fld.name.toLowerCase().includes("back") || fld.name.toLowerCase().includes("text") ? 4 : 2}
+            rows={
+              fld.name.toLowerCase().includes("back") ||
+              fld.name.toLowerCase().includes("text")
+                ? 4
+                : 2
+            }
             value={fieldValues[idx] || ""}
             onChange={e => handleFieldChange(idx, e.target.value)}
           />
@@ -302,7 +314,7 @@ export const AddNote: React.FC<Props> = ({
       <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 12, marginTop: 8 }}>
         {errorMsg && <span style={{ fontSize: 13, color: "var(--color-again)" }}>{errorMsg}</span>}
         {addedStatus && <span style={{ fontSize: 13, color: "var(--color-due)" }}>Added</span>}
-        <button className="primary" onClick={handleAdd} style={{ padding: "8px 24px" }}>
+        <button type="button" className="primary" onClick={handleAdd} style={{ padding: "8px 24px" }}>
           <Plus size={16} />
           <span>Add</span>
         </button>

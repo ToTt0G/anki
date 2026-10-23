@@ -52,6 +52,15 @@ export const DeckList: React.FC<Props> = ({
         inputRef.current?.select();
       }, 10);
     }
+    if (!dialog) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setDialog(null);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
   }, [dialog?.mode]);
 
   const decks = Object.values(collection.decks).sort((a, b) =>
@@ -126,6 +135,8 @@ export const DeckList: React.FC<Props> = ({
                   </td>
                   <td style={{ textAlign: "right" }}>
                     <button
+                      type="button"
+                      aria-label={`Deck options for ${deck.name}`}
                       onClick={e => {
                         if (activeMenu?.did === deck.id) {
                           setActiveMenu(null);
@@ -283,13 +294,16 @@ export const DeckList: React.FC<Props> = ({
       {dialog && (
         <div className="modal-backdrop" onClick={() => setDialog(null)}>
           <form
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="deck-dialog-title"
             className="modal-content"
             style={{ maxWidth: 400 }}
             onClick={e => e.stopPropagation()}
             onSubmit={handleDialogSubmit}
           >
             <div className="modal-header">
-              <h3 style={{ fontSize: 16, fontWeight: 600 }}>
+              <h3 id="deck-dialog-title" style={{ fontSize: 16, fontWeight: 600 }}>
                 {dialog.mode === "create"
                   ? "Create Deck"
                   : dialog.mode === "rename"
@@ -298,6 +312,7 @@ export const DeckList: React.FC<Props> = ({
               </h3>
               <button
                 type="button"
+                aria-label="Close dialog"
                 onClick={() => setDialog(null)}
                 style={{ border: "none", padding: 4, background: "transparent" }}
               >

@@ -1,4 +1,4 @@
-// Web Push Client Manager (User-Scoped & VAPID Rotation Aware)
+// Web Push Client Manager (User-Scoped, Account-Switch Detachment & VAPID Rotation Aware) (S03, N03, N05)
 
 import { TokenGetter } from "./sync-client";
 
@@ -7,6 +7,15 @@ const FALLBACK_VAPID_PUBLIC_KEY =
 
 const PUSH_USER_STORAGE_KEY = "klanki_push_user_id";
 const PUSH_VAPID_STORAGE_KEY = "klanki_push_vapid_pub";
+const PUSH_ENDPOINT_STORAGE_KEY = "klanki_push_endpoint";
+
+function getBrowserTimeZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+}
 
 function urlBase64ToUint8Array(base64String: string): Uint8Array {
   const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
@@ -80,8 +89,8 @@ export async function getCurrentPushSubscription(userId?: string): Promise<PushS
 }
 
 /**
- * When switching accounts or logging out, ensure a browser's push subscription
- * is not left bound to a different user's local state or an outdated VAPID key.
+ * Safely detach previous account's server-side push endpoint and verify VAPID key match (S03, N03).
+ * Never silently transfers an existing push endpoint between two different users.
  */
 export async function syncPushSubscriptionForUser(
   userId: string | null,
@@ -91,52 +100,42 @@ export async function syncPushSubscriptionForUser(
   try {
     const boundUser = localStorage.getItem(PUSH_USER_STORAGE_KEY);
     const savedVapid = localStorage.getItem(PUSH_VAPID_STORAGE_KEY);
+    const savedEndpoint = localStorage.getItem(PUSH_ENDPOINT_STORAGE_KEY);
     const registration = await navigator.serviceWorker.ready;
     const existingSub = await registration.pushManager.getSubscription();
 
-    if (!existingSub) return;
+    const currentEndpoint = existingSub?.endpoint || savedEndpoint;
 
-    // 1. If VAPID key rotated, unsubscribe stale browser push subscription
-    if (savedVapid && savedVapid !== FALLBACK_VAPID_PUBLIC_KEY) {
-      await existingSub.unsubscribe().catch(() => {});
+    // 1. If user signed out or switched accounts (boundUser !== userId), detach old server record and unsubscribe browser endpoint (S03)
+    if (!userId || (boundUser && boundUser !== userId)) {
+      if (boundUser && currentEndpoint && userId && getToken) {
+        const headers = await buildAuthHeaders(getToken);
+        await fetch("/api/push/detach-previous", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            previousUserId: boundUser,
+            endpoint: currentEndpoint
+          })
+        }).catch(() => {});
+      }
+      if (existingSub) {
+        await existingSub.unsubscribe().catch(() => {});
+      }
       localStorage.removeItem(PUSH_USER_STORAGE_KEY);
-      localStorage.removeItem(PUSH_VAPID_STORAGE_KEY);
+      localStorage.removeItem(PUSH_ENDPOINT_STORAGE_KEY);
       return;
     }
 
-    // 2. If user signed out or switched accounts, unsubscribe local device endpoint
-    if (!userId || (boundUser && boundUser !== userId)) {
-      if (userId && getToken) {
-        // Re-bind subscription to the new authenticated user's Durable Object
-        const rawKey = existingSub.getKey("p256dh");
-        const rawAuth = existingSub.getKey("auth");
-        if (rawKey && rawAuth) {
-          const p256dh = btoa(String.fromCharCode.apply(null, Array.from(new Uint8Array(rawKey))))
-            .replace(/\+/g, "-")
-            .replace(/\//g, "_")
-            .replace(/=+$/, "");
-          const auth = btoa(String.fromCharCode.apply(null, Array.from(new Uint8Array(rawAuth))))
-            .replace(/\+/g, "-")
-            .replace(/\//g, "_")
-            .replace(/=+$/, "");
-          const headers = await buildAuthHeaders(getToken);
-          const res = await fetch("/api/push/subscribe", {
-            method: "POST",
-            headers,
-            body: JSON.stringify({
-              endpoint: existingSub.endpoint,
-              keys: { p256dh, auth },
-              tzOffsetMinutes: new Date().getTimezoneOffset()
-            })
-          });
-          if (res.ok) {
-            localStorage.setItem(PUSH_USER_STORAGE_KEY, userId);
-            return;
-          }
-        }
+    if (!existingSub) return;
+
+    // 2. Compare saved VAPID key against actual live server VAPID public key (N03)
+    if (getToken) {
+      const liveServerVapid = await getVapidPublicKey(getToken);
+      if (savedVapid && savedVapid !== liveServerVapid) {
+        await unsubscribeFromPush(getToken);
+        return;
       }
-      await existingSub.unsubscribe().catch(() => {});
-      localStorage.removeItem(PUSH_USER_STORAGE_KEY);
     }
   } catch (err) {
     console.warn("Failed to sync push subscription for user:", err);
@@ -170,11 +169,23 @@ export async function subscribeToPush(
     const publicKey = await getVapidPublicKey(getToken);
     const applicationServerKey = urlBase64ToUint8Array(publicKey);
 
-    // Unsubscribe any prior subscription if VAPID key changed
+    // Unsubscribe any prior subscription if VAPID key or user changed (S03, N03)
     const existing = await registration.pushManager.getSubscription();
     if (existing) {
       const savedVapid = localStorage.getItem(PUSH_VAPID_STORAGE_KEY);
-      if (savedVapid !== publicKey) {
+      const boundUser = localStorage.getItem(PUSH_USER_STORAGE_KEY);
+      if (savedVapid !== publicKey || (boundUser && userId && boundUser !== userId)) {
+        if (boundUser && userId && boundUser !== userId) {
+          const headers = await buildAuthHeaders(getToken);
+          await fetch("/api/push/detach-previous", {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              previousUserId: boundUser,
+              endpoint: existing.endpoint
+            })
+          }).catch(() => {});
+        }
         await existing.unsubscribe().catch(() => {});
       }
     }
@@ -207,18 +218,21 @@ export async function subscribeToPush(
       body: JSON.stringify({
         endpoint: subscription.endpoint,
         keys: { p256dh, auth },
-        tzOffsetMinutes: new Date().getTimezoneOffset()
+        tzOffsetMinutes: new Date().getTimezoneOffset(),
+        timeZone: getBrowserTimeZone()
       })
     });
 
     if (!response.ok) {
-      throw new Error(`Server returned HTTP ${response.status}`);
+      const errBody = await response.json().catch(() => ({}));
+      throw new Error(errBody.error || `Server returned HTTP ${response.status}`);
     }
 
     if (userId) {
       localStorage.setItem(PUSH_USER_STORAGE_KEY, userId);
     }
     localStorage.setItem(PUSH_VAPID_STORAGE_KEY, publicKey);
+    localStorage.setItem(PUSH_ENDPOINT_STORAGE_KEY, subscription.endpoint);
 
     return { success: true };
   } catch (err: any) {
@@ -232,17 +246,20 @@ export async function unsubscribeFromPush(
 ): Promise<{ success: boolean; error?: string }> {
   try {
     const sub = await getCurrentPushSubscription();
-    if (sub) {
+    const endpoint = sub?.endpoint || localStorage.getItem(PUSH_ENDPOINT_STORAGE_KEY);
+    if (endpoint) {
       const headers = await buildAuthHeaders(getToken);
       await fetch("/api/push/unsubscribe", {
         method: "POST",
         headers,
-        body: JSON.stringify({ endpoint: sub.endpoint })
+        body: JSON.stringify({ endpoint })
       }).catch(() => {});
-
-      await sub.unsubscribe();
+    }
+    if (sub) {
+      await sub.unsubscribe().catch(() => {});
     }
     localStorage.removeItem(PUSH_USER_STORAGE_KEY);
+    localStorage.removeItem(PUSH_ENDPOINT_STORAGE_KEY);
     return { success: true };
   } catch (err: any) {
     return { success: false, error: err.message || "Failed to unsubscribe" };
@@ -266,7 +283,8 @@ export async function sendTestPush(
     });
 
     if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
+      const errBody = await res.json().catch(() => ({}));
+      throw new Error(errBody.error || `HTTP ${res.status}`);
     }
 
     const data = await res.json();
@@ -287,7 +305,10 @@ export async function sendNotifyDue(
       headers,
       body: JSON.stringify({ count })
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new Error(errBody.error || `HTTP ${res.status}`);
+    }
     const data = await res.json();
     return { success: true, data };
   } catch (err: any) {
@@ -299,6 +320,7 @@ export interface ClientPushPreferences {
   dailyMode: "adaptive" | "fixed";
   dailyTime: string;
   tzOffsetMinutes: number;
+  timeZone?: string;
   learningAlerts: boolean;
 }
 
@@ -342,7 +364,8 @@ export async function updatePushPreferences(
       headers,
       body: JSON.stringify({
         ...prefs,
-        tzOffsetMinutes: new Date().getTimezoneOffset()
+        tzOffsetMinutes: new Date().getTimezoneOffset(),
+        timeZone: prefs.timeZone || getBrowserTimeZone()
       })
     });
     if (!res.ok) return null;

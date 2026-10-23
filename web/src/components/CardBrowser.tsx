@@ -1,10 +1,14 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { Collection, Card, Note } from "../core/types";
 import { searchCards } from "../core/search";
+import { getTodayDay, isCardDueInLearnQueue, normalizeReviewDueDay } from "../core/scheduler";
+import { generateUniqueId } from "../core/ids";
+import { sanitizeCardHtml } from "../core/sanitize";
 import { Search, Trash2, Image as ImageIcon, X } from "lucide-react";
 
 interface Props {
   collection: Collection;
+  initialNoteId?: number | null;
   onUpdateNote: (note: Note) => void;
   onUpdateCard: (card: Card) => void;
   onDeleteNote: (noteId: number) => void;
@@ -36,6 +40,7 @@ function stripHtmlPreview(raw: string): string {
 
 export const CardBrowser: React.FC<Props> = ({
   collection,
+  initialNoteId,
   onUpdateNote,
   onUpdateCard,
   onDeleteNote,
@@ -44,14 +49,111 @@ export const CardBrowser: React.FC<Props> = ({
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [selectedCardId, setSelectedCardId] = useState<number | null>(null);
   const [confirmAction, setConfirmAction] = useState<"reset" | "delete" | null>(null);
-  const browserFileRef = React.useRef<HTMLInputElement | null>(null);
-  const editingFieldIdxRef = React.useRef<number>(0);
 
-  const searchResults = searchCards(collection, searchQuery);
+  // Local debounced editor state to prevent per-keystroke persistence thrash (P02)
+  const [draftFields, setDraftFields] = useState<string[]>([]);
+  const [draftTags, setDraftTags] = useState<string>("");
+  const [saveState, setSaveState] = useState<"saved" | "saving">("saved");
+  const debounceTimerRef = useRef<any>(null);
+  const browserFileRef = useRef<HTMLInputElement | null>(null);
+  const editingFieldIdxRef = useRef<number>(0);
 
-  const selectedCardItem = selectedCardId
-    ? searchResults.find(r => r.card.id === selectedCardId) || searchResults[0] || null
-    : searchResults[0] || null;
+  const searchResults = useMemo(
+    () => searchCards(collection, searchQuery),
+    [collection, searchQuery]
+  );
+
+  // Select card corresponding to `initialNoteId` when navigating from Reviewer Edit (U06)
+  useEffect(() => {
+    if (initialNoteId) {
+      const match = Object.values(collection.cards).find(c => c.nid === initialNoteId);
+      if (match) {
+        setSearchQuery("");
+        setSelectedCardId(match.id);
+      }
+    }
+  }, [initialNoteId]);
+
+  const selectedCardItem = useMemo(() => {
+    if (selectedCardId) {
+      const found = searchResults.find(r => r.card.id === selectedCardId);
+      if (found) return found;
+    }
+    return searchResults[0] || null;
+  }, [searchResults, selectedCardId]);
+
+  // Synchronize local draft fields when selected note changes
+  useEffect(() => {
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+    if (selectedCardItem) {
+      setDraftFields([...selectedCardItem.note.fields]);
+      setDraftTags(selectedCardItem.note.tags.join(" "));
+      setSaveState("saved");
+    }
+  }, [selectedCardItem?.note.id]);
+
+  // Escape handler for confirmation modal (U08)
+  useEffect(() => {
+    if (!confirmAction) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setConfirmAction(null);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [confirmAction]);
+
+  const commitNoteUpdate = (
+    note: Note,
+    nextFields: string[],
+    nextTagsStr: string
+  ) => {
+    const sanitizedFields = nextFields.map(f => sanitizeCardHtml(f));
+    const tags = nextTagsStr.trim().split(/\s+/).filter(Boolean);
+    const updatedNote: Note = {
+      ...note,
+      fields: sanitizedFields,
+      sfld: sanitizedFields[0] || "",
+      tags,
+      mod: Math.floor(Date.now() / 1000)
+    };
+    onUpdateNote(updatedNote);
+    setSaveState("saved");
+  };
+
+  const scheduleDebouncedNoteSave = (
+    note: Note,
+    nextFields: string[],
+    nextTagsStr: string
+  ) => {
+    setSaveState("saving");
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+    }
+    debounceTimerRef.current = setTimeout(() => {
+      commitNoteUpdate(note, nextFields, nextTagsStr);
+      debounceTimerRef.current = null;
+    }, 320);
+  };
+
+  const handleFieldChange = (fieldIdx: number, val: string) => {
+    if (!selectedCardItem) return;
+    const nextFields = [...draftFields];
+    nextFields[fieldIdx] = val;
+    setDraftFields(nextFields);
+    scheduleDebouncedNoteSave(selectedCardItem.note, nextFields, draftTags);
+  };
+
+  const handleTagsChange = (val: string) => {
+    if (!selectedCardItem) return;
+    setDraftTags(val);
+    scheduleDebouncedNoteSave(selectedCardItem.note, draftFields, val);
+  };
 
   const handleBrowserImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -60,39 +162,19 @@ export const CardBrowser: React.FC<Props> = ({
     reader.onload = () => {
       const dataUrl = reader.result as string;
       const cleanName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-      const filename = "paste_" + Date.now() + "_" + cleanName;
+      const filename = `paste_${generateUniqueId()}_${cleanName}`;
       if (onSaveMedia) {
         onSaveMedia(filename, dataUrl);
       } else {
         collection.media[filename] = dataUrl;
       }
       const idx = editingFieldIdxRef.current;
-      const cur = selectedCardItem.note.fields[idx] || "";
+      const cur = draftFields[idx] || "";
       const imgTag = `<img src="${filename}">`;
-      handleFieldChange(idx, cur ? cur + "\n" + imgTag : imgTag);
+      handleFieldChange(idx, cur ? `${cur}\n${imgTag}` : imgTag);
     };
     reader.readAsDataURL(file);
     e.target.value = "";
-  };
-
-  const handleFieldChange = (fieldIdx: number, val: string) => {
-    if (!selectedCardItem) return;
-    const updatedNote = { ...selectedCardItem.note };
-    const fields = [...updatedNote.fields];
-    fields[fieldIdx] = val;
-    if (fieldIdx === 0) {
-      updatedNote.sfld = val;
-    }
-    updatedNote.fields = fields;
-    updatedNote.mod = Math.floor(Date.now() / 1000);
-    onUpdateNote(updatedNote);
-  };
-
-  const handleTagsChange = (val: string) => {
-    if (!selectedCardItem) return;
-    const tags = val.trim().split(/\s+/).filter(Boolean);
-    const updatedNote = { ...selectedCardItem.note, tags, mod: Math.floor(Date.now() / 1000) };
-    onUpdateNote(updatedNote);
   };
 
   const handleToggleSuspend = () => {
@@ -145,40 +227,50 @@ export const CardBrowser: React.FC<Props> = ({
   };
 
   const model = selectedCardItem ? collection.models[selectedCardItem.note.mid] : null;
-  const allCards = Object.values(collection.cards);
-  const nowSec = Math.floor(Date.now() / 1000);
 
-  const stateFilters = [
-    { label: "All Cards", query: "", count: allCards.length, color: "var(--text-primary)" },
-    {
-      label: "Due",
-      query: "is:due",
-      count: allCards.filter(c => c.queue === 2 || (c.queue === 1 && c.due <= nowSec)).length,
-      color: "var(--color-due)"
-    },
-    {
-      label: "New",
-      query: "is:new",
-      count: allCards.filter(c => c.queue === 0).length,
-      color: "var(--color-new)"
-    },
-    {
-      label: "Learning",
-      query: "is:learn",
-      count: allCards.filter(c => c.queue === 1 || c.queue === 3).length,
-      color: "var(--color-learn)"
-    },
-    {
-      label: "Suspended",
-      query: "is:suspended",
-      count: allCards.filter(c => c.queue === -1).length,
-      color: "var(--text-secondary)"
+  const { stateFilters, sortedDecks, deckCounts } = useMemo(() => {
+    const allCards = Object.values(collection.cards);
+    const nowSec = Math.floor(Date.now() / 1000);
+    const today = getTodayDay();
+
+    let dueCnt = 0;
+    let newCnt = 0;
+    let learnCnt = 0;
+    let suspCnt = 0;
+    const perDeck: Record<number, number> = {};
+
+    for (const c of allCards) {
+      perDeck[c.did] = (perDeck[c.did] || 0) + 1;
+      if (c.queue === -1) {
+        suspCnt++;
+      } else if (c.queue === 0) {
+        newCnt++;
+      } else if (c.queue === 1 || c.queue === 3) {
+        learnCnt++;
+        if (isCardDueInLearnQueue(c, nowSec, today, collection.crt)) {
+          dueCnt++;
+        }
+      } else if (c.queue === 2) {
+        if (normalizeReviewDueDay(c.due, collection.crt) <= today) {
+          dueCnt++;
+        }
+      }
     }
-  ];
 
-  const sortedDecks = Object.values(collection.decks).sort((a, b) =>
-    a.name.localeCompare(b.name)
-  );
+    return {
+      stateFilters: [
+        { label: "All Cards", query: "", count: allCards.length, color: "var(--text-primary)" },
+        { label: "Due", query: "is:due", count: dueCnt, color: "var(--color-due)" },
+        { label: "New", query: "is:new", count: newCnt, color: "var(--color-new)" },
+        { label: "Learning", query: "is:learn", count: learnCnt, color: "var(--color-learn)" },
+        { label: "Suspended", query: "is:suspended", count: suspCnt, color: "var(--text-secondary)" }
+      ],
+      sortedDecks: Object.values(collection.decks).sort((a, b) =>
+        a.name.localeCompare(b.name)
+      ),
+      deckCounts: perDeck
+    };
+  }, [collection.cards, collection.decks, collection.crt]);
 
   return (
     <div className="browser-root">
@@ -196,6 +288,7 @@ export const CardBrowser: React.FC<Props> = ({
           <Search size={15} className="browser-search-icon" />
           <input
             type="text"
+            aria-label="Search cards"
             placeholder="Search cards (e.g. deck:Default tag:anki is:due)..."
             value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
@@ -206,6 +299,7 @@ export const CardBrowser: React.FC<Props> = ({
               type="button"
               onClick={() => setSearchQuery("")}
               className="browser-search-clear"
+              aria-label="Clear search filter"
               title="Clear filter"
             >
               <X size={14} />
@@ -220,7 +314,7 @@ export const CardBrowser: React.FC<Props> = ({
       {/* Main split view: Sidebar + Right Pane (Table + Editor) */}
       <div className="browser-layout">
         {/* Quick Filter Sidebar */}
-        <aside className="browser-sidebar">
+        <aside className="browser-sidebar" aria-label="Card filters">
           <div className="browser-sidebar-group">
             {stateFilters.map(item => {
               const active = searchQuery.trim() === item.query;
@@ -245,7 +339,7 @@ export const CardBrowser: React.FC<Props> = ({
               const deckQuery = d.name.includes(" ") ? `deck:"${d.name}"` : `deck:${d.name}`;
               const active =
                 searchQuery.trim() === deckQuery || searchQuery.trim() === `deck:"${d.name}"`;
-              const deckCount = allCards.filter(c => c.did === d.id).length;
+              const deckCount = deckCounts[d.id] || 0;
               return (
                 <button
                   key={d.id}
@@ -336,6 +430,9 @@ export const CardBrowser: React.FC<Props> = ({
                     {model.tmpls?.[selectedCardItem.card.ord]?.name ||
                       `Card ${selectedCardItem.card.ord + 1}`}
                   </span>
+                  <span style={{ fontSize: 11.5, color: "var(--text-muted)" }}>
+                    {saveState === "saving" ? "Saving..." : "Saved"}
+                  </span>
                 </div>
 
                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -363,6 +460,7 @@ export const CardBrowser: React.FC<Props> = ({
                   <button
                     type="button"
                     onClick={() => setConfirmAction("delete")}
+                    aria-label="Delete Note"
                     style={{ padding: "4px 8px", fontSize: 12.5, color: "var(--color-again)" }}
                     title="Delete Note"
                   >
@@ -391,8 +489,15 @@ export const CardBrowser: React.FC<Props> = ({
                     </div>
                     <textarea
                       rows={idx === 0 ? 2 : 3}
-                      value={selectedCardItem.note.fields[idx] || ""}
+                      value={draftFields[idx] ?? ""}
                       onChange={e => handleFieldChange(idx, e.target.value)}
+                      onBlur={() => {
+                        if (debounceTimerRef.current) {
+                          clearTimeout(debounceTimerRef.current);
+                          debounceTimerRef.current = null;
+                          commitNoteUpdate(selectedCardItem.note, draftFields, draftTags);
+                        }
+                      }}
                       className="browser-field-textarea"
                     />
                   </div>
@@ -405,8 +510,15 @@ export const CardBrowser: React.FC<Props> = ({
                   <input
                     type="text"
                     placeholder="space-separated tags"
-                    value={selectedCardItem.note.tags.join(" ")}
+                    value={draftTags}
                     onChange={e => handleTagsChange(e.target.value)}
+                    onBlur={() => {
+                      if (debounceTimerRef.current) {
+                        clearTimeout(debounceTimerRef.current);
+                        debounceTimerRef.current = null;
+                        commitNoteUpdate(selectedCardItem.note, draftFields, draftTags);
+                      }
+                    }}
                   />
                 </div>
               </div>
@@ -423,16 +535,20 @@ export const CardBrowser: React.FC<Props> = ({
           {confirmAction && selectedCardItem && (
             <div className="modal-backdrop" onClick={() => setConfirmAction(null)}>
               <div
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="browser-confirm-title"
                 className="modal-content"
                 style={{ maxWidth: 380 }}
                 onClick={e => e.stopPropagation()}
               >
                 <div className="modal-header">
-                  <h3 style={{ fontSize: 16, fontWeight: 600 }}>
+                  <h3 id="browser-confirm-title" style={{ fontSize: 16, fontWeight: 600 }}>
                     {confirmAction === "reset" ? "Reset Card Progress" : "Delete Note"}
                   </h3>
                   <button
                     type="button"
+                    aria-label="Close dialog"
                     onClick={() => setConfirmAction(null)}
                     style={{ border: "none", padding: 4, background: "transparent" }}
                   >

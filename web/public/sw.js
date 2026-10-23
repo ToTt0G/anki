@@ -1,19 +1,46 @@
-// klanki Service Worker (PWA & Web Push)
-const CACHE_NAME = "klanki-web-v20";
+// klanki Service Worker (PWA & Web Push) (N01, N02, N07)
+const CACHE_PREFIX = "klanki-web-";
+const CACHE_NAME = "klanki-web-v21";
+const MAX_RUNTIME_CACHE_ENTRIES = 60;
+
 const PRECACHE_URLS = [
   "/",
   "/index.html",
   "/manifest.webmanifest",
   "/favicon.png",
+  "/favicon.ico",
+  "/icons/icon-96.png",
   "/icons/icon-192.png",
   "/icons/icon-512.png",
   "/icons/icon-maskable-192.png",
   "/icons/icon-maskable-512.png",
   "/icons/apple-touch-icon.png",
-  "/icons/badge-72.png"
+  "/icons/badge-72.png",
+  "/vendor/sql.js/sql-wasm.js",
+  "/vendor/sql.js/sql-wasm.wasm"
 ];
 
-// 1. Install lifecycle: pre-cache static shell & skip waiting
+function isCacheableStaticPath(pathname) {
+  return (
+    pathname.startsWith("/assets/") ||
+    pathname.startsWith("/icons/") ||
+    pathname.startsWith("/vendor/") ||
+    pathname === "/manifest.webmanifest" ||
+    pathname.startsWith("/favicon")
+  );
+}
+
+async function trimCache(cache, maxEntries) {
+  const keys = await cache.keys();
+  if (keys.length > maxEntries) {
+    const excess = keys.length - maxEntries;
+    for (let i = 0; i < excess; i++) {
+      await cache.delete(keys[i]);
+    }
+  }
+}
+
+// 1. Install lifecycle: pre-cache static shell & local WASM runtime
 self.addEventListener("install", (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => {
@@ -24,24 +51,24 @@ self.addEventListener("install", (event) => {
   );
 });
 
-// 2. Activate lifecycle: claim clients immediately & prune old caches
+// 2. Activate lifecycle: claim clients & prune only klanki-owned obsolete caches (N01)
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches.keys().then((cacheNames) => {
       return Promise.all(
         cacheNames
-          .filter((name) => name !== CACHE_NAME)
+          .filter((name) => name.startsWith(CACHE_PREFIX) && name !== CACHE_NAME)
           .map((name) => caches.delete(name))
       );
     }).then(() => self.clients.claim())
   );
 });
 
-// 3. Fetch handler: Same-origin static assets only; never intercept Clerk or API traffic
+// 3. Fetch handler: Approved same-origin static assets only with bounded eviction (N02)
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
 
-  // Never intercept cross-origin requests (such as clerk.klanki.ezryder.us or OAuth providers)
+  // Never intercept cross-origin requests (Clerk, OAuth, etc.)
   if (url.origin !== self.location.origin) {
     return;
   }
@@ -56,7 +83,7 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // Handle navigation requests (SPA HTML) — network first
+  // Handle navigation requests (SPA HTML) — network first with offline shell fallback
   if (event.request.mode === "navigate") {
     event.respondWith(
       fetch(event.request).catch(() => caches.match("/index.html") || caches.match("/"))
@@ -64,15 +91,20 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // Same-origin static assets: Stale-While-Revalidate
+  // Only cache approved static asset paths with bounded eviction (N02)
+  if (!isCacheableStaticPath(url.pathname)) {
+    return;
+  }
+
   event.respondWith(
     caches.match(event.request).then((cachedResponse) => {
       const fetchPromise = fetch(event.request)
         .then((networkResponse) => {
           if (networkResponse && networkResponse.status === 200 && event.request.method === "GET") {
             const responseToCache = networkResponse.clone();
-            caches.open(CACHE_NAME).then((cache) => {
-              cache.put(event.request, responseToCache);
+            caches.open(CACHE_NAME).then(async (cache) => {
+              await cache.put(event.request, responseToCache);
+              await trimCache(cache, MAX_RUNTIME_CACHE_ENTRIES);
             });
           }
           return networkResponse;

@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta
       name="viewport"
-      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
     />
     <title>klanki</title>
     <meta name="description" content="Powerful, intelligent spaced repetition flashcards." />
@@ -75,6 +75,13 @@
         0% { transform: translateY(2px) rotate(-1.5deg); }
         100% { transform: translateY(-6px) rotate(2deg); }
       }
+      @media (prefers-reduced-motion: reduce) {
+        .init-duck-svg #leg-front,
+        .init-duck-svg #leg-back,
+        .init-duck-svg #torso {
+          animation: none !important;
+        }
+      }
     </style>
 
     <!-- PWA & Apple Touch Icons -->
@@ -88,25 +95,8 @@
     <meta name="apple-mobile-web-app-title" content="klanki" />
     <meta name="application-name" content="klanki" />
 
-    <!-- MathJax for rendering math and science formulas -->
-    <script>
-      window.MathJax = {
-        tex: {
-          inlineMath: [['\\(', '\\)'], ['$', '$']],
-          displayMath: [['\\[', '\\]'], ['$$', '$$']]
-        },
-        svg: {
-          fontCache: 'global'
-        }
-      };
-    </script>
-    <script
-      id="MathJax-script"
-      async
-      src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"
-    ></script>
-    <!-- SQL.js WebAssembly for full .apkg import & export -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.12.0/sql-wasm.js"></script>
+    <!-- Self-hosted lockfile-pinned SQL.js WebAssembly for offline .apkg import & export (S09, Q03, N07) -->
+    <script src="/vendor/sql.js/sql-wasm.js"></script>
   </head>
   <body>
     <div id="root">

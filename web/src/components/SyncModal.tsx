@@ -15,7 +15,8 @@ import {
   Info,
   Sun,
   Moon,
-  Monitor
+  Monitor,
+  Trash2
 } from "lucide-react";
 import {
   isPushSupported,
@@ -40,14 +41,20 @@ import { ThemeMode, getStoredTheme, setStoredTheme } from "../core/theme";
 
 interface Props {
   syncStatus: SyncStatus;
+  pendingOutboxCount?: number;
   onForceSync: () => void;
+  onClearOfflineData?: () => Promise<void>;
+  onDeleteAccountData?: () => Promise<void>;
   onClose: () => void;
   onShowInstallGuide?: () => void;
 }
 
 export const SyncModal: React.FC<Props> = ({
   syncStatus,
+  pendingOutboxCount = 0,
   onForceSync,
+  onClearOfflineData,
+  onDeleteAccountData,
   onClose,
   onShowInstallGuide
 }) => {
@@ -57,10 +64,14 @@ export const SyncModal: React.FC<Props> = ({
   const [permission, setPermission] = useState<NotificationPermission>("default");
   const [hasSubscription, setHasSubscription] = useState(false);
   const [isPushLoading, setIsPushLoading] = useState(false);
-  const [pushFeedback, setPushFeedback] = useState<{ type: "success" | "error" | "info"; msg: string } | null>(null);
+  const [pushFeedback, setPushFeedback] = useState<{
+    type: "success" | "error" | "info";
+    msg: string;
+  } | null>(null);
   const [standalone, setStandalone] = useState(false);
   const [canPrompt, setCanPrompt] = useState(false);
   const [pushStatus, setPushStatus] = useState<PushStatusResponse | null>(null);
+  const [confirmWipe, setConfirmWipe] = useState<boolean>(false);
 
   const refreshServerPushStatus = async () => {
     const status = await getPushStatus(getToken);
@@ -85,6 +96,22 @@ export const SyncModal: React.FC<Props> = ({
     }
   }, [userId]);
 
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  const handleThemeChange = (newTheme: ThemeMode) => {
+    setThemeMode(newTheme);
+    setStoredTheme(newTheme);
+  };
+
   const handlePrefChange = async (patch: Partial<ClientPushPreferences>) => {
     const res = await updatePushPreferences(patch, getToken);
     if (res) {
@@ -93,11 +120,6 @@ export const SyncModal: React.FC<Props> = ({
         ...res
       }));
     }
-  };
-
-  const handleThemeChange = (newTheme: ThemeMode) => {
-    setThemeMode(newTheme);
-    setStoredTheme(newTheme);
   };
 
   const handleTogglePush = async () => {
@@ -117,7 +139,10 @@ export const SyncModal: React.FC<Props> = ({
         if (res.success) {
           setHasSubscription(true);
           setPermission("granted");
-          setPushFeedback({ type: "success", msg: "Push notifications enabled! You'll receive due review reminders." });
+          setPushFeedback({
+            type: "success",
+            msg: "Push notifications enabled! You'll receive due review reminders."
+          });
           await refreshServerPushStatus();
         } else {
           setPushFeedback({ type: "error", msg: res.error || "Failed to enable notifications." });
@@ -137,9 +162,15 @@ export const SyncModal: React.FC<Props> = ({
     try {
       const res = await sendTestPush(getToken);
       if (res.success) {
-        setPushFeedback({ type: "success", msg: "Test notification sent! Check your notification center." });
+        setPushFeedback({
+          type: "success",
+          msg: "Test notification sent! Check your notification center."
+        });
       } else {
-        setPushFeedback({ type: "error", msg: res.error || "Failed to send test notification." });
+        setPushFeedback({
+          type: "error",
+          msg: res.error || "Failed to send test notification."
+        });
       }
     } catch (err: any) {
       setPushFeedback({ type: "error", msg: err.message || "Failed to send notification." });
@@ -154,9 +185,15 @@ export const SyncModal: React.FC<Props> = ({
     try {
       const res = await sendNotifyDue(7, getToken);
       if (res.success) {
-        setPushFeedback({ type: "success", msg: "Triggered due card notification across active devices!" });
+        setPushFeedback({
+          type: "success",
+          msg: "Triggered due card notification across active devices!"
+        });
       } else {
-        setPushFeedback({ type: "error", msg: res.error || "Failed to trigger notification." });
+        setPushFeedback({
+          type: "error",
+          msg: res.error || "Failed to trigger notification."
+        });
       }
     } catch (err: any) {
       setPushFeedback({ type: "error", msg: err.message || "Failed to send due reminder." });
@@ -179,10 +216,24 @@ export const SyncModal: React.FC<Props> = ({
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal-content" style={{ maxWidth: 460 }} onClick={e => e.stopPropagation()}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="sync-modal-title"
+        className="modal-content"
+        style={{ maxWidth: 460 }}
+        onClick={e => e.stopPropagation()}
+      >
         <div className="modal-header">
-          <h3 style={{ fontSize: 16, fontWeight: 600 }}>Settings & Sync</h3>
-          <button onClick={onClose} style={{ border: "none", padding: 4, background: "transparent" }}>
+          <h3 id="sync-modal-title" style={{ fontSize: 16, fontWeight: 600 }}>
+            Settings & Sync
+          </h3>
+          <button
+            type="button"
+            aria-label="Close settings"
+            onClick={onClose}
+            style={{ border: "none", padding: 4, background: "transparent" }}
+          >
             <X size={18} />
           </button>
         </div>
@@ -190,7 +241,7 @@ export const SyncModal: React.FC<Props> = ({
         <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
           {/* Appearance / Theme Section */}
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: "0.5px" }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)" }}>
               Appearance
             </span>
             <div
@@ -212,7 +263,7 @@ export const SyncModal: React.FC<Props> = ({
                 </div>
                 <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
                   {themeMode === "system"
-                    ? "Currently matching device system theme."
+                    ? "Matching device system theme."
                     : `Active: ${themeMode.charAt(0).toUpperCase() + themeMode.slice(1)} mode.`}
                 </div>
               </div>
@@ -253,7 +304,7 @@ export const SyncModal: React.FC<Props> = ({
 
           {/* Real-time Sync Section */}
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: "0.5px" }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)" }}>
               Cloud & Multi-Device Sync
             </span>
             <div
@@ -269,11 +320,22 @@ export const SyncModal: React.FC<Props> = ({
             >
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <span className={`sync-status ${syncStatus}`} />
-                <span style={{ fontSize: 14, fontWeight: 500, textTransform: "capitalize" }}>
-                  {syncStatus === "connected" ? "Real-time Connected" : syncStatus}
-                </span>
+                <div>
+                  <div style={{ fontSize: 14, fontWeight: 500, textTransform: "capitalize" }}>
+                    {syncStatus === "connected" ? "Real-time Connected" : syncStatus}
+                  </div>
+                  {pendingOutboxCount > 0 && (
+                    <div style={{ fontSize: 11.5, color: "var(--color-learn)" }}>
+                      {pendingOutboxCount} offline {pendingOutboxCount === 1 ? "change" : "changes"} queued
+                    </div>
+                  )}
+                </div>
               </div>
-              <button onClick={onForceSync} style={{ padding: "4px 10px", fontSize: 13 }}>
+              <button
+                type="button"
+                onClick={onForceSync}
+                style={{ padding: "4px 10px", fontSize: 13 }}
+              >
                 <RefreshCw size={13} className={syncStatus === "connecting" ? "spin" : ""} />
                 <span>Sync Now</span>
               </button>
@@ -291,7 +353,7 @@ export const SyncModal: React.FC<Props> = ({
           {/* Web Push Notifications Section */}
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: "0.5px" }}>
+              <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)" }}>
                 Push Notifications
               </span>
               {hasSubscription ? (
@@ -331,6 +393,7 @@ export const SyncModal: React.FC<Props> = ({
                 </div>
 
                 <button
+                  type="button"
                   className={hasSubscription ? "" : "primary"}
                   onClick={handleTogglePush}
                   disabled={isPushLoading || (!pushSupported && !iosNeedsInstall)}
@@ -350,7 +413,6 @@ export const SyncModal: React.FC<Props> = ({
                 </button>
               </div>
 
-              {/* iOS Home Screen Warning */}
               {iosNeedsInstall && (
                 <div
                   style={{
@@ -372,7 +434,6 @@ export const SyncModal: React.FC<Props> = ({
                 </div>
               )}
 
-              {/* Blocked Permission Warning */}
               {permission === "denied" && (
                 <div
                   style={{
@@ -394,7 +455,6 @@ export const SyncModal: React.FC<Props> = ({
                 </div>
               )}
 
-              {/* Test Notification & Schedule Controls */}
               {hasSubscription && (
                 <div style={{ display: "flex", flexDirection: "column", gap: 10, paddingTop: 6, borderTop: "1px solid var(--border-color)" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -443,6 +503,7 @@ export const SyncModal: React.FC<Props> = ({
 
                   <div style={{ display: "flex", gap: 8, paddingTop: 2, flexWrap: "wrap" }}>
                     <button
+                      type="button"
                       onClick={handleSendTest}
                       disabled={isPushLoading}
                       style={{ fontSize: 12, padding: "4px 10px" }}
@@ -451,6 +512,7 @@ export const SyncModal: React.FC<Props> = ({
                       <span>Send Test Notification</span>
                     </button>
                     <button
+                      type="button"
                       onClick={handleNotifyDue}
                       disabled={isPushLoading}
                       style={{ fontSize: 12, padding: "4px 10px" }}
@@ -463,7 +525,6 @@ export const SyncModal: React.FC<Props> = ({
               )}
             </div>
 
-            {/* Notification Feedback Toast */}
             {pushFeedback && (
               <div
                 style={{
@@ -498,10 +559,10 @@ export const SyncModal: React.FC<Props> = ({
 
           <hr style={{ border: "none", borderTop: "1px solid var(--border-color)", margin: "2px 0" }} />
 
-          {/* Progressive Web App Status */}
+          {/* Progressive Web App & Storage Management (S07, S10, U07) */}
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: "0.5px" }}>
-              App Installation
+            <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)" }}>
+              App & Data Management
             </span>
             <div
               style={{
@@ -520,13 +581,14 @@ export const SyncModal: React.FC<Props> = ({
                 </div>
                 <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
                   {standalone
-                    ? "Running in dedicated standalone window with offline support."
-                    : "Install as a native desktop or mobile app for the best experience."}
+                    ? "Running in standalone window with offline support."
+                    : "Install as a native desktop or mobile app."}
                 </div>
               </div>
 
               {!standalone && (
                 <button
+                  type="button"
                   onClick={handleInstallClick}
                   style={{ padding: "4px 10px", fontSize: 12.5, whiteSpace: "nowrap" }}
                 >
@@ -535,11 +597,73 @@ export const SyncModal: React.FC<Props> = ({
                 </button>
               )}
             </div>
+
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", paddingTop: 4 }}>
+              {onClearOfflineData && (
+                <button
+                  type="button"
+                  onClick={async () => {
+                    await onClearOfflineData();
+                    setPushFeedback({
+                      type: "info",
+                      msg: "Local offline cache cleared on this device."
+                    });
+                  }}
+                  style={{ fontSize: 12, padding: "5px 10px" }}
+                >
+                  Clear Offline Cache
+                </button>
+              )}
+
+              {onDeleteAccountData && !confirmWipe && (
+                <button
+                  type="button"
+                  onClick={() => setConfirmWipe(true)}
+                  style={{ fontSize: 12, padding: "5px 10px", color: "var(--color-again)" }}
+                >
+                  <Trash2 size={12} />
+                  <span>Delete Cloud Data</span>
+                </button>
+              )}
+
+              {confirmWipe && onDeleteAccountData && (
+                <div style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", paddingTop: 4 }}>
+                  <span style={{ fontSize: 12, color: "var(--color-again)", flex: 1 }}>
+                    Permanently wipe all cloud decks & history?
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmWipe(false)}
+                    style={{ fontSize: 12, padding: "4px 8px" }}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      await onDeleteAccountData();
+                      setConfirmWipe(false);
+                    }}
+                    style={{
+                      fontSize: 12,
+                      padding: "4px 8px",
+                      background: "var(--color-again)",
+                      borderColor: "var(--color-again)",
+                      color: "#fff"
+                    }}
+                  >
+                    Confirm Wipe
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
         <div className="modal-footer" style={{ marginTop: 8 }}>
-          <button onClick={onClose}>Close</button>
+          <button type="button" onClick={onClose}>
+            Close
+          </button>
         </div>
       </div>
     </div>
