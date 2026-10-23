@@ -132,6 +132,7 @@ it("DATA-01: HTTP and WebSocket replacements and backup restores require current
             type: "upsert_deck",
             opId: "device-b-edit",
             deck: { ...col.decks[1], name: "Edited on Device B" },
+            expectedMod: col.decks[1].mod,
         });
         assert.equal(editAck.type, "ack");
         assert.equal(editAck.revision, 3);
@@ -296,6 +297,7 @@ it("DATA-02: delete_note ignores client-supplied cardIds belonging to other note
             opId: "del-note-1",
             noteId: noteToDelete.id,
             cardIds: [cardToKeep.id, 999999],
+            expectedRevision: 1,
         });
         assert.equal(ack.type, "ack");
 
@@ -362,6 +364,7 @@ it("UX-01: renaming a parent deck on the server cascades to all Parent::Child su
             type: "upsert_deck",
             opId: "rename-science",
             deck: { ...col.decks[10], name: "Natural Science" },
+            expectedMod: col.decks[10].mod,
         });
         assert.equal(ack.type, "ack");
 
@@ -599,13 +602,17 @@ it("H-03, NEW-05 & L-10: aborts overwrite when backup snapshot fails, supports c
     const col = createDefaultCollection();
     await request(user, "/collection", { ...col, expectedRevision: 0 });
 
-    // Upload media chunk via POST /media (NEW-05)
+    // Stage upload under the final import ID. Staging must be invisible and not bump live revision.
     const mediaUploadRes = await request(user, "/media", {
         filename: "chunk_img.png",
         dataUrl: VALID_PNG_DATA_URL,
         opId: "chunk-1",
+        importOpId: "ok-chunked-import",
     });
     assert.equal(mediaUploadRes.status, 200);
+    const afterStaging: any = await (await request(user, "/collection")).json();
+    assert.equal(afterStaging.revision, 1, "Media staging must not modify live revision");
+    assert.equal(afterStaging.media["chunk_img.png"], undefined, "Staged media remains invisible");
 
     // H-03: Simulate backup storage failure -> overwrite must abort without replacing existing collection
     await request(user, "/test/set-meta", { key: "test_fail_backup", val: "1" });
@@ -613,7 +620,7 @@ it("H-03, NEW-05 & L-10: aborts overwrite when backup snapshot fails, supports c
     replacement.decks[1].name = "Should Not Commit When Backup Fails";
     const failedOverwrite = await request(user, "/collection", {
         ...replacement,
-        expectedRevision: 2,
+        expectedRevision: 1,
         opId: "fail-backup-import",
     });
     assert.equal(failedOverwrite.status, 500);
@@ -626,7 +633,7 @@ it("H-03, NEW-05 & L-10: aborts overwrite when backup snapshot fails, supports c
         ...replacement,
         media: {},
         keepMediaNames: ["chunk_img.png"],
-        expectedRevision: 2,
+        expectedRevision: 1,
         opId: "ok-chunked-import",
     });
     assert.equal(chunkedImport.status, 200);
@@ -634,7 +641,7 @@ it("H-03, NEW-05 & L-10: aborts overwrite when backup snapshot fails, supports c
     assert.equal(
         afterChunked.media["chunk_img.png"],
         VALID_PNG_DATA_URL,
-        "Chunk-uploaded media retained via keepMediaNames",
+        "Media atomically promoted during import",
     );
 
     // L-10: Delete orphaned media via delete_media WebSocket message
@@ -648,6 +655,78 @@ it("H-03, NEW-05 & L-10: aborts overwrite when backup snapshot fails, supports c
         assert.equal(delAck.type, "ack");
         const afterDeleteMedia: any = await (await request(user, "/collection")).json();
         assert.equal(afterDeleteMedia.media["chunk_img.png"], undefined, "Orphaned media deleted");
+    } finally {
+        socket.close();
+    }
+});
+
+
+it("P0: stale HTTP media uploads are rejected after account deletion", async () => {
+    const user = "http-media-deletion-generation";
+    const col = createDefaultCollection();
+    await request(user, "/collection", { ...col, expectedRevision: 0 });
+    await request(user, "/account-data", undefined, "DELETE");
+    const stale = await request(user, "/media", {
+        filename: "stale.png",
+        dataUrl: VALID_PNG_DATA_URL,
+        generation: "0",
+        opId: "stale-media-upload",
+    });
+    assert.equal(stale.status, 410);
+    const after: any = await (await request(user, "/collection")).json();
+    assert.equal(after.media["stale.png"], undefined);
+});
+
+it("P0: media staged for a conflicting import cannot modify the live collection", async () => {
+    const user = "staged-cas-isolation";
+    const col = createDefaultCollection();
+    await request(user, "/collection", { ...col, expectedRevision: 0 });
+    const staged = await request(user, "/media", {
+        filename: "staged.png",
+        dataUrl: VALID_PNG_DATA_URL,
+        opId: "stage-op",
+        importOpId: "conflicting-import",
+    });
+    assert.equal(staged.status, 200);
+    const competing = await request(user, "/collection", { ...col, expectedRevision: 1, opId: "other-import" });
+    assert.equal(competing.status, 200);
+    const rejection = await request(user, "/collection", {
+        ...col,
+        media: {},
+        keepMediaNames: ["staged.png"],
+        expectedRevision: 1,
+        opId: "conflicting-import",
+    });
+    assert.equal(rejection.status, 409);
+    const after: any = await (await request(user, "/collection")).json();
+    assert.equal(after.revision, 2);
+    assert.equal(after.media["staged.png"], undefined);
+});
+
+it("P0: same-second deck edits require the latest authoritative modification stamp", async () => {
+    const user = "same-second-deck-edits";
+    const col = createDefaultCollection();
+    await request(user, "/collection", { ...col, expectedRevision: 0 });
+    const { socket, send } = await socketFor(user);
+    try {
+        const originalMod = col.decks[1].mod;
+        const first = await send({
+            type: "upsert_deck",
+            opId: "first-mod",
+            deck: { ...col.decks[1], name: "First edit" },
+            expectedMod: originalMod,
+        });
+        assert.equal(first.type, "ack");
+        assert.ok(first.updatedMod > originalMod);
+        const conflict = await send({
+            type: "upsert_deck",
+            opId: "stale-mod",
+            deck: { ...col.decks[1], name: "Lost second edit" },
+            expectedMod: originalMod,
+        });
+        assert.equal(conflict.kind, "conflict_revision");
+        const after: any = await (await request(user, "/collection")).json();
+        assert.equal(after.decks[1].name, "First edit");
     } finally {
         socket.close();
     }
