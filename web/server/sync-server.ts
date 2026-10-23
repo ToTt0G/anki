@@ -130,6 +130,17 @@ export class AnkiSyncServer extends DurableObject {
         name TEXT PRIMARY KEY,
         data TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS backup_snapshot_parts (
+        part INTEGER PRIMARY KEY,
+        data TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS staged_import_media (
+        import_op_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        data TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (import_op_id, name)
+      );
       CREATE TABLE IF NOT EXISTS push_subscriptions (
         endpoint TEXT PRIMARY KEY,
         p256dh TEXT NOT NULL,
@@ -177,6 +188,36 @@ export class AnkiSyncServer extends DurableObject {
 
     private getRevision(): number {
         return Number(this.getMeta("col_revision") || 0);
+    }
+
+    /** Split serialized backups into SQLite-safe UTF-8 text rows. */
+    private setBackupSnapshot(col: Collection): void {
+        const payload = new TextEncoder().encode(JSON.stringify(col));
+        const fragmentSize = 1024 * 1024;
+        const decoder = new TextDecoder();
+        this.sql.exec("DELETE FROM backup_snapshot_parts");
+        for (let part = 0, start = 0; start < payload.length; part++) {
+            let end = Math.min(start + fragmentSize, payload.length);
+            while (end < payload.length && (payload[end] & 0xc0) === 0x80) { end--; }
+            this.sql.exec(
+                "INSERT INTO backup_snapshot_parts (part, data) VALUES (?, ?)",
+                part, decoder.decode(payload.subarray(start, end)),
+            );
+            start = end;
+        }
+        this.setMeta("backup_snapshot", "chunked:v1");
+    }
+
+    private readBackupSnapshot(): Collection | null {
+        const raw = this.getMeta("backup_snapshot");
+        if (!raw) { return null; }
+        if (raw !== "chunked:v1") { return JSON.parse(raw) as Collection; }
+        const parts = this.sql.exec("SELECT part, data FROM backup_snapshot_parts ORDER BY part ASC").toArray();
+        if (!parts.length) { throw new Error("Backup manifest exists but its data is missing"); }
+        for (let i = 0; i < parts.length; i++) {
+            if (Number(parts[i].part) !== i) { throw new Error("Backup snapshot has missing chunks"); }
+        }
+        return JSON.parse(parts.map((row: any) => String(row.data)).join("")) as Collection;
     }
 
     private getDeletionTombstone(): { deletedAt: number } | null {
@@ -433,7 +474,7 @@ export class AnkiSyncServer extends DurableObject {
                         if (this.getMeta("test_fail_backup") === "1") {
                             throw new Error("Simulated backup storage failure");
                         }
-                        this.setMeta("backup_snapshot", JSON.stringify(current));
+                        this.setBackupSnapshot(current);
                         this.sql.exec("DELETE FROM backup_media");
                         this.sql.exec("INSERT INTO backup_media (name, data) SELECT name, data FROM media");
                     }
@@ -460,21 +501,30 @@ export class AnkiSyncServer extends DurableObject {
             this.sql.exec("DELETE FROM cards");
             this.sql.exec("DELETE FROM revlog");
 
-            // DATA-09 & NEW-05: Delete obsolete media, while preserving any chunk-uploaded `keepMediaNames`
-            if (keepMediaNames && keepMediaNames.length > 0) {
-                const keepSet = new Set(
-                    keepMediaNames
-                        .map(fn => normalizeMediaFilename(fn) || fn)
-                        .filter(Boolean),
-                );
-                for (const row of this.sql.exec("SELECT name FROM media").toArray()) {
-                    if (!keepSet.has(row.name)) {
-                        this.sql.exec("DELETE FROM media WHERE name = ?", row.name);
-                    }
-                }
-            } else {
-                this.sql.exec("DELETE FROM media");
+            // Staged media is invisible until promoted in the CAS-protected collection transaction.
+            const stagedNames = new Set((keepMediaNames || []).map(fn => normalizeMediaFilename(fn) || fn));
+            if (stagedNames.size > 0 && !opId) {
+                throw new OpError("Staged import requires an operation ID", "validation");
             }
+            let combinedCount = Object.keys(col.media || {}).length;
+            let combinedBytes = Object.values(col.media || {}).reduce((n, data) => n + data.length, 0);
+            for (const filename of stagedNames) {
+                const row = this.sql.exec(
+                    "SELECT LENGTH(data) AS size FROM staged_import_media WHERE import_op_id = ? AND name = ?",
+                    opId, filename,
+                ).toArray()[0];
+                if (!row) {
+                    throw new OpError(`Import staging is missing ${filename}; retry the media upload`, "validation", true);
+                }
+                if (!(filename in (col.media || {}))) {
+                    combinedCount++;
+                    combinedBytes += Number(row.size);
+                }
+            }
+            if (combinedCount > MAX_ACCOUNT_MEDIA_ITEMS || combinedBytes > MAX_ACCOUNT_MEDIA_DATA_CHARS) {
+                throw new OpError("Combined import media exceeds account quota", "validation");
+            }
+            this.sql.exec("DELETE FROM media");
 
             for (const d of Object.values(col.decks || {})) {
                 this.sql.exec("INSERT INTO decks (id, json) VALUES (?, ?)", d.id, JSON.stringify(d));
@@ -499,6 +549,15 @@ export class AnkiSyncServer extends DurableObject {
                     const safeName = normalizeMediaFilename(rawName) || rawName;
                     this.sql.exec("INSERT OR REPLACE INTO media (name, data) VALUES (?, ?)", safeName, data);
                 }
+            }
+            for (const filename of stagedNames) {
+                this.sql.exec(
+                    "INSERT OR REPLACE INTO media (name, data) SELECT name, data FROM staged_import_media WHERE import_op_id = ? AND name = ?",
+                    opId, filename,
+                );
+            }
+            if (stagedNames.size > 0) {
+                this.sql.exec("DELETE FROM staged_import_media WHERE import_op_id = ?", opId);
             }
             nextRev = this.bumpRevision(opId);
         });
@@ -910,6 +969,8 @@ export class AnkiSyncServer extends DurableObject {
                 this.sql.exec("DELETE FROM revlog");
                 this.sql.exec("DELETE FROM media");
                 this.sql.exec("DELETE FROM backup_media");
+                this.sql.exec("DELETE FROM backup_snapshot_parts");
+                this.sql.exec("DELETE FROM staged_import_media");
                 this.sql.exec("DELETE FROM push_subscriptions");
                 this.sql.exec("DELETE FROM ws_tickets");
                 this.sql.exec("DELETE FROM applied_ops");
@@ -948,6 +1009,7 @@ export class AnkiSyncServer extends DurableObject {
                         filename?: string;
                         dataUrl?: string;
                         opId?: string;
+                        importOpId?: string;
                         generation?: string;
                     };
                     const validation = validateClientMessage({
@@ -961,6 +1023,31 @@ export class AnkiSyncServer extends DurableObject {
                         return Response.json({ error: validation.error }, { status: 400 });
                     }
                     const msg = validation.msg as Extract<ClientMessage, { type: "save_media" }>;
+                    const currentGeneration = this.getMeta("col_generation") ?? "0";
+                    if ((msg.generation ?? "0") !== currentGeneration || this.getDeletionTombstone()) {
+                        return Response.json({ error: "Collection was deleted; reload before uploading media." }, { status: 410 });
+                    }
+                    const importOpId = body.importOpId;
+                    if (importOpId !== undefined) {
+                        if (typeof importOpId !== "string" || !/^[a-zA-Z0-9_-]{1,191}$/.test(importOpId)) {
+                            return Response.json({ error: "Invalid import operation ID" }, { status: 400 });
+                        }
+                        this.ctx.storage.transactionSync(() => {
+                            this.sql.exec("DELETE FROM staged_import_media WHERE created_at < ?", Date.now() - 86400000);
+                            const prior = this.sql.exec(
+                                "SELECT COALESCE(SUM(LENGTH(data)), 0) AS n FROM staged_import_media WHERE NOT (import_op_id = ? AND name = ?)",
+                                importOpId, msg.filename,
+                            ).toArray();
+                            if (Number(prior[0]?.n || 0) + msg.dataUrl.length > MAX_ACCOUNT_MEDIA_DATA_CHARS) {
+                                throw new OpError("Staged import media exceeds account quota", "validation");
+                            }
+                            this.sql.exec(
+                                "INSERT OR REPLACE INTO staged_import_media (import_op_id, name, data, created_at) VALUES (?, ?, ?, ?)",
+                                importOpId, msg.filename, msg.dataUrl, Date.now(),
+                            );
+                        });
+                        return Response.json({ success: true, staged: true, filename: msg.filename });
+                    }
                     const already = this.getAlreadyAppliedRevision(msg.opId);
                     if (already !== null) {
                         return Response.json({ success: true, filename: msg.filename, revision: already });
@@ -1097,11 +1184,15 @@ export class AnkiSyncServer extends DurableObject {
             if (!cas.ok) {
                 return Response.json({ error: cas.error, currentRevision: this.getRevision() }, { status: 409 });
             }
-            const backupRaw = this.getMeta("backup_snapshot");
-            if (!backupRaw) {
+            let backupCol: Collection | null;
+            try {
+                backupCol = this.readBackupSnapshot();
+            } catch {
+                return Response.json({ error: "Backup snapshot is incomplete or corrupted" }, { status: 500 });
+            }
+            if (!backupCol) {
                 return Response.json({ error: "No backup snapshot available" }, { status: 404 });
             }
-            const backupCol: Collection = JSON.parse(backupRaw);
             const backupMedia: Record<string, string> = {};
             for (const row of this.sql.exec("SELECT name, data FROM backup_media").toArray()) {
                 backupMedia[row.name] = row.data;
@@ -1413,6 +1504,7 @@ export class AnkiSyncServer extends DurableObject {
             cardState?: Card;
             revlogEntry?: RevlogEntry;
             originalRevlogId?: number;
+            updatedMod?: number;
         },
     ) {
         if (!opId) { return; }
@@ -1603,7 +1695,7 @@ export class AnkiSyncServer extends DurableObject {
                     const nextReps = Math.max((card.reps || 0) + 1, msg.nextState.reps || 0);
                     Object.assign(card, msg.nextState, {
                         reps: nextReps,
-                        mod: Math.floor(Date.now() / 1000),
+                        mod: Math.max(Math.floor(Date.now() / 1000), (card.mod || 0) + 1),
                     });
                     finalState = card;
                     this.sql.exec("UPDATE cards SET json = ? WHERE id = ?", JSON.stringify(card), card.id);
@@ -1684,9 +1776,8 @@ export class AnkiSyncServer extends DurableObject {
                         const prevDeck: Deck = JSON.parse(existingRows[0].json);
                         // H-04: Optimistic concurrency check on deck edits
                         if (
-                            msg.expectedMod !== undefined
-                            && !msg.forceOverwrite
-                            && (prevDeck.mod || 0) > msg.expectedMod
+                            !msg.forceOverwrite
+                            && (msg.expectedMod === undefined || (prevDeck.mod || 0) !== msg.expectedMod)
                         ) {
                             throw new OpError(
                                 `Conflict: deck '${prevDeck.name}' was modified more recently on another device.`,
@@ -1719,6 +1810,10 @@ export class AnkiSyncServer extends DurableObject {
                         }
                     }
 
+                    if (existingRows.length) {
+                        const previous: Deck = JSON.parse(existingRows[0].json);
+                        msg.deck.mod = Math.max(Math.floor(Date.now() / 1000), (previous.mod || 0) + 1);
+                    }
                     this.sql.exec(
                         "INSERT OR REPLACE INTO decks (id, json) VALUES (?, ?)",
                         msg.deck.id,
@@ -1729,7 +1824,7 @@ export class AnkiSyncServer extends DurableObject {
                     }
                     rev = this.bumpRevision(opId);
                 });
-                this.sendAck(ws, opId, rev);
+                this.sendAck(ws, opId, rev, { updatedMod: msg.deck.mod });
                 this.broadcast(
                     {
                         type: "upsert_deck",
@@ -1744,6 +1839,10 @@ export class AnkiSyncServer extends DurableObject {
             }
 
             if (msg.type === "delete_deck") {
+                const cas = this.checkExpectedRevision(msg.expectedRevision);
+                if (!cas.ok) {
+                    throw new OpError(cas.error || "Collection revision changed", "conflict_revision", true);
+                }
                 let rev = 0;
                 const deletedDeckIds: number[] = [];
                 const deletedCardIds: number[] = [];
@@ -1811,6 +1910,10 @@ export class AnkiSyncServer extends DurableObject {
             }
 
             if (msg.type === "upsert_deck_config") {
+                const cas = this.checkExpectedRevision(msg.expectedRevision);
+                if (!cas.ok) {
+                    throw new OpError(cas.error || "Collection revision changed", "conflict_revision", true);
+                }
                 let rev = 0;
                 this.ctx.storage.transactionSync(() => {
                     this.sql.exec(
@@ -1877,9 +1980,8 @@ export class AnkiSyncServer extends DurableObject {
                         // H-04: Optimistic concurrency check on existing note edits
                         const prevNote: Note = JSON.parse(existingNoteRows[0].json);
                         if (
-                            msg.expectedMod !== undefined
-                            && !msg.forceOverwrite
-                            && (prevNote.mod || 0) > msg.expectedMod
+                            !msg.forceOverwrite
+                            && (msg.expectedMod === undefined || (prevNote.mod || 0) !== msg.expectedMod)
                         ) {
                             throw new OpError(
                                 `Conflict: note ${msg.note.id} was modified more recently on another device.`,
@@ -1924,6 +2026,10 @@ export class AnkiSyncServer extends DurableObject {
                         }
                     }
 
+                    if (existingNoteRows.length) {
+                        const previous: Note = JSON.parse(existingNoteRows[0].json);
+                        msg.note.mod = Math.max(Math.floor(Date.now() / 1000), (previous.mod || 0) + 1);
+                    }
                     this.sql.exec(
                         "INSERT OR REPLACE INTO notes (id, json) VALUES (?, ?)",
                         msg.note.id,
@@ -1955,7 +2061,7 @@ export class AnkiSyncServer extends DurableObject {
                     this.setMeta("last_activity_ms", String(Date.now()));
                     rev = this.bumpRevision(opId);
                 });
-                this.sendAck(ws, opId, rev);
+                this.sendAck(ws, opId, rev, { updatedMod: msg.note.mod });
                 await this.recomputeAndScheduleAlarm();
                 this.broadcast(
                     {
@@ -1972,6 +2078,10 @@ export class AnkiSyncServer extends DurableObject {
             }
 
             if (msg.type === "delete_note") {
+                const cas = this.checkExpectedRevision(msg.expectedRevision);
+                if (!cas.ok) {
+                    throw new OpError(cas.error || "Collection revision changed", "conflict_revision", true);
+                }
                 let rev = 0;
                 const removedCardIds = new Set<number>();
 
@@ -2032,7 +2142,7 @@ export class AnkiSyncServer extends DurableObject {
                         .toArray();
                     if (existingCardRows.length > 0 && !msg.forceOverwrite) {
                         const prevCard: Card = JSON.parse(existingCardRows[0].json);
-                        if (msg.expectedMod !== undefined && (prevCard.mod || 0) > msg.expectedMod) {
+                        if (msg.expectedMod === undefined || (prevCard.mod || 0) !== msg.expectedMod) {
                             throw new OpError(
                                 `Conflict: card ${msg.card.id} was modified more recently on another device.`,
                                 "conflict_revision",
@@ -2041,6 +2151,10 @@ export class AnkiSyncServer extends DurableObject {
                         }
                     }
 
+                    if (existingCardRows.length) {
+                        const previous: Card = JSON.parse(existingCardRows[0].json);
+                        msg.card.mod = Math.max(Math.floor(Date.now() / 1000), (previous.mod || 0) + 1);
+                    }
                     this.sql.exec(
                         "INSERT OR REPLACE INTO cards (id, json) VALUES (?, ?)",
                         msg.card.id,
@@ -2049,7 +2163,7 @@ export class AnkiSyncServer extends DurableObject {
                     this.setMeta("last_activity_ms", String(Date.now()));
                     rev = this.bumpRevision(opId);
                 });
-                this.sendAck(ws, opId, rev);
+                this.sendAck(ws, opId, rev, { updatedMod: msg.card.mod });
                 await this.recomputeAndScheduleAlarm();
                 this.broadcast({ type: "update_card", opId, card: msg.card, revision: rev }, ws);
                 return;

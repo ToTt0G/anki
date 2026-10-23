@@ -792,7 +792,7 @@ export const App: React.FC = () => {
                     conflictedOps={conflictedOps}
                     orphanedMediaFilenames={orphanedMediaFilenames}
                     onRetryConflict={async opId => {
-                        await syncClientRef.current?.retryConflictedOp(opId, true);
+                        await syncClientRef.current?.retryConflictedOp(opId, false);
                         setConflictedOps((await syncClientRef.current?.getConflictedOps()) || []);
                     }}
                     onDiscardConflict={async opId => {
@@ -814,17 +814,17 @@ export const App: React.FC = () => {
                     }}
                     onSignOutGuarded={async options => {
                         const targetUserId = userId;
-                        previousUserIdRef.current = null;
-                        if (syncClientRef.current) {
-                            syncClientRef.current.disconnect();
-                            syncClientRef.current = null;
-                        }
                         if (options?.discardUnsynced || (!options?.keepOffline && getClearDataOnSignOutPreference())) {
                             const ok = await runSafeAccountCleanup(
                                 targetUserId,
                                 Boolean(options?.discardUnsynced),
                             );
                             if (!ok) { return; }
+                        }
+                        previousUserIdRef.current = null;
+                        if (syncClientRef.current) {
+                            syncClientRef.current.disconnect();
+                            syncClientRef.current = null;
                         }
                         setIsSyncModalOpen(false);
                         await clerk.signOut();
