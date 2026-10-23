@@ -20,7 +20,10 @@ interface Props {
     onUpdateNote: (note: Note) => void;
     onUpdateCard: (card: Card) => void;
     onDeleteNote: (noteId: number) => void;
-    onSaveMedia?: (filename: string, dataUrl: string) => void;
+    onSaveMedia?: (
+        filename: string,
+        dataUrl: string,
+    ) => Promise<{ ok: boolean; filename: string; error?: string }> | void;
 }
 
 const VIRTUAL_ROW_HEIGHT = 36;
@@ -196,15 +199,28 @@ export const CardBrowser: React.FC<Props> = ({
                 binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + 0x8000)));
             }
             const dataUrl = `data:${inspected.mime};base64,${btoa(binary)}`;
-            const filename = `paste_${generateUniqueId()}_${safeBase}`;
+            const rawFilename = `paste_${generateUniqueId()}_${safeBase}`;
+            let canonicalFilename = normalizeMediaFilename(rawFilename) || rawFilename;
             if (onSaveMedia) {
-                onSaveMedia(filename, dataUrl);
+                const res = await onSaveMedia(canonicalFilename, dataUrl);
+                if (res && !res.ok) {
+                    setUploadError(res.error || "Failed to persist image attachment.");
+                    return;
+                }
+                if (res?.filename) {
+                    canonicalFilename = res.filename;
+                }
             } else {
-                collection.media[filename] = dataUrl;
+                collection.media[canonicalFilename] = dataUrl;
             }
+            const altDesc = safeBase
+                .replace(/\.[a-z0-9]+$/i, "")
+                .replace(/[_-]+/g, " ")
+                .trim() || "Flashcard image";
+            const escapedAlt = altDesc.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
             const idx = editingFieldIdxRef.current;
             const cur = draftFields[idx] || "";
-            const imgTag = `<img src="${filename}">`;
+            const imgTag = `<img src="${canonicalFilename}" alt="${escapedAlt}">`;
             handleFieldChange(idx, cur ? `${cur}\n${imgTag}` : imgTag);
         } catch {
             setUploadError("Could not read image file.");

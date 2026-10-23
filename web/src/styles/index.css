@@ -74,6 +74,8 @@ button {
   background: var(--bg-secondary);
   color: var(--text-primary);
   padding: 6px 14px;
+  min-height: 32px;
+  min-width: 32px;
   border-radius: 6px;
   cursor: pointer;
   display: inline-flex;
@@ -82,6 +84,18 @@ button {
   gap: 6px;
   transition: all 0.15s ease;
   max-width: 100%;
+}
+
+input[type="checkbox"], input[type="radio"] {
+  min-width: 18px;
+  min-height: 18px;
+  cursor: pointer;
+}
+
+@media (max-width: 640px) {
+  button {
+    min-height: 36px;
+  }
 }
 
 button:hover {

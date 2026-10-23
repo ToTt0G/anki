@@ -3,7 +3,7 @@
 
 import { AuthenticateWithRedirectCallback, Show, SignInButton, SignUpButton, useAuth, useClerk } from "@clerk/react";
 import { Moon, Sun } from "lucide-react";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AddNote } from "./components/AddNote";
 import { CardBrowser } from "./components/CardBrowser";
 import { CustomStudyModal } from "./components/CustomStudyModal";
@@ -18,11 +18,16 @@ import { Navbar, NavView } from "./components/Navbar";
 import { Reviewer } from "./components/Reviewer";
 import { StatsView } from "./components/StatsView";
 import { SyncModal } from "./components/SyncModal";
-import { clearUserOfflineData, getClearDataOnSignOutPreference, OutboxEntry } from "./core/idb-storage";
+import {
+    clearUserOfflineData,
+    getClearDataOnSignOutPreference,
+    hasUnsyncedUserChanges,
+    OutboxEntry,
+} from "./core/idb-storage";
 import { generateUniqueId } from "./core/ids";
-import { exportApkg, exportDeckCsv, importEp1100Decks } from "./core/import-export";
+import { exportApkg, exportDeckCsv, findOrphanedMediaFilenames, importEp1100Decks } from "./core/import-export";
 import { syncPushSubscriptionForUser } from "./core/push-manager";
-import { registerServiceWorker } from "./core/pwa";
+import { applyServiceWorkerUpdate, registerServiceWorker } from "./core/pwa";
 import { getCustomStudyCardIds, getTodayDay } from "./core/scheduler";
 import { SyncClient, SyncStatus } from "./core/sync-client";
 import { setStoredTheme } from "./core/theme";
@@ -92,6 +97,9 @@ export const App: React.FC = () => {
     const [isStudying, setIsStudying] = useState<boolean>(initialNav.studying);
     const [syncStatus, setSyncStatus] = useState<SyncStatus>("offline");
     const [syncBannerError, setSyncBannerError] = useState<string | null>(null);
+    const [pendingSwUpdate, setPendingSwUpdate] = useState<ServiceWorkerRegistration | null>(null);
+    const [cleanupFailedUser, setCleanupFailedUser] = useState<string | null>(null);
+    const [retainedUnsyncedUser, setRetainedUnsyncedUser] = useState<{ userId: string; count: number } | null>(null);
     const [customStudySession, setCustomStudySession] = useState<
         {
             deckId: number;
@@ -113,7 +121,10 @@ export const App: React.FC = () => {
     getTokenRef.current = getToken;
 
     useEffect(() => {
-        registerServiceWorker().catch(err => {
+        // U-07: Register Service Worker with visible update recovery
+        registerServiceWorker({
+            onUpdateAvailable: reg => setPendingSwUpdate(reg),
+        }).catch(err => {
             console.warn("Service Worker initialization error:", err);
         });
 
@@ -144,6 +155,30 @@ export const App: React.FC = () => {
         writeNavStateToUrl({ view: "decks", deckId: did, studying: false }, "push");
     };
 
+    const runSafeAccountCleanup = async (targetUserId: string, allowDiscardUnsynced: boolean): Promise<boolean> => {
+        try {
+            if (!allowDiscardUnsynced) {
+                const unsyncedCount = await hasUnsyncedUserChanges(targetUserId);
+                if (unsyncedCount > 0) {
+                    // NEW-03: Never silently destroy unsynced offline changes during sign-out
+                    setRetainedUnsyncedUser({ userId: targetUserId, count: unsyncedCount });
+                    return true;
+                }
+            }
+            await clearUserOfflineData(targetUserId);
+            setCleanupFailedUser(null);
+            setRetainedUnsyncedUser(null);
+            return true;
+        } catch (err: any) {
+            // M-05: Surface storage cleanup failure explicitly instead of swallowing
+            setCleanupFailedUser(targetUserId);
+            setSyncBannerError(
+                err?.message || "Could not clear previous account's offline storage on this device.",
+            );
+            return false;
+        }
+    };
+
     useEffect(() => {
         if (!isLoaded) { return; }
 
@@ -154,9 +189,8 @@ export const App: React.FC = () => {
                 syncClientRef.current.disconnect();
                 syncClientRef.current = null;
             }
-            // SEC-04: Remove previous user's local study data on sign-out when enabled (default: true)
             if (prevUserId && getClearDataOnSignOutPreference()) {
-                clearUserOfflineData(prevUserId).catch(() => {});
+                void runSafeAccountCleanup(prevUserId, false);
             }
             setCollection(null);
             setSyncStatus("offline");
@@ -167,43 +201,49 @@ export const App: React.FC = () => {
             return;
         }
 
-        // SEC-04: If switching directly between two accounts on a shared device,
-        // always purge the previous account's offline storage.
         const prevUserId = previousUserIdRef.current;
-        if (prevUserId && prevUserId !== userId) {
-            clearUserOfflineData(prevUserId).catch(() => {});
-        }
         previousUserIdRef.current = userId;
 
-        const tokenGetter = () => getTokenRef.current();
-        const client = new SyncClient(
-            userId,
-            tokenGetter,
-            col => {
-                if (syncClientRef.current !== client) { return; }
-                setCollection(col);
-                void client.getConflictedOps().then(ops => {
-                    if (syncClientRef.current === client) { setConflictedOps(ops); }
-                });
-            },
-            status => setSyncStatus(status),
-            err => {
-                setSyncBannerError(err);
-                window.setTimeout(() => setSyncBannerError(null), 5000);
-            },
-        );
-        syncClientRef.current = client;
-        setCollection(client.getCollection());
-        setCustomStudySession(null);
-        setConflictedOps([]);
-        client.connect();
-        client.getConflictedOps().then(setConflictedOps);
+        let cancelled = false;
+        const initSession = async () => {
+            if (prevUserId && prevUserId !== userId) {
+                const ok = await runSafeAccountCleanup(prevUserId, false);
+                if (!ok || cancelled) { return; }
+            }
 
-        syncPushSubscriptionForUser(userId, tokenGetter).catch(() => {});
+            const tokenGetter = () => getTokenRef.current();
+            const client = new SyncClient(
+                userId,
+                tokenGetter,
+                col => {
+                    if (syncClientRef.current !== client) { return; }
+                    setCollection(col);
+                    void client.getConflictedOps().then(ops => {
+                        if (syncClientRef.current === client) { setConflictedOps(ops); }
+                    });
+                },
+                status => setSyncStatus(status),
+                err => {
+                    setSyncBannerError(err);
+                    window.setTimeout(() => setSyncBannerError(null), 5000);
+                },
+            );
+            syncClientRef.current = client;
+            setCollection(client.getCollection());
+            setCustomStudySession(null);
+            setConflictedOps([]);
+            client.connect();
+            client.getConflictedOps().then(setConflictedOps);
+
+            syncPushSubscriptionForUser(userId, tokenGetter).catch(() => {});
+        };
+
+        void initSession();
 
         return () => {
-            client.disconnect();
-            if (syncClientRef.current === client) {
+            cancelled = true;
+            if (syncClientRef.current) {
+                syncClientRef.current.disconnect();
                 syncClientRef.current = null;
             }
         };
@@ -221,6 +261,11 @@ export const App: React.FC = () => {
             clerk.setActive({ session: signUpAttempt.createdSessionId }).catch(() => {});
         }
     }, [isLoaded, isSignedIn, clerk]);
+
+    const orphanedMediaFilenames = useMemo(
+        () => (collection ? findOrphanedMediaFilenames(collection) : []),
+        [collection],
+    );
 
     const isOAuthCallbackRoute = typeof window !== "undefined"
         && (window.location.pathname.startsWith("/sso-callback")
@@ -280,6 +325,70 @@ export const App: React.FC = () => {
                     </div>
                 </header>
 
+                {/* NEW-03 & M-05: Surface retained unsynced data or cleanup retry banner when signed out */}
+                {retainedUnsyncedUser && (
+                    <div
+                        role="alert"
+                        style={{
+                            maxWidth: 900,
+                            margin: "10px auto 0",
+                            padding: "10px 14px",
+                            borderRadius: 8,
+                            background: "rgba(217, 119, 6, 0.1)",
+                            border: "1px solid rgba(217, 119, 6, 0.4)",
+                            fontSize: 13,
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            gap: 10,
+                            flexWrap: "wrap",
+                        }}
+                    >
+                        <span>
+                            Preserved {retainedUnsyncedUser.count} unsynced offline{" "}
+                            {retainedUnsyncedUser.count === 1 ? "change" : "changes"}{" "}
+                            from your previous session. Sign back in to sync them to the cloud, or discard them on this
+                            device.
+                        </span>
+                        <button
+                            type="button"
+                            onClick={() => void runSafeAccountCleanup(retainedUnsyncedUser.userId, true)}
+                            style={{ fontSize: 12.5, padding: "5px 10px" }}
+                        >
+                            Discard Offline Changes
+                        </button>
+                    </div>
+                )}
+
+                {cleanupFailedUser && (
+                    <div
+                        role="alert"
+                        style={{
+                            maxWidth: 900,
+                            margin: "10px auto 0",
+                            padding: "10px 14px",
+                            borderRadius: 8,
+                            background: "rgba(220, 38, 38, 0.1)",
+                            border: "1px solid var(--color-again)",
+                            color: "var(--color-again)",
+                            fontSize: 13,
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            gap: 10,
+                        }}
+                    >
+                        <span>Failed to remove downloaded study data from browser storage.</span>
+                        <button
+                            type="button"
+                            onClick={() => void runSafeAccountCleanup(cleanupFailedUser, true)}
+                            style={{ fontSize: 12.5, padding: "5px 10px" }}
+                        >
+                            Retry Cleanup
+                        </button>
+                    </div>
+                )}
+
                 <main className="main-content landing-main">
                     <LandingPage />
                 </main>
@@ -312,7 +421,6 @@ export const App: React.FC = () => {
     const activeDeck = selectedDeckId ? collection.decks[selectedDeckId] || null : null;
     const pendingOutboxCount = syncClientRef.current?.getPendingOutboxCount() || 0;
 
-    // Deck mutations using collision-resistant IDs (D06)
     const handleCreateDeck = (name: string) => {
         const id = generateUniqueId(collection.decks);
         const newDeck: Deck = {
@@ -412,7 +520,6 @@ export const App: React.FC = () => {
         syncClientRef.current?.deleteNote(noteId);
     };
 
-    // UX-05: Support isolating a deck config preset to a single deck when shared
     const handleSaveDeckConfig = (config: DeckConfig, createSeparateForDeckId?: number) => {
         if (createSeparateForDeckId !== undefined && collection.decks[createSeparateForDeckId]) {
             const targetDeck = collection.decks[createSeparateForDeckId];
@@ -433,7 +540,6 @@ export const App: React.FC = () => {
         syncClientRef.current?.upsertDeckConfig(config);
     };
 
-    // Ephemeral per-day, per-deck Custom Study extra limit override (C09)
     const handleApplyExtraLimit = (extraNew: number, extraRev: number) => {
         if (!activeDeck) { return; }
         const today = getTodayDay();
@@ -495,6 +601,37 @@ export const App: React.FC = () => {
                 }}
                 onInstallClick={() => setShowManualInstallGuide(true)}
             />
+
+            {/* U-07: Visible Service Worker update recovery banner */}
+            {pendingSwUpdate && (
+                <div
+                    role="status"
+                    aria-live="polite"
+                    style={{
+                        maxWidth: 900,
+                        margin: "8px auto 0",
+                        padding: "8px 14px",
+                        borderRadius: 6,
+                        background: "rgba(2, 132, 199, 0.1)",
+                        border: "1px solid var(--color-new)",
+                        fontSize: 13,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: 10,
+                    }}
+                >
+                    <span>A new version of klanki is ready.</span>
+                    <button
+                        type="button"
+                        className="primary"
+                        onClick={() => applyServiceWorkerUpdate(pendingSwUpdate)}
+                        style={{ fontSize: 12.5, padding: "4px 10px" }}
+                    >
+                        Update & Reload
+                    </button>
+                </div>
+            )}
 
             {syncBannerError && (
                 <div
@@ -640,8 +777,8 @@ export const App: React.FC = () => {
                     onImportComplete={updated => {
                         syncClientRef.current?.importCollection(updated);
                     }}
-                    onRestoreBackup={async () => {
-                        return (await syncClientRef.current?.restoreServerBackup()) || false;
+                    onRestoreBackup={async options => {
+                        return (await syncClientRef.current?.restoreServerBackup(options)) || false;
                     }}
                     onClose={() => setIsImportOpen(false)}
                 />
@@ -650,8 +787,10 @@ export const App: React.FC = () => {
             {isSyncModalOpen && (
                 <SyncModal
                     syncStatus={syncStatus}
+                    collection={collection}
                     pendingOutboxCount={pendingOutboxCount}
                     conflictedOps={conflictedOps}
+                    orphanedMediaFilenames={orphanedMediaFilenames}
                     onRetryConflict={async opId => {
                         await syncClientRef.current?.retryConflictedOp(opId, true);
                         setConflictedOps((await syncClientRef.current?.getConflictedOps()) || []);
@@ -660,6 +799,12 @@ export const App: React.FC = () => {
                         await syncClientRef.current?.discardConflictedOp(opId);
                         setConflictedOps((await syncClientRef.current?.getConflictedOps()) || []);
                     }}
+                    onExportRecoverySnapshot={() => {
+                        void handleExportDeckApkg();
+                    }}
+                    onCleanOrphanedMedia={async filenames => {
+                        await syncClientRef.current?.deleteMedia(filenames);
+                    }}
                     onForceSync={async () => {
                         syncClientRef.current?.syncNow();
                         setConflictedOps((await syncClientRef.current?.getConflictedOps()) || []);
@@ -667,8 +812,24 @@ export const App: React.FC = () => {
                     onClearOfflineData={async options => {
                         await syncClientRef.current?.clearOfflineStorage(options);
                     }}
+                    onSignOutGuarded={async options => {
+                        const targetUserId = userId;
+                        previousUserIdRef.current = null;
+                        if (syncClientRef.current) {
+                            syncClientRef.current.disconnect();
+                            syncClientRef.current = null;
+                        }
+                        if (options?.discardUnsynced || (!options?.keepOffline && getClearDataOnSignOutPreference())) {
+                            const ok = await runSafeAccountCleanup(
+                                targetUserId,
+                                Boolean(options?.discardUnsynced),
+                            );
+                            if (!ok) { return; }
+                        }
+                        setIsSyncModalOpen(false);
+                        await clerk.signOut();
+                    }}
                     onDeleteAccountData={async () => {
-                        // DATA-04: Verify HTTP success before clearing local storage or reloading
                         const token = await getToken();
                         if (!token) {
                             throw new Error("Authentication required to delete cloud data.");

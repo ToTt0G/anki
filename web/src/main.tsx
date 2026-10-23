@@ -11,14 +11,26 @@ import "./styles/index.css";
 // Initialize theme immediately to prevent layout / color flash
 initTheme();
 
-const PUBLISHABLE_KEY = (import.meta as any).env?.VITE_CLERK_PUBLISHABLE_KEY
-    || "pk_live_Y2xlcmsua2xhbmtpLmV6cnlkZXIudXMk";
+/**
+ * Resolve Clerk publishable key from explicit build/runtime configuration without
+ * silently falling back to a hardcoded production key (L-01).
+ */
+export function resolveClerkPublishableKey(envRecord?: Record<string, unknown>): string {
+    const raw = envRecord?.VITE_CLERK_PUBLISHABLE_KEY;
+    if (typeof raw !== "string" || !raw.trim()) {
+        throw new Error(
+            "Missing VITE_CLERK_PUBLISHABLE_KEY environment configuration. Set VITE_CLERK_PUBLISHABLE_KEY before starting the app.",
+        );
+    }
+    return raw.trim();
+}
 
-const rootElement = document.getElementById("root");
+const rootElement = typeof document !== "undefined" ? document.getElementById("root") : null;
 if (rootElement) {
+    const publishableKey = resolveClerkPublishableKey((import.meta as any).env);
     ReactDOM.createRoot(rootElement).render(
         <React.StrictMode>
-            <ClerkProvider publishableKey={PUBLISHABLE_KEY}>
+            <ClerkProvider publishableKey={publishableKey}>
                 <App />
             </ClerkProvider>
         </React.StrictMode>,

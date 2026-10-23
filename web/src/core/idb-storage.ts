@@ -211,9 +211,10 @@ export async function saveMediaItemToIdb(
     filename: string,
     dataUrl: string,
 ): Promise<{ ok: boolean; error?: string }> {
+    const safeName = filename;
     if (!hasIndexedDB()) {
         const cur = memoryMedia.get(userId) || {};
-        cur[filename] = dataUrl;
+        cur[safeName] = dataUrl;
         memoryMedia.set(userId, cur);
         return { ok: true };
     }
@@ -223,9 +224,9 @@ export async function saveMediaItemToIdb(
         await new Promise<void>((resolve, reject) => {
             const tx = db.transaction(STORE_MEDIA, "readwrite");
             tx.objectStore(STORE_MEDIA).put({
-                id: `${userId}:${filename}`,
+                id: `${userId}:${safeName}`,
                 userId,
-                filename,
+                filename: safeName,
                 dataUrl,
             });
             tx.oncomplete = () => resolve();
@@ -235,6 +236,40 @@ export async function saveMediaItemToIdb(
         return { ok: true };
     } catch (err: any) {
         return { ok: false, error: err?.message || "Failed to persist media item" };
+    }
+}
+
+export async function deleteMediaItemsFromIdb(
+    userId: string,
+    filenames: string[],
+): Promise<{ ok: boolean; error?: string }> {
+    const cur = memoryMedia.get(userId);
+    if (cur) {
+        for (const fn of filenames) {
+            delete cur[fn];
+        }
+        memoryMedia.set(userId, cur);
+    }
+
+    if (!hasIndexedDB()) {
+        return { ok: true };
+    }
+
+    try {
+        const db = await openDb();
+        await new Promise<void>((resolve, reject) => {
+            const tx = db.transaction(STORE_MEDIA, "readwrite");
+            const store = tx.objectStore(STORE_MEDIA);
+            for (const fn of filenames) {
+                store.delete(`${userId}:${fn}`);
+            }
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+            tx.onabort = () => reject(tx.error ?? new Error("IndexedDB transaction aborted"));
+        });
+        return { ok: true };
+    } catch (err: any) {
+        return { ok: false, error: err?.message || "Failed to delete media items" };
     }
 }
 
@@ -387,6 +422,33 @@ export function setClearDataOnSignOutPreference(enabled: boolean): void {
     } catch {
         // ignore
     }
+}
+
+export async function hasUnsyncedUserChanges(userId: string): Promise<number> {
+    const ops = await getOutboxOps(userId);
+    return ops.length;
+}
+
+export async function clearUserOutbox(userId: string): Promise<void> {
+    memoryOutbox.delete(userId);
+    if (!hasIndexedDB()) { return; }
+
+    const db = await openDb();
+    await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(STORE_OUTBOX, "readwrite");
+        const outboxIdx = tx.objectStore(STORE_OUTBOX).index("by_user");
+        const outboxReq = outboxIdx.openKeyCursor(IDBKeyRange.only(userId));
+        outboxReq.onsuccess = () => {
+            const cursor = outboxReq.result;
+            if (cursor) {
+                tx.objectStore(STORE_OUTBOX).delete(cursor.primaryKey);
+                cursor.continue();
+            }
+        };
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error ?? new Error("IndexedDB transaction aborted"));
+    });
 }
 
 /**

@@ -22,10 +22,10 @@ jobs:
         working-directory: web
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 #v4
 
       - name: Set up Node.js 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 #v7.0.0
         with:
           node-version: "22"
           cache: "npm"
@@ -34,8 +34,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Audit production dependencies for known advisories
-        run: npm run audit:deps
+      - name: Audit production and build-time dependencies for known advisories (CI-04, L-06)
+        run: |
+          npm run audit:deps
+          npm run audit:all
+
+      - name: Enable headless Chrome sandbox on Ubuntu 24.04 runner (M-10)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
 
       - name: Check web source formatting
         run: npm exec --yes --package=dprint@0.56.0 -- dprint check .
@@ -43,7 +48,7 @@ jobs:
       - name: Typecheck client & Cloudflare Worker server (strict)
         run: npm run typecheck
 
-      - name: Run security, sync & scheduler verification tests
+      - name: Run security, sync, scheduler & headless browser verification tests
         run: npm test
 
       - name: Build production client bundle

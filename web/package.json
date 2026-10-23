@@ -11,6 +11,7 @@
         "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit",
         "build": "npm run typecheck && vite build",
         "audit:deps": "npm audit --omit=dev --audit-level=moderate",
+        "audit:all": "npm audit --audit-level=moderate",
         "sbom": "npm sbom --sbom-format=cyclonedx --omit=dev > dist/sbom.cdx.json",
         "vendor:mathjax": "node scripts/vendor-mathjax.mjs",
         "test": "esbuild tests/*.test.ts --bundle --platform=node --format=esm --packages=external --outdir=.vite --out-extension:.js=.mjs && node --test .vite/*.test.mjs",

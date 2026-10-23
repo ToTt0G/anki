@@ -10,6 +10,7 @@ import {
     Download,
     Info,
     Laptop,
+    LogOut,
     Monitor,
     Moon,
     RefreshCw,
@@ -39,18 +40,24 @@ import {
 import { canInstallPrompt, isIosDevice, isStandalone, promptPwaInstall } from "../core/pwa";
 import { SyncStatus } from "../core/sync-client";
 import { getStoredTheme, setStoredTheme, ThemeMode } from "../core/theme";
+import { Collection } from "../core/types";
 import { useAccessibleModal } from "./useAccessibleModal";
 
 interface Props {
     syncStatus: SyncStatus;
+    collection?: Collection;
     pendingOutboxCount?: number;
     /** Operations rejected by the server, parked for retry/discard (D13). */
     conflictedOps?: OutboxEntry[];
+    orphanedMediaFilenames?: string[];
     onRetryConflict?: (opId: string) => Promise<void>;
     onDiscardConflict?: (opId: string) => Promise<void>;
+    onExportRecoverySnapshot?: () => void;
+    onCleanOrphanedMedia?: (filenames: string[]) => Promise<void>;
     onForceSync: () => void;
     onClearOfflineData?: (options?: { forceDiscardPending?: boolean }) => Promise<void>;
     onDeleteAccountData?: () => Promise<void>;
+    onSignOutGuarded?: (options?: { discardUnsynced?: boolean; keepOffline?: boolean }) => Promise<void>;
     onClose: () => void;
     onShowInstallGuide?: () => void;
 }
@@ -72,7 +79,9 @@ function describeConflictedOp(entry: OutboxEntry): string {
         case "update_card":
             return "Card update";
         case "save_media":
-            return "Media upload";
+            return `Media upload (${entry.msg.filename})`;
+        case "delete_media":
+            return "Media cleanup";
         case "import_collection":
             return "Collection import (overwrites cloud snapshot)";
         default:
@@ -82,13 +91,18 @@ function describeConflictedOp(entry: OutboxEntry): string {
 
 export const SyncModal: React.FC<Props> = ({
     syncStatus,
+    collection,
     pendingOutboxCount = 0,
     conflictedOps = [],
+    orphanedMediaFilenames = [],
     onRetryConflict,
     onDiscardConflict,
+    onExportRecoverySnapshot,
+    onCleanOrphanedMedia,
     onForceSync,
     onClearOfflineData,
     onDeleteAccountData,
+    onSignOutGuarded,
     onClose,
     onShowInstallGuide,
 }) => {
@@ -96,11 +110,16 @@ export const SyncModal: React.FC<Props> = ({
     const dialogRef = useAccessibleModal<HTMLDivElement>(true, onClose);
     const [busyConflict, setBusyConflict] = useState<string | null>(null);
     const [conflictError, setConflictError] = useState<string | null>(null);
+    // NEW-08 / M-03: Second confirmation state for force-overwriting a conflicted collection import
+    const [confirmForceOverwriteOpId, setConfirmForceOverwriteOpId] = useState<string | null>(null);
+    const [confirmSignOutPrompt, setConfirmSignOutPrompt] = useState<boolean>(false);
+
     const resolveConflict = async (opId: string, action?: (id: string) => Promise<void>) => {
         setBusyConflict(opId);
         setConflictError(null);
         try {
             await action?.(opId);
+            setConfirmForceOverwriteOpId(null);
         } catch (error) {
             setConflictError(
                 error instanceof Error ? error.message : "Could not resolve this change. Please try again.",
@@ -109,6 +128,7 @@ export const SyncModal: React.FC<Props> = ({
             setBusyConflict(null);
         }
     };
+
     const [themeMode, setThemeMode] = useState<ThemeMode>(getStoredTheme());
     const [clearOnSignOut, setClearOnSignOut] = useState<boolean>(() => getClearDataOnSignOutPreference());
     const [pushSupported, setPushSupported] = useState(false);
@@ -260,6 +280,15 @@ export const SyncModal: React.FC<Props> = ({
     const iosNeedsInstall = isIos && !standalone;
     const totalUnsynced = pendingOutboxCount + conflictedOps.length;
 
+    const cloudCounts = collection
+        ? {
+            decks: Object.keys(collection.decks || {}).length,
+            notes: Object.keys(collection.notes || {}).length,
+            cards: Object.keys(collection.cards || {}).length,
+            reviews: (collection.revlog || []).length,
+        }
+        : null;
+
     return (
         <div className="modal-backdrop" onClick={onClose}>
             <div
@@ -268,7 +297,7 @@ export const SyncModal: React.FC<Props> = ({
                 aria-modal="true"
                 aria-labelledby="sync-modal-title"
                 className="modal-content"
-                style={{ maxWidth: 460 }}
+                style={{ maxWidth: 480 }}
                 onClick={e => e.stopPropagation()}
             >
                 <div className="modal-header">
@@ -279,7 +308,7 @@ export const SyncModal: React.FC<Props> = ({
                         type="button"
                         aria-label="Close settings"
                         onClick={onClose}
-                        style={{ border: "none", padding: 4, background: "transparent" }}
+                        style={{ border: "none", padding: 6, background: "transparent", minHeight: 32, minWidth: 32 }}
                     >
                         <X size={18} />
                     </button>
@@ -288,7 +317,7 @@ export const SyncModal: React.FC<Props> = ({
                 <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
                     {/* Appearance / Theme Section */}
                     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                        <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)" }}>
+                        <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text-secondary)" }}>
                             Appearance
                         </span>
                         <div
@@ -308,7 +337,7 @@ export const SyncModal: React.FC<Props> = ({
                                 <div style={{ fontSize: 13.5, fontWeight: 500, color: "var(--text-primary)" }}>
                                     Theme
                                 </div>
-                                <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
+                                <div style={{ fontSize: 12.5, color: "var(--text-secondary)" }}>
                                     {themeMode === "system"
                                         ? "Matching device system theme."
                                         : `Active: ${themeMode.charAt(0).toUpperCase() + themeMode.slice(1)} mode.`}
@@ -351,7 +380,7 @@ export const SyncModal: React.FC<Props> = ({
 
                     {/* Real-time Sync Section */}
                     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                        <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)" }}>
+                        <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text-secondary)" }}>
                             Cloud & Multi-Device Sync
                         </span>
                         <div
@@ -372,7 +401,7 @@ export const SyncModal: React.FC<Props> = ({
                                         {syncStatus === "connected" ? "Real-time Connected" : syncStatus}
                                     </div>
                                     {pendingOutboxCount > 0 && (
-                                        <div style={{ fontSize: 11.5, color: "var(--color-learn)" }}>
+                                        <div style={{ fontSize: 12, color: "var(--color-learn)" }}>
                                             {pendingOutboxCount} offline{" "}
                                             {pendingOutboxCount === 1 ? "change" : "changes"} queued
                                         </div>
@@ -382,7 +411,7 @@ export const SyncModal: React.FC<Props> = ({
                             <button
                                 type="button"
                                 onClick={onForceSync}
-                                style={{ padding: "4px 10px", fontSize: 13 }}
+                                style={{ padding: "6px 12px", fontSize: 13 }}
                             >
                                 <RefreshCw size={13} className={syncStatus === "connecting" ? "spin" : ""} />
                                 <span>Sync Now</span>
@@ -404,13 +433,13 @@ export const SyncModal: React.FC<Props> = ({
                             <span>Isolated per-user real-time sync across devices</span>
                         </div>
 
-                        {/* Conflicted operations queue (D13): rejected ops are parked for retry/discard */}
+                        {/* Conflicted operations queue (D13, NEW-08 / M-03) */}
                         {conflictedOps.length > 0 && (
                             <div
                                 style={{
                                     display: "flex",
                                     flexDirection: "column",
-                                    gap: 8,
+                                    gap: 10,
                                     padding: "12px 14px",
                                     background: "rgba(217, 119, 6, 0.08)",
                                     border: "1px solid rgba(217, 119, 6, 0.35)",
@@ -424,47 +453,176 @@ export const SyncModal: React.FC<Props> = ({
                                         {conflictedOps.length === 1 ? "change" : "changes"} awaiting your decision
                                     </span>
                                 </div>
-                                {conflictedOps.map(entry => (
-                                    <div
-                                        key={entry.opId}
-                                        style={{
-                                            display: "flex",
-                                            alignItems: "flex-start",
-                                            gap: 8,
-                                            justifyContent: "space-between",
-                                            flexWrap: "wrap",
-                                            fontSize: 12.5,
-                                        }}
-                                    >
-                                        <div style={{ flex: 1, minWidth: 160 }}>
-                                            <div style={{ fontWeight: 500 }}>{describeConflictedOp(entry)}</div>
-                                            <div style={{ color: "var(--color-again)" }}>
-                                                {entry.error || "Rejected by the server."}
+                                {conflictedOps.map(entry => {
+                                    const isImport = entry.msg.type === "import_collection";
+                                    const isConfirmingOverwrite = confirmForceOverwriteOpId === entry.opId;
+                                    const importCol = isImport
+                                        ? (entry.msg as Extract<typeof entry.msg, { type: "import_collection" }>)
+                                            .collection
+                                        : null;
+                                    const importCounts = importCol
+                                        ? {
+                                            decks: Object.keys(importCol.decks || {}).length,
+                                            notes: Object.keys(importCol.notes || {}).length,
+                                            cards: Object.keys(importCol.cards || {}).length,
+                                            reviews: (importCol.revlog || []).length,
+                                        }
+                                        : null;
+
+                                    return (
+                                        <div
+                                            key={entry.opId}
+                                            style={{
+                                                display: "flex",
+                                                flexDirection: "column",
+                                                gap: 8,
+                                                fontSize: 12.5,
+                                                paddingTop: 6,
+                                                borderTop: "1px solid rgba(217, 119, 6, 0.2)",
+                                            }}
+                                        >
+                                            <div
+                                                style={{
+                                                    display: "flex",
+                                                    alignItems: "flex-start",
+                                                    gap: 8,
+                                                    justifyContent: "space-between",
+                                                    flexWrap: "wrap",
+                                                }}
+                                            >
+                                                <div style={{ flex: 1, minWidth: 160 }}>
+                                                    <div style={{ fontWeight: 500 }}>{describeConflictedOp(entry)}</div>
+                                                    <div style={{ color: "var(--color-again)" }}>
+                                                        {entry.error || "Rejected by the server."}
+                                                    </div>
+                                                </div>
+                                                <div style={{ display: "flex", gap: 6 }}>
+                                                    {isImport
+                                                        ? (
+                                                            <button
+                                                                type="button"
+                                                                disabled={busyConflict !== null}
+                                                                onClick={() =>
+                                                                    setConfirmForceOverwriteOpId(
+                                                                        isConfirmingOverwrite ? null : entry.opId,
+                                                                    )}
+                                                                style={{ fontSize: 12.5, padding: "5px 10px" }}
+                                                            >
+                                                                <Undo2 size={12} className="inline" />{" "}
+                                                                Review & Overwrite...
+                                                            </button>
+                                                        )
+                                                        : (
+                                                            <button
+                                                                type="button"
+                                                                disabled={busyConflict !== null}
+                                                                onClick={() =>
+                                                                    void resolveConflict(entry.opId, onRetryConflict)}
+                                                                style={{ fontSize: 12.5, padding: "5px 10px" }}
+                                                                title="Send this change to the server again"
+                                                            >
+                                                                <Undo2 size={12} className="inline" /> Retry
+                                                            </button>
+                                                        )}
+                                                    <button
+                                                        type="button"
+                                                        disabled={busyConflict !== null}
+                                                        onClick={() =>
+                                                            void resolveConflict(entry.opId, onDiscardConflict)}
+                                                        style={{ fontSize: 12.5, padding: "5px 10px" }}
+                                                        title="Discard this change (server state stays authoritative)"
+                                                    >
+                                                        <XCircle size={12} /> Discard
+                                                    </button>
+                                                </div>
                                             </div>
+
+                                            {/* NEW-08 / M-03: Second confirmation with displaced-change diff & recovery export */}
+                                            {isImport && isConfirmingOverwrite && (
+                                                <div
+                                                    role="alert"
+                                                    style={{
+                                                        padding: "10px 12px",
+                                                        borderRadius: 6,
+                                                        background: "var(--bg-primary)",
+                                                        border: "1px solid var(--color-again)",
+                                                        display: "flex",
+                                                        flexDirection: "column",
+                                                        gap: 8,
+                                                    }}
+                                                >
+                                                    <div style={{ fontWeight: 600, color: "var(--color-again)" }}>
+                                                        Confirm Full Cloud Collection Replacement
+                                                    </div>
+                                                    {cloudCounts && importCounts && (
+                                                        <div
+                                                            style={{
+                                                                color: "var(--text-secondary)",
+                                                                lineHeight: 1.5,
+                                                                fontSize: 12,
+                                                            }}
+                                                        >
+                                                            <div>
+                                                                <strong>Current Cloud:</strong> {cloudCounts.decks}{" "}
+                                                                decks · {cloudCounts.notes} notes · {cloudCounts.cards}
+                                                                {" "}
+                                                                cards · {cloudCounts.reviews} reviews
+                                                            </div>
+                                                            <div>
+                                                                <strong>Import Snapshot:</strong> {importCounts.decks}
+                                                                {" "}
+                                                                decks · {importCounts.notes} notes ·{" "}
+                                                                {importCounts.cards} cards · {importCounts.reviews}{" "}
+                                                                reviews
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                    <div
+                                                        style={{
+                                                            display: "flex",
+                                                            gap: 8,
+                                                            justifyContent: "flex-end",
+                                                            flexWrap: "wrap",
+                                                        }}
+                                                    >
+                                                        {onExportRecoverySnapshot && (
+                                                            <button
+                                                                type="button"
+                                                                onClick={onExportRecoverySnapshot}
+                                                                style={{ fontSize: 12, padding: "5px 10px" }}
+                                                            >
+                                                                <Download size={12} />
+                                                                <span>Export Cloud Recovery (.apkg)</span>
+                                                            </button>
+                                                        )}
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setConfirmForceOverwriteOpId(null)}
+                                                            style={{ fontSize: 12, padding: "5px 10px" }}
+                                                        >
+                                                            Cancel
+                                                        </button>
+                                                        <button
+                                                            type="button"
+                                                            disabled={busyConflict !== null}
+                                                            onClick={() =>
+                                                                void resolveConflict(entry.opId, onRetryConflict)}
+                                                            style={{
+                                                                fontSize: 12,
+                                                                padding: "5px 10px",
+                                                                background: "var(--color-again)",
+                                                                borderColor: "var(--color-again)",
+                                                                color: "#fff",
+                                                            }}
+                                                        >
+                                                            Confirm Force Overwrite
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            )}
                                         </div>
-                                        <div style={{ display: "flex", gap: 6 }}>
-                                            <button
-                                                type="button"
-                                                disabled={busyConflict !== null}
-                                                onClick={() => void resolveConflict(entry.opId, onRetryConflict)}
-                                                style={{ fontSize: 12, padding: "4px 8px" }}
-                                                title="Send this change to the server again"
-                                            >
-                                                <Undo2 size={11} className="inline" />{" "}
-                                                {entry.msg.type === "import_collection" ? "Force Overwrite" : "Retry"}
-                                            </button>
-                                            <button
-                                                type="button"
-                                                disabled={busyConflict !== null}
-                                                onClick={() => void resolveConflict(entry.opId, onDiscardConflict)}
-                                                style={{ fontSize: 12, padding: "4px 8px" }}
-                                                title="Discard this change (server state stays authoritative)"
-                                            >
-                                                <XCircle size={11} /> Discard
-                                            </button>
-                                        </div>
-                                    </div>
-                                ))}
+                                    );
+                                })}
                                 {conflictError && <div role="alert">{conflictError}</div>}
                             </div>
                         )}
@@ -475,14 +633,14 @@ export const SyncModal: React.FC<Props> = ({
                     {/* Web Push Notifications Section */}
                     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                            <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)" }}>
+                            <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text-secondary)" }}>
                                 Push Notifications
                             </span>
                             {hasSubscription
                                 ? (
                                     <span
                                         style={{
-                                            fontSize: 12,
+                                            fontSize: 12.5,
                                             color: "var(--color-good)",
                                             fontWeight: 500,
                                             display: "flex",
@@ -497,7 +655,7 @@ export const SyncModal: React.FC<Props> = ({
                                 ? (
                                     <span
                                         style={{
-                                            fontSize: 12,
+                                            fontSize: 12.5,
                                             color: "var(--color-again)",
                                             fontWeight: 500,
                                             display: "flex",
@@ -509,7 +667,7 @@ export const SyncModal: React.FC<Props> = ({
                                     </span>
                                 )
                                 : (
-                                    <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                                    <span style={{ fontSize: 12.5, color: "var(--text-muted)" }}>
                                         Disabled
                                     </span>
                                 )}
@@ -531,7 +689,7 @@ export const SyncModal: React.FC<Props> = ({
                                     <div style={{ fontSize: 13.5, fontWeight: 500, color: "var(--text-primary)" }}>
                                         Daily Review & Due Reminders
                                     </div>
-                                    <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
+                                    <div style={{ fontSize: 12.5, color: "var(--text-secondary)" }}>
                                         Spaced repetition reminders delivered even when app is closed.
                                     </div>
                                 </div>
@@ -541,7 +699,7 @@ export const SyncModal: React.FC<Props> = ({
                                     className={hasSubscription ? "" : "primary"}
                                     onClick={handleTogglePush}
                                     disabled={isPushLoading || (!pushSupported && !iosNeedsInstall)}
-                                    style={{ padding: "5px 12px", fontSize: 12.5, whiteSpace: "nowrap" }}
+                                    style={{ padding: "6px 12px", fontSize: 12.5, whiteSpace: "nowrap" }}
                                 >
                                     {hasSubscription
                                         ? (
@@ -569,7 +727,7 @@ export const SyncModal: React.FC<Props> = ({
                                         border: "1px solid rgba(2, 132, 199, 0.2)",
                                         borderRadius: 6,
                                         padding: "8px 10px",
-                                        fontSize: 12,
+                                        fontSize: 12.5,
                                         color: "var(--text-primary)",
                                     }}
                                 >
@@ -592,7 +750,7 @@ export const SyncModal: React.FC<Props> = ({
                                         border: "1px solid rgba(220, 38, 38, 0.2)",
                                         borderRadius: 6,
                                         padding: "8px 10px",
-                                        fontSize: 12,
+                                        fontSize: 12.5,
                                         color: "var(--text-primary)",
                                     }}
                                 >
@@ -641,7 +799,7 @@ export const SyncModal: React.FC<Props> = ({
                                                     handlePrefChange({
                                                         dailyMode: e.target.value as "adaptive" | "fixed",
                                                     })}
-                                                style={{ padding: "4px 8px", fontSize: 12.5 }}
+                                                style={{ padding: "5px 10px", fontSize: 12.5 }}
                                             >
                                                 <option value="adaptive">
                                                     Smart ({String(pushStatus?.dueSummary?.adaptiveHour ?? 9).padStart(
@@ -659,7 +817,7 @@ export const SyncModal: React.FC<Props> = ({
                                                     type="time"
                                                     value={pushStatus?.preferences?.dailyTime || "09:00"}
                                                     onChange={e => handlePrefChange({ dailyTime: e.target.value })}
-                                                    style={{ padding: "3px 8px", fontSize: 12.5 }}
+                                                    style={{ padding: "5px 10px", fontSize: 12.5 }}
                                                 />
                                             )}
                                         </div>
@@ -674,6 +832,7 @@ export const SyncModal: React.FC<Props> = ({
                                             fontSize: 12.5,
                                             color: "var(--text-secondary)",
                                             cursor: "pointer",
+                                            minHeight: 28,
                                         }}
                                     >
                                         <span>Notify when short-term learning steps finish</span>
@@ -685,7 +844,6 @@ export const SyncModal: React.FC<Props> = ({
                                         />
                                     </label>
 
-                                    {/* SEC-10: Lock-screen notification privacy preference (default off) */}
                                     <label
                                         htmlFor="push-pref-include-deck-name"
                                         style={{
@@ -695,6 +853,7 @@ export const SyncModal: React.FC<Props> = ({
                                             fontSize: 12.5,
                                             color: "var(--text-secondary)",
                                             cursor: "pointer",
+                                            minHeight: 28,
                                         }}
                                     >
                                         <span>
@@ -709,7 +868,7 @@ export const SyncModal: React.FC<Props> = ({
                                     </label>
 
                                     {pushStatus?.nextAlarmAt && (
-                                        <div style={{ fontSize: 11.5, color: "var(--text-muted)" }}>
+                                        <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
                                             Next check scheduled: {new Date(pushStatus.nextAlarmAt).toLocaleString()}
                                         </div>
                                     )}
@@ -719,7 +878,7 @@ export const SyncModal: React.FC<Props> = ({
                                             type="button"
                                             onClick={handleSendTest}
                                             disabled={isPushLoading}
-                                            style={{ fontSize: 12, padding: "4px 10px" }}
+                                            style={{ fontSize: 12.5, padding: "6px 12px" }}
                                         >
                                             <Send size={12} />
                                             <span>Send Test Notification</span>
@@ -728,7 +887,7 @@ export const SyncModal: React.FC<Props> = ({
                                             type="button"
                                             onClick={handleNotifyDue}
                                             disabled={isPushLoading}
-                                            style={{ fontSize: 12, padding: "4px 10px" }}
+                                            style={{ fontSize: 12.5, padding: "6px 12px" }}
                                         >
                                             <Bell size={12} />
                                             <span>Simulate Due Reminder</span>
@@ -772,9 +931,9 @@ export const SyncModal: React.FC<Props> = ({
 
                     <hr style={{ border: "none", borderTop: "1px solid var(--border-color)", margin: "2px 0" }} />
 
-                    {/* Progressive Web App & Storage Management (SEC-04, DATA-04, DATA-05) */}
+                    {/* Progressive Web App & Storage Management (SEC-04, DATA-04, DATA-05, NEW-03, L-09, L-10) */}
                     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                        <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)" }}>
+                        <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text-secondary)" }}>
                             App & Data Management
                         </span>
                         <div
@@ -792,7 +951,7 @@ export const SyncModal: React.FC<Props> = ({
                                 <div style={{ fontSize: 13.5, fontWeight: 500, color: "var(--text-primary)" }}>
                                     {standalone ? "Installed PWA" : "Running in Web Browser"}
                                 </div>
-                                <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
+                                <div style={{ fontSize: 12.5, color: "var(--text-secondary)" }}>
                                     {standalone
                                         ? "Running in standalone window with offline support."
                                         : "Install as a native desktop or mobile app."}
@@ -803,7 +962,7 @@ export const SyncModal: React.FC<Props> = ({
                                 <button
                                     type="button"
                                     onClick={handleInstallClick}
-                                    style={{ padding: "4px 10px", fontSize: 12.5, whiteSpace: "nowrap" }}
+                                    style={{ padding: "6px 12px", fontSize: 12.5, whiteSpace: "nowrap" }}
                                 >
                                     <Download size={13} />
                                     <span>{isIos ? "Instructions" : "Install App"}</span>
@@ -811,20 +970,20 @@ export const SyncModal: React.FC<Props> = ({
                             )}
                         </div>
 
-                        {/* SEC-04: Shared-device sign-out data cleanup preference */}
                         <label
                             htmlFor="pref-clear-on-signout"
                             style={{
                                 display: "flex",
                                 justifyContent: "space-between",
                                 alignItems: "center",
-                                padding: "8px 12px",
+                                padding: "10px 12px",
                                 background: "var(--bg-secondary)",
                                 borderRadius: 8,
                                 border: "1px solid var(--border-color)",
                                 fontSize: 12.5,
                                 color: "var(--text-secondary)",
                                 cursor: "pointer",
+                                minHeight: 38,
                             }}
                         >
                             <span>Remove downloaded study data when signing out</span>
@@ -839,12 +998,46 @@ export const SyncModal: React.FC<Props> = ({
                             />
                         </label>
 
+                        {/* L-10: Orphaned media detection & cleanup */}
+                        {orphanedMediaFilenames.length > 0 && onCleanOrphanedMedia && (
+                            <div
+                                style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    justifyContent: "space-between",
+                                    gap: 8,
+                                    padding: "10px 12px",
+                                    borderRadius: 8,
+                                    background: "var(--bg-secondary)",
+                                    border: "1px solid var(--border-color)",
+                                    fontSize: 12.5,
+                                }}
+                            >
+                                <span style={{ color: "var(--text-secondary)" }}>
+                                    <strong>{orphanedMediaFilenames.length}</strong> unused media{" "}
+                                    {orphanedMediaFilenames.length === 1 ? "attachment" : "attachments"} found
+                                </span>
+                                <button
+                                    type="button"
+                                    onClick={async () => {
+                                        await onCleanOrphanedMedia(orphanedMediaFilenames);
+                                        setPushFeedback({
+                                            type: "info",
+                                            msg: `Removed ${orphanedMediaFilenames.length} unused media attachment(s).`,
+                                        });
+                                    }}
+                                    style={{ fontSize: 12.5, padding: "6px 12px" }}
+                                >
+                                    Clean Up Unused Media
+                                </button>
+                            </div>
+                        )}
+
                         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", paddingTop: 4 }}>
                             {onClearOfflineData && !confirmClearCache && (
                                 <button
                                     type="button"
                                     onClick={async () => {
-                                        // DATA-05: Require explicit confirmation if unsynced outbox ops exist
                                         if (totalUnsynced > 0) {
                                             setConfirmClearCache(true);
                                             return;
@@ -862,10 +1055,104 @@ export const SyncModal: React.FC<Props> = ({
                                             });
                                         }
                                     }}
-                                    style={{ fontSize: 12, padding: "5px 10px" }}
+                                    style={{ fontSize: 12.5, padding: "6px 12px" }}
                                 >
                                     Clear Offline Cache
                                 </button>
+                            )}
+
+                            {/* NEW-03: Guarded sign-out flow */}
+                            {onSignOutGuarded && !confirmSignOutPrompt && (
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        if (totalUnsynced > 0) {
+                                            setConfirmSignOutPrompt(true);
+                                            return;
+                                        }
+                                        void onSignOutGuarded({ discardUnsynced: false });
+                                    }}
+                                    style={{ fontSize: 12.5, padding: "6px 12px" }}
+                                >
+                                    <LogOut size={13} />
+                                    <span>Sign Out</span>
+                                </button>
+                            )}
+
+                            {confirmSignOutPrompt && onSignOutGuarded && (
+                                <div
+                                    role="alert"
+                                    style={{
+                                        display: "flex",
+                                        flexDirection: "column",
+                                        gap: 8,
+                                        width: "100%",
+                                        padding: "10px 12px",
+                                        borderRadius: 8,
+                                        background: "rgba(217, 119, 6, 0.1)",
+                                        border: "1px solid rgba(217, 119, 6, 0.4)",
+                                        fontSize: 12.5,
+                                    }}
+                                >
+                                    <div style={{ color: "var(--color-again)", fontWeight: 500 }}>
+                                        You have {totalUnsynced} unsynced offline{" "}
+                                        {totalUnsynced === 1 ? "change" : "changes"}. Signing out with data cleanup
+                                        would discard those unsynced edits.
+                                    </div>
+                                    <div
+                                        style={{
+                                            display: "flex",
+                                            gap: 6,
+                                            justifyContent: "flex-end",
+                                            flexWrap: "wrap",
+                                        }}
+                                    >
+                                        {onExportRecoverySnapshot && (
+                                            <button
+                                                type="button"
+                                                onClick={onExportRecoverySnapshot}
+                                                style={{ fontSize: 12, padding: "5px 10px" }}
+                                            >
+                                                Export Backup (.apkg)
+                                            </button>
+                                        )}
+                                        <button
+                                            type="button"
+                                            onClick={() => setConfirmSignOutPrompt(false)}
+                                            style={{ fontSize: 12, padding: "5px 10px" }}
+                                        >
+                                            Cancel
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() =>
+                                                void onSignOutGuarded({
+                                                    keepOffline: true,
+                                                    discardUnsynced: false,
+                                                })}
+                                            style={{ fontSize: 12, padding: "5px 10px" }}
+                                        >
+                                            Keep Offline & Sign Out
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() =>
+                                                void onSignOutGuarded({
+                                                    discardUnsynced: true,
+                                                    keepOffline: false,
+                                                })}
+                                            style={{
+                                                fontSize: 12,
+                                                padding: "5px 10px",
+                                                background: "var(--color-again)",
+                                                borderColor: "var(--color-again)",
+                                                color: "#fff",
+                                            }}
+                                        >
+                                            Discard Unsynced & Sign Out
+                                        </button>
+                                    </div>
+                                </div>
                             )}
 
                             {confirmClearCache && onClearOfflineData && (
@@ -902,14 +1189,14 @@ export const SyncModal: React.FC<Props> = ({
                                                 setConfirmClearCache(false);
                                                 onForceSync();
                                             }}
-                                            style={{ fontSize: 12, padding: "4px 8px" }}
+                                            style={{ fontSize: 12, padding: "5px 10px" }}
                                         >
                                             Sync First
                                         </button>
                                         <button
                                             type="button"
                                             onClick={() => setConfirmClearCache(false)}
-                                            style={{ fontSize: 12, padding: "4px 8px" }}
+                                            style={{ fontSize: 12, padding: "5px 10px" }}
                                         >
                                             Cancel
                                         </button>
@@ -932,7 +1219,7 @@ export const SyncModal: React.FC<Props> = ({
                                             }}
                                             style={{
                                                 fontSize: 12,
-                                                padding: "4px 8px",
+                                                padding: "5px 10px",
                                                 background: "var(--color-again)",
                                                 borderColor: "var(--color-again)",
                                                 color: "#fff",
@@ -948,7 +1235,7 @@ export const SyncModal: React.FC<Props> = ({
                                 <button
                                     type="button"
                                     onClick={() => setConfirmWipe(true)}
-                                    style={{ fontSize: 12, padding: "5px 10px", color: "var(--color-again)" }}
+                                    style={{ fontSize: 12.5, padding: "6px 12px", color: "var(--color-again)" }}
                                 >
                                     <Trash2 size={12} />
                                     <span>Delete Cloud Data</span>
@@ -965,14 +1252,14 @@ export const SyncModal: React.FC<Props> = ({
                                         paddingTop: 4,
                                     }}
                                 >
-                                    <span style={{ fontSize: 12, color: "var(--color-again)", flex: 1 }}>
+                                    <span style={{ fontSize: 12.5, color: "var(--color-again)", flex: 1 }}>
                                         Permanently wipe all cloud decks & history?
                                     </span>
                                     <button
                                         type="button"
                                         disabled={isDeletingCloud}
                                         onClick={() => setConfirmWipe(false)}
-                                        style={{ fontSize: 12, padding: "4px 8px" }}
+                                        style={{ fontSize: 12.5, padding: "5px 10px" }}
                                     >
                                         Cancel
                                     </button>
@@ -983,7 +1270,6 @@ export const SyncModal: React.FC<Props> = ({
                                             setIsDeletingCloud(true);
                                             setPushFeedback(null);
                                             try {
-                                                // DATA-04: Do not claim success or wipe local state if server deletion fails
                                                 await onDeleteAccountData();
                                                 setConfirmWipe(false);
                                             } catch (err: any) {
@@ -996,8 +1282,8 @@ export const SyncModal: React.FC<Props> = ({
                                             }
                                         }}
                                         style={{
-                                            fontSize: 12,
-                                            padding: "4px 8px",
+                                            fontSize: 12.5,
+                                            padding: "5px 10px",
                                             background: "var(--color-again)",
                                             borderColor: "var(--color-again)",
                                             color: "#fff",

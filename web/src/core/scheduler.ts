@@ -14,6 +14,13 @@ export function isValidTimeZone(tz?: string): tz is string {
 }
 
 /**
+ * Validate a 24-hour `HH:MM` notification clock time (`00:00`..`23:59`) (L-04).
+ */
+export function isValidDailyTime(val: unknown): val is string {
+    return typeof val === "string" && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(val);
+}
+
+/**
  * Pure calendar-day arithmetic on a `YYYY-MM-DD` date string (SCHED-02).
  * Uses UTC calendar date components so adding/subtracting days is never
  * skewed by 23-hour or 25-hour daylight-saving transitions.

@@ -14,14 +14,37 @@ export type ClientMessage =
             nextState: Partial<Card>;
             revlogEntry: RevlogEntry;
             baseReps?: number;
+            forceOverwrite?: boolean;
         }
-        | { type: "upsert_deck"; opId?: string; deck: Deck; isNew?: boolean }
+        | {
+            type: "upsert_deck";
+            opId?: string;
+            deck: Deck;
+            isNew?: boolean;
+            expectedMod?: number;
+            forceOverwrite?: boolean;
+        }
         | { type: "delete_deck"; opId?: string; deckId: number }
         | { type: "upsert_deck_config"; opId?: string; dconf: DeckConfig }
-        | { type: "upsert_note"; opId?: string; note: Note; cards: Card[]; isNew?: boolean }
+        | {
+            type: "upsert_note";
+            opId?: string;
+            note: Note;
+            cards: Card[];
+            isNew?: boolean;
+            expectedMod?: number;
+            forceOverwrite?: boolean;
+        }
         | { type: "delete_note"; opId?: string; noteId: number; cardIds?: number[] }
-        | { type: "update_card"; opId?: string; card: Card }
+        | {
+            type: "update_card";
+            opId?: string;
+            card: Card;
+            expectedMod?: number;
+            forceOverwrite?: boolean;
+        }
         | { type: "save_media"; opId?: string; filename: string; dataUrl: string }
+        | { type: "delete_media"; opId?: string; filenames: string[] }
         | {
             type: "import_collection";
             opId?: string;
@@ -31,6 +54,10 @@ export type ClientMessage =
             forceOverwrite?: boolean;
             /** True when an uninitialized server is auto-seeded from local offline data (S10). */
             seedOnUninitialized?: boolean;
+            /** Explicit opt-in to proceed if pre-import backup snapshot fails (H-03). */
+            allowNoBackup?: boolean;
+            /** Media filenames already uploaded in chunks that should be retained during replacement (NEW-05). */
+            keepMediaNames?: string[];
         }
         | { type: "ping" }
     );
@@ -52,11 +79,18 @@ export type ServerMessage =
         generation?: string;
         /** True when an account-deletion tombstone is active on the server (S10). */
         deleted?: boolean;
+        /** Authoritative list of media filenames stored on the server (NEW-05). */
+        mediaManifest?: string[];
     }
     | {
         type: "ack";
         opId: string;
         revision: number;
+        /** Authoritative card state & review log returned after answer_card (M-04). */
+        cardId?: number;
+        cardState?: Card;
+        revlogEntry?: RevlogEntry;
+        originalRevlogId?: number;
     }
     | {
         type: "op_error";
@@ -85,7 +119,7 @@ export type ServerMessage =
         revision?: number;
     }
     | { type: "upsert_deck_config"; opId?: string; dconf: DeckConfig; revision?: number }
-    | { type: "upsert_note"; opId?: string; note: Note; cards: Card[]; revision?: number }
+    | { type: "upsert_note"; opId?: string; note: Note; cards: Card[]; isNew?: boolean; revision?: number }
     | {
         type: "delete_note";
         opId?: string;
@@ -95,6 +129,7 @@ export type ServerMessage =
     }
     | { type: "update_card"; opId?: string; card: Card; revision?: number }
     | { type: "save_media"; opId?: string; filename: string; dataUrl: string; revision?: number }
+    | { type: "delete_media"; opId?: string; filenames: string[]; revision?: number }
     | {
         type: "import_collection";
         opId?: string;

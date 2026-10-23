@@ -334,13 +334,27 @@ export function inspectMediaBytes(
     };
 }
 
+function canonicalizeMime(mime: string): string {
+    const lower = mime.toLowerCase().trim();
+    if (lower === "image/jpg") { return "image/jpeg"; }
+    if (lower === "audio/mp3") { return "audio/mpeg"; }
+    if (lower === "audio/x-wav") { return "audio/wav"; }
+    if (lower === "audio/x-m4a") { return "audio/mp4"; }
+    return lower;
+}
+
 /**
- * Validate a media filename and `data:<mime>;base64,...` URL (SEC-13).
+ * Validate a media filename and `data:<mime>;base64,...` URL, enforcing that the
+ * declared MIME matches the inspected binary magic-byte signature and returning
+ * the canonical normalized filename and data URL (SEC-13, L-02, L-03).
  */
 export function validateMediaDataUrl(
     filename: string,
     dataUrl: string,
-): { ok: true; safeFilename: string; mime: string; decodedBytes: number } | { ok: false; error: string } {
+):
+    | { ok: true; safeFilename: string; mime: string; canonicalDataUrl: string; decodedBytes: number }
+    | { ok: false; error: string }
+{
     const safeFilename = normalizeMediaFilename(filename);
     if (!safeFilename) {
         return { ok: false, error: "Invalid or disallowed media filename" };
@@ -370,9 +384,8 @@ export function validateMediaDataUrl(
         };
     }
 
-    // Decode prefix bytes (up to 64 KB is enough to inspect magic bytes and SOF/IHDR headers)
-    // and verify the binary signature matches a safe image/audio format when >= 16 bytes.
-    if (decodedBytes >= 16) {
+    let detectedMime = canonicalizeMime(declaredMime);
+    if (decodedBytes >= 12) {
         try {
             const prefixChars = Math.min(b64.length, 87_380); // ~64 KB
             const alignedLen = prefixChars - (prefixChars % 4);
@@ -385,10 +398,23 @@ export function validateMediaDataUrl(
             if (!sig.ok) {
                 return sig;
             }
+            if (canonicalizeMime(declaredMime) !== canonicalizeMime(sig.mime)) {
+                return {
+                    ok: false,
+                    error: `Declared MIME type (${declaredMime}) does not match detected file signature (${sig.mime})`,
+                };
+            }
+            detectedMime = sig.mime;
         } catch {
             return { ok: false, error: "Malformed base64 media payload" };
         }
     }
 
-    return { ok: true, safeFilename, mime: declaredMime, decodedBytes };
+    return {
+        ok: true,
+        safeFilename,
+        mime: detectedMime,
+        canonicalDataUrl: `data:${detectedMime};base64,${b64}`,
+        decodedBytes,
+    };
 }

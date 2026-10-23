@@ -5,6 +5,7 @@ import { Image as ImageIcon, Plus } from "lucide-react";
 import React, { useRef, useState } from "react";
 import { findClozeNumbers, wrapInCloze } from "../core/cloze";
 import { generateUniqueId } from "../core/ids";
+import { createCardsForNote } from "../core/import-export";
 import { inspectMediaBytes, MAX_SINGLE_MEDIA_BYTES, normalizeMediaFilename } from "../core/media-validation";
 import { sanitizeCardHtml } from "../core/sanitize";
 import { Card, Collection, Note } from "../core/types";
@@ -13,7 +14,23 @@ interface Props {
     collection: Collection;
     defaultDeckId?: number;
     onAddNote: (note: Note, cards: Card[]) => void;
-    onSaveMedia?: (filename: string, dataUrl: string) => void;
+    onSaveMedia?: (
+        filename: string,
+        dataUrl: string,
+    ) => Promise<{ ok: boolean; filename: string; error?: string }> | void;
+}
+
+function escapeAttr(val: string): string {
+    return val
+        .replace(/&/g, "&amp;")
+        .replace(/"/g, "&quot;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+}
+
+function defaultAltFromFilename(filename: string): string {
+    const base = filename.replace(/\.[a-z0-9]+$/i, "").replace(/^paste_\d+_/, "");
+    return base.replace(/[_-]+/g, " ").trim() || "Flashcard image";
 }
 
 export const AddNote: React.FC<Props> = ({
@@ -29,6 +46,7 @@ export const AddNote: React.FC<Props> = ({
     const [selectedDid, setSelectedDid] = useState<number>(defaultDeckId);
     const [fieldValues, setFieldValues] = useState<Record<number, string>>({});
     const [tagsStr, setTagsStr] = useState<string>("");
+    const [imageAltText, setImageAltText] = useState<string>("");
     const [addedStatus, setAddedStatus] = useState<boolean>(false);
     const [errorMsg, setErrorMsg] = useState<string | null>(null);
     const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -70,7 +88,7 @@ export const AddNote: React.FC<Props> = ({
         e.target.value = "";
         if (!file) { return; }
 
-        // UX-10 & SEC-13: Validate size, extension, magic bytes, and dimensions before optimistic state
+        // UX-10, SEC-13, NEW-02, L-02, L-03, L-08
         setErrorMsg(null);
         if (file.size > MAX_SINGLE_MEDIA_BYTES) {
             setErrorMsg(
@@ -97,17 +115,26 @@ export const AddNote: React.FC<Props> = ({
                 binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + 0x8000)));
             }
             const dataUrl = `data:${inspected.mime};base64,${btoa(binary)}`;
-            const filename = `paste_${generateUniqueId()}_${safeBase}`;
+            const rawFilename = `paste_${generateUniqueId()}_${safeBase}`;
+            let canonicalFilename = normalizeMediaFilename(rawFilename) || rawFilename;
 
             if (onSaveMedia) {
-                onSaveMedia(filename, dataUrl);
+                const res = await onSaveMedia(canonicalFilename, dataUrl);
+                if (res && !res.ok) {
+                    setErrorMsg(res.error || "Failed to persist image attachment.");
+                    return;
+                }
+                if (res?.filename) {
+                    canonicalFilename = res.filename;
+                }
             } else {
-                collection.media[filename] = dataUrl;
+                collection.media[canonicalFilename] = dataUrl;
             }
 
+            const altDesc = imageAltText.trim() || defaultAltFromFilename(safeBase);
             const targetIdx = activeFieldIdxRef.current;
             const currentVal = fieldValues[targetIdx] || "";
-            const imgTag = `<img src="${filename}">`;
+            const imgTag = `<img src="${escapeAttr(canonicalFilename)}" alt="${escapeAttr(altDesc)}">`;
             const input = fieldRefs.current[targetIdx];
 
             if (input) {
@@ -156,64 +183,16 @@ export const AddNote: React.FC<Props> = ({
             data: "{}",
         };
 
-        const cards: Card[] = [];
-        const isCloze = activeModel.type === 1;
         const allocatedCardIds = new Set<number>(Object.keys(collection.cards).map(Number));
-
-        if (isCloze) {
-            const clozeNums = findClozeNumbers(fields[0]);
-            const numsToGenerate = clozeNums.length > 0 ? clozeNums : [1];
-
-            numsToGenerate.forEach((num, i) => {
-                const cardId = generateUniqueId(allocatedCardIds);
-                allocatedCardIds.add(cardId);
-                cards.push({
-                    id: cardId,
-                    nid: note.id,
-                    did: selectedDid,
-                    ord: num - 1,
-                    mod: now,
-                    usn: 0,
-                    type: 0,
-                    queue: 0,
-                    due: Object.keys(collection.cards).length + i + 1,
-                    ivl: 0,
-                    factor: 2500,
-                    reps: 0,
-                    lapses: 0,
-                    left: 0,
-                    odue: 0,
-                    odid: 0,
-                    flags: 0,
-                    data: "{}",
-                });
-            });
-        } else {
-            activeModel.tmpls.forEach((_tmpl, ord) => {
-                const cardId = generateUniqueId(allocatedCardIds);
-                allocatedCardIds.add(cardId);
-                cards.push({
-                    id: cardId,
-                    nid: note.id,
-                    did: selectedDid,
-                    ord,
-                    mod: now,
-                    usn: 0,
-                    type: 0,
-                    queue: 0,
-                    due: Object.keys(collection.cards).length + ord + 1,
-                    ivl: 0,
-                    factor: 2500,
-                    reps: 0,
-                    lapses: 0,
-                    left: 0,
-                    odue: 0,
-                    odid: 0,
-                    flags: 0,
-                    data: "{}",
-                });
-            });
-        }
+        const nextDueRef = { value: allocatedCardIds.size + 1 };
+        const cards = createCardsForNote(
+            note,
+            activeModel,
+            selectedDid,
+            allocatedCardIds,
+            nextDueRef,
+            now,
+        );
 
         onAddNote(note, cards);
 
@@ -299,8 +278,8 @@ export const AddNote: React.FC<Props> = ({
                                     type="button"
                                     onClick={() => triggerImageUpload(idx)}
                                     style={{
-                                        padding: "3px 8px",
-                                        fontSize: 12,
+                                        padding: "4px 10px",
+                                        fontSize: 12.5,
                                         display: "inline-flex",
                                         alignItems: "center",
                                         gap: 4,
@@ -314,7 +293,7 @@ export const AddNote: React.FC<Props> = ({
                                     <button
                                         type="button"
                                         onClick={() => handleInsertCloze(idx)}
-                                        style={{ padding: "3px 8px", fontSize: 12 }}
+                                        style={{ padding: "4px 10px", fontSize: 12.5 }}
                                         title="Cloze deletion ([...])"
                                     >
                                         [...]
@@ -338,18 +317,32 @@ export const AddNote: React.FC<Props> = ({
                 );
             })}
 
-            {/* Tags */}
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                <label htmlFor="add-note-tags-input" style={{ fontSize: 13, color: "var(--text-secondary)" }}>
-                    Tags
-                </label>
-                <input
-                    id="add-note-tags-input"
-                    type="text"
-                    value={tagsStr}
-                    placeholder="tag1 tag2"
-                    onChange={e => setTagsStr(e.target.value)}
-                />
+            {/* Tags & Image Alt Text (L-08) */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <label htmlFor="add-note-tags-input" style={{ fontSize: 13, color: "var(--text-secondary)" }}>
+                        Tags
+                    </label>
+                    <input
+                        id="add-note-tags-input"
+                        type="text"
+                        value={tagsStr}
+                        placeholder="tag1 tag2"
+                        onChange={e => setTagsStr(e.target.value)}
+                    />
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <label htmlFor="add-note-img-alt-input" style={{ fontSize: 13, color: "var(--text-secondary)" }}>
+                        Image Alt Text (optional)
+                    </label>
+                    <input
+                        id="add-note-img-alt-input"
+                        type="text"
+                        value={imageAltText}
+                        placeholder="Description for inserted images"
+                        onChange={e => setImageAltText(e.target.value)}
+                    />
+                </div>
             </div>
 
             <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 12, marginTop: 8 }}>

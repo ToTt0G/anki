@@ -2,11 +2,13 @@
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 import { DurableObject } from "cloudflare:workers";
+import { normalizeMediaFilename } from "../src/core/media-validation";
 import {
     addCalendarDays,
     getZonedDayInfo,
     isCardDueForReview,
     isCardDueInLearnQueue,
+    isValidDailyTime,
     isValidTimeZone,
     zonedTimeToUtcMs,
 } from "../src/core/scheduler";
@@ -27,6 +29,13 @@ const MAX_WS_STANDARD_BYTES = 1 * 1024 * 1024; // 1 MB max for non-import/non-me
 const MAX_CONCURRENT_SOCKETS = 10; // Max concurrent WebSockets per user DO (SEC-09)
 const MAX_INIT_PER_MINUTE = 30;
 
+// M-01: Per-account aggregate storage & item quotas
+export const MAX_ACCOUNT_MEDIA_ITEMS = 2_500;
+export const MAX_ACCOUNT_MEDIA_DATA_CHARS = 70 * 1024 * 1024; // ~50 MB decoded media per account
+export const MAX_ACCOUNT_DECKS = 2_000;
+export const MAX_ACCOUNT_NOTES = 60_000;
+export const MAX_ACCOUNT_CARDS = 60_000;
+
 /**
  * Typed error carrying a machine-readable kind so clients can offer retry/conflict UX (D13).
  */
@@ -43,7 +52,7 @@ class OpError extends Error {
 
 export interface PushPreferences {
     dailyMode: "adaptive" | "fixed";
-    dailyTime: string; // "HH:MM", e.g. "09:00"
+    dailyTime: string; // "HH:MM", 00:00..23:59 (L-04)
     tzOffsetMinutes: number;
     timeZone?: string; // IANA timezone, e.g. "Europe/Stockholm" (N05, N06)
     learningAlerts: boolean;
@@ -136,13 +145,21 @@ export class AnkiSyncServer extends DurableObject {
       CREATE TABLE IF NOT EXISTS applied_ops (
         op_id TEXT PRIMARY KEY,
         revision INTEGER NOT NULL,
-        applied_at INTEGER NOT NULL
+        applied_at INTEGER NOT NULL,
+        ack_extra TEXT NOT NULL DEFAULT ''
       );
     `);
 
         try {
             this.sql.exec(
                 "ALTER TABLE push_subscriptions ADD COLUMN unsub_secret TEXT NOT NULL DEFAULT ''",
+            );
+        } catch {
+            // Column already exists.
+        }
+        try {
+            this.sql.exec(
+                "ALTER TABLE applied_ops ADD COLUMN ack_extra TEXT NOT NULL DEFAULT ''",
             );
         } catch {
             // Column already exists.
@@ -162,10 +179,6 @@ export class AnkiSyncServer extends DurableObject {
         return Number(this.getMeta("col_revision") || 0);
     }
 
-    /**
-     * Account-deletion tombstone (S10, DATA-03): written when the user deletes their cloud data.
-     * Prevents stale offline devices from silently re-seeding a deleted collection.
-     */
     private getDeletionTombstone(): { deletedAt: number } | null {
         const raw = this.getMeta("deletion_tombstone");
         if (!raw) { return null; }
@@ -189,10 +202,6 @@ export class AnkiSyncServer extends DurableObject {
         this.setMeta("deletion_tombstone", "");
     }
 
-    /**
-     * Compare-and-swap check for whole-collection overwrites (DATA-01).
-     * Supports explicit `forceOverwrite: true` when the user confirms replacing newer server data.
-     */
     private checkExpectedRevision(
         expectedRevision: unknown,
         forceOverwrite?: boolean,
@@ -223,7 +232,15 @@ export class AnkiSyncServer extends DurableObject {
         return false;
     }
 
-    private bumpRevision(opId?: string): number {
+    private bumpRevision(
+        opId?: string,
+        ackExtra?: {
+            cardId?: number;
+            cardState?: Card;
+            revlogEntry?: RevlogEntry;
+            originalRevlogId?: number;
+        },
+    ): number {
         const next = this.getRevision() + 1;
         this.setMeta("col_revision", String(next));
         this.setMeta("col_initialized", "1");
@@ -231,21 +248,71 @@ export class AnkiSyncServer extends DurableObject {
         if (opId) {
             const now = Date.now();
             this.sql.exec(
-                "INSERT OR REPLACE INTO applied_ops (op_id, revision, applied_at) VALUES (?, ?, ?)",
+                "INSERT OR REPLACE INTO applied_ops (op_id, revision, applied_at, ack_extra) VALUES (?, ?, ?, ?)",
                 opId,
                 next,
                 now,
+                ackExtra ? JSON.stringify(ackExtra) : "",
             );
         }
         return next;
     }
 
-    private getAlreadyAppliedRevision(opId?: string): number | null {
+    private getAlreadyAppliedOp(opId?: string): { revision: number; extra?: Record<string, any> } | null {
         if (!opId) { return null; }
         const rows = this.sql
-            .exec("SELECT revision FROM applied_ops WHERE op_id = ?", opId)
+            .exec("SELECT revision, ack_extra FROM applied_ops WHERE op_id = ?", opId)
             .toArray();
-        return rows.length > 0 ? Number(rows[0].revision) : null;
+        if (rows.length === 0) { return null; }
+        let extra: Record<string, any> | undefined;
+        if (rows[0].ack_extra) {
+            try {
+                extra = JSON.parse(String(rows[0].ack_extra));
+            } catch {
+                extra = undefined;
+            }
+        }
+        return { revision: Number(rows[0].revision), extra };
+    }
+
+    private getAlreadyAppliedRevision(opId?: string): number | null {
+        return this.getAlreadyAppliedOp(opId)?.revision ?? null;
+    }
+
+    /**
+     * Enforce per-account media count and byte-size quotas on incremental uploads (M-01).
+     */
+    private checkAccountMediaQuota(filename: string, dataUrl: string): void {
+        const stats = this.sql
+            .exec(
+                "SELECT COUNT(*) as cnt, COALESCE(SUM(LENGTH(data)), 0) as total_chars FROM media WHERE name != ?",
+                filename,
+            )
+            .toArray()[0];
+        const existingCount = Number(stats?.cnt || 0);
+        const existingChars = Number(stats?.total_chars || 0);
+
+        if (existingCount + 1 > MAX_ACCOUNT_MEDIA_ITEMS) {
+            throw new OpError(
+                `Account media item limit exceeded (max ${MAX_ACCOUNT_MEDIA_ITEMS} files). Clean up unused media in Settings.`,
+                "validation",
+                false,
+            );
+        }
+        if (existingChars + dataUrl.length > MAX_ACCOUNT_MEDIA_DATA_CHARS) {
+            throw new OpError(
+                "Account media storage quota exceeded (max 50 MB). Clean up unused media in Settings.",
+                "validation",
+                false,
+            );
+        }
+    }
+
+    private getMediaManifest(): string[] {
+        return this.sql
+            .exec("SELECT name FROM media ORDER BY name ASC")
+            .toArray()
+            .map((r: any) => String(r.name));
     }
 
     private getPushPreferences(): PushPreferences {
@@ -255,9 +322,7 @@ export class AnkiSyncServer extends DurableObject {
             const parsed = JSON.parse(raw);
             return {
                 dailyMode: parsed.dailyMode === "fixed" ? "fixed" : "adaptive",
-                dailyTime: typeof parsed.dailyTime === "string" && /^\d{2}:\d{2}$/.test(parsed.dailyTime)
-                    ? parsed.dailyTime
-                    : "09:00",
+                dailyTime: isValidDailyTime(parsed.dailyTime) ? parsed.dailyTime : "09:00",
                 tzOffsetMinutes: typeof parsed.tzOffsetMinutes === "number" ? parsed.tzOffsetMinutes : 0,
                 timeZone: isValidTimeZone(parsed.timeZone) ? parsed.timeZone : undefined,
                 learningAlerts: parsed.learningAlerts !== false,
@@ -349,21 +414,39 @@ export class AnkiSyncServer extends DurableObject {
 
     /**
      * Save a recoverable backup snapshot of core tables AND media before a full collection
-     * overwrite (DATA-08, DATA-09, DATA-10).
+     * overwrite (DATA-08, DATA-09, DATA-10, H-03, NEW-05, L-02).
+     * Aborts the transaction if backup creation fails unless `allowNoBackup` is true (H-03).
      */
-    private saveFullCollection(col: Collection, opId?: string, saveBackup: boolean = true): number {
+    private saveFullCollection(
+        col: Collection,
+        opId?: string,
+        saveBackup: boolean = true,
+        allowNoBackup: boolean = false,
+        keepMediaNames?: string[],
+    ): number {
         let nextRev = 0;
         this.ctx.storage.transactionSync(() => {
             if (saveBackup && this.isInitialized()) {
                 try {
                     const current = this.getFullCollection(false);
                     if (Object.keys(current.cards).length > 0 || Object.keys(current.notes).length > 0) {
+                        if (this.getMeta("test_fail_backup") === "1") {
+                            throw new Error("Simulated backup storage failure");
+                        }
                         this.setMeta("backup_snapshot", JSON.stringify(current));
                         this.sql.exec("DELETE FROM backup_media");
                         this.sql.exec("INSERT INTO backup_media (name, data) SELECT name, data FROM media");
                     }
-                } catch (e) {
-                    console.warn("Could not save pre-import backup snapshot:", e);
+                } catch (e: any) {
+                    if (!allowNoBackup) {
+                        throw new OpError(
+                            `Pre-import backup snapshot failed (${
+                                e?.message || "storage error"
+                            }); collection replacement aborted to protect existing data.`,
+                            "internal",
+                            true,
+                        );
+                    }
                 }
             }
 
@@ -376,8 +459,22 @@ export class AnkiSyncServer extends DurableObject {
             this.sql.exec("DELETE FROM notes");
             this.sql.exec("DELETE FROM cards");
             this.sql.exec("DELETE FROM revlog");
-            // DATA-09: Delete obsolete media during a full collection replacement
-            this.sql.exec("DELETE FROM media");
+
+            // DATA-09 & NEW-05: Delete obsolete media, while preserving any chunk-uploaded `keepMediaNames`
+            if (keepMediaNames && keepMediaNames.length > 0) {
+                const keepSet = new Set(
+                    keepMediaNames
+                        .map(fn => normalizeMediaFilename(fn) || fn)
+                        .filter(Boolean),
+                );
+                for (const row of this.sql.exec("SELECT name FROM media").toArray()) {
+                    if (!keepSet.has(row.name)) {
+                        this.sql.exec("DELETE FROM media WHERE name = ?", row.name);
+                    }
+                }
+            } else {
+                this.sql.exec("DELETE FROM media");
+            }
 
             for (const d of Object.values(col.decks || {})) {
                 this.sql.exec("INSERT INTO decks (id, json) VALUES (?, ?)", d.id, JSON.stringify(d));
@@ -398,8 +495,9 @@ export class AnkiSyncServer extends DurableObject {
                 this.sql.exec("INSERT OR REPLACE INTO revlog (id, json) VALUES (?, ?)", r.id, JSON.stringify(r));
             }
             if (col.media) {
-                for (const [name, data] of Object.entries(col.media)) {
-                    this.sql.exec("INSERT OR REPLACE INTO media (name, data) VALUES (?, ?)", name, data);
+                for (const [rawName, data] of Object.entries(col.media)) {
+                    const safeName = normalizeMediaFilename(rawName) || rawName;
+                    this.sql.exec("INSERT OR REPLACE INTO media (name, data) VALUES (?, ?)", safeName, data);
                 }
             }
             nextRev = this.bumpRevision(opId);
@@ -407,10 +505,6 @@ export class AnkiSyncServer extends DurableObject {
         return nextRev;
     }
 
-    /**
-     * Lightweight due summary calculation using shared card-state & timezone domain helpers
-     * and memoized per revision + time bucket (SCHED-01, SCHED-02, SCHED-05, PERF-06).
-     */
     private computeDueSummary(prefs: PushPreferences, nowOverrideMs?: number): DueSummary {
         const nowMs = typeof nowOverrideMs === "number" ? nowOverrideMs : Date.now();
         const nowSec = Math.floor(nowMs / 1000);
@@ -493,7 +587,6 @@ export class AnkiSyncServer extends DurableObject {
             }
         }
 
-        // SCHED-02: Use calendar-day subtraction rather than 86,400,000 ms steps
         let streakDays = 0;
         for (let d = 0; d < 365; d++) {
             const checkDateStr = addCalendarDays(localNowParts.dateStr, -d);
@@ -534,18 +627,14 @@ export class AnkiSyncServer extends DurableObject {
         return summary;
     }
 
-    /**
-     * Compute the next daily push alarm UTC timestamp in the user's IANA timezone,
-     * preserving exact local wall-clock time across DST transitions (SCHED-02).
-     */
     public computeNextDailyTargetUtcMs(nowMs: number, prefs: PushPreferences, summary: DueSummary): number {
         const localParts = getZonedDayInfo(nowMs, prefs);
         let targetHour = summary.adaptiveHour;
         let targetMinute = 0;
-        if (prefs.dailyMode === "fixed") {
+        if (prefs.dailyMode === "fixed" && isValidDailyTime(prefs.dailyTime)) {
             const [hStr, mStr] = prefs.dailyTime.split(":");
-            targetHour = Math.min(23, Math.max(0, Number(hStr) || 9));
-            targetMinute = Math.min(59, Math.max(0, Number(mStr) || 0));
+            targetHour = Number(hStr);
+            targetMinute = Number(mStr);
         }
 
         const todayTargetUtcMs = zonedTimeToUtcMs(
@@ -652,10 +741,10 @@ export class AnkiSyncServer extends DurableObject {
         const localParts = getZonedDayInfo(nowMs, prefs);
         let targetHour = summary.adaptiveHour;
         let targetMinute = 0;
-        if (prefs.dailyMode === "fixed") {
+        if (prefs.dailyMode === "fixed" && isValidDailyTime(prefs.dailyTime)) {
             const [hStr, mStr] = prefs.dailyTime.split(":");
-            targetHour = Math.min(23, Math.max(0, Number(hStr) || 9));
-            targetMinute = Math.min(59, Math.max(0, Number(mStr) || 0));
+            targetHour = Number(hStr);
+            targetMinute = Number(mStr);
         }
         const todayTargetUtcMs = zonedTimeToUtcMs(
             localParts.dateStr,
@@ -732,9 +821,6 @@ export class AnkiSyncServer extends DurableObject {
         await this.recomputeAndScheduleAlarm();
     }
 
-    /**
-     * Enforce rate limit on manual push trigger endpoints (S05).
-     */
     private checkPushTriggerRateLimit(): { allowed: boolean; error?: string } {
         const now = Date.now();
         const lastTrigger = Number(this.getMeta("last_push_trigger_ms") || 0);
@@ -842,17 +928,66 @@ export class AnkiSyncServer extends DurableObject {
             return Response.json({ success: true });
         }
 
-        // 3. HTTP Collection, Media & Backup Restore Endpoints (DATA-01, DATA-08, DATA-09, DATA-10, PERF-02)
-        if (url.pathname === "/media" && request.method === "GET") {
-            const name = url.searchParams.get("name") || "";
-            if (!name) {
-                return Response.json({ error: "Missing media name" }, { status: 400 });
+        // 3. HTTP Media & Collection Endpoints (NEW-05, M-01, L-02, L-03, L-10, H-03)
+        if (url.pathname === "/media") {
+            if (request.method === "GET") {
+                const rawName = url.searchParams.get("name") || "";
+                const safeName = normalizeMediaFilename(rawName) || rawName;
+                if (!safeName) {
+                    return Response.json({ error: "Missing media name" }, { status: 400 });
+                }
+                const rows = this.sql.exec("SELECT data FROM media WHERE name = ?", safeName).toArray();
+                if (!rows.length) {
+                    return Response.json({ error: "Media not found" }, { status: 404 });
+                }
+                return Response.json({ filename: safeName, dataUrl: rows[0].data });
             }
-            const rows = this.sql.exec("SELECT data FROM media WHERE name = ?", name).toArray();
-            if (!rows.length) {
-                return Response.json({ error: "Media not found" }, { status: 404 });
+            if (request.method === "POST") {
+                try {
+                    const body = (await request.json()) as {
+                        filename?: string;
+                        dataUrl?: string;
+                        opId?: string;
+                        generation?: string;
+                    };
+                    const validation = validateClientMessage({
+                        type: "save_media",
+                        filename: body?.filename,
+                        dataUrl: body?.dataUrl,
+                        opId: body?.opId,
+                        generation: body?.generation,
+                    });
+                    if (!validation.ok) {
+                        return Response.json({ error: validation.error }, { status: 400 });
+                    }
+                    const msg = validation.msg as Extract<ClientMessage, { type: "save_media" }>;
+                    const already = this.getAlreadyAppliedRevision(msg.opId);
+                    if (already !== null) {
+                        return Response.json({ success: true, filename: msg.filename, revision: already });
+                    }
+                    let rev = 0;
+                    this.ctx.storage.transactionSync(() => {
+                        this.checkAccountMediaQuota(msg.filename, msg.dataUrl);
+                        this.sql.exec(
+                            "INSERT OR REPLACE INTO media (name, data) VALUES (?, ?)",
+                            msg.filename,
+                            msg.dataUrl,
+                        );
+                        rev = this.bumpRevision(msg.opId);
+                    });
+                    this.broadcast({
+                        type: "save_media",
+                        opId: msg.opId,
+                        filename: msg.filename,
+                        dataUrl: msg.dataUrl,
+                        revision: rev,
+                    });
+                    return Response.json({ success: true, filename: msg.filename, revision: rev });
+                } catch (err: any) {
+                    const status = err instanceof OpError && err.kind === "validation" ? 413 : 400;
+                    return Response.json({ error: err?.message || "Media upload failed" }, { status });
+                }
             }
-            return Response.json({ filename: name, dataUrl: rows[0].data });
         }
 
         if (url.pathname === "/collection") {
@@ -864,12 +999,15 @@ export class AnkiSyncServer extends DurableObject {
                     generation: this.getMeta("col_generation") ?? "0",
                     initialized: this.isInitialized(),
                     hasBackup: Boolean(this.getMeta("backup_snapshot")),
+                    mediaManifest: this.getMediaManifest(),
                 });
             }
             if (request.method === "POST") {
                 const body: Collection & {
                     expectedRevision?: unknown;
                     forceOverwrite?: boolean;
+                    allowNoBackup?: boolean;
+                    keepMediaNames?: string[];
                     opId?: string;
                     generation?: string;
                     seedOnUninitialized?: boolean;
@@ -880,6 +1018,8 @@ export class AnkiSyncServer extends DurableObject {
                 const {
                     expectedRevision,
                     forceOverwrite,
+                    allowNoBackup,
+                    keepMediaNames,
                     opId,
                     generation,
                     seedOnUninitialized,
@@ -890,6 +1030,8 @@ export class AnkiSyncServer extends DurableObject {
                     collection,
                     expectedRevision,
                     forceOverwrite,
+                    allowNoBackup,
+                    keepMediaNames,
                     opId,
                     generation,
                     seedOnUninitialized,
@@ -916,19 +1058,34 @@ export class AnkiSyncServer extends DurableObject {
                         { status: 409 },
                     );
                 }
-                const revision = this.saveFullCollection(collection, body.opId);
-                this.clearDeletionTombstone();
-                this.setMeta("last_activity_ms", String(Date.now()));
-                await this.recomputeAndScheduleAlarm();
-                this.broadcast({
-                    type: "full_state",
-                    generation: this.getMeta("col_generation") ?? "0",
-                    collection,
-                    revision,
-                    initialized: true,
-                    hasBackup: Boolean(this.getMeta("backup_snapshot")),
-                });
-                return Response.json({ success: true, revision });
+                try {
+                    const revision = this.saveFullCollection(
+                        collection,
+                        body.opId,
+                        true,
+                        Boolean(body.allowNoBackup),
+                        body.keepMediaNames,
+                    );
+                    this.clearDeletionTombstone();
+                    this.setMeta("last_activity_ms", String(Date.now()));
+                    await this.recomputeAndScheduleAlarm();
+                    const fullCol = this.getFullCollection();
+                    this.broadcast({
+                        type: "full_state",
+                        generation: this.getMeta("col_generation") ?? "0",
+                        collection: fullCol,
+                        revision,
+                        initialized: true,
+                        hasBackup: Boolean(this.getMeta("backup_snapshot")),
+                        mediaManifest: this.getMediaManifest(),
+                    });
+                    return Response.json({ success: true, revision });
+                } catch (err: any) {
+                    return Response.json(
+                        { error: err?.message || "Failed to save collection", currentRevision: this.getRevision() },
+                        { status: 500 },
+                    );
+                }
             }
         }
 
@@ -945,14 +1102,12 @@ export class AnkiSyncServer extends DurableObject {
                 return Response.json({ error: "No backup snapshot available" }, { status: 404 });
             }
             const backupCol: Collection = JSON.parse(backupRaw);
-            // DATA-10: Restore the exact pre-import media from `backup_media`, removing any media
-            // introduced by the rolled-back import.
             const backupMedia: Record<string, string> = {};
             for (const row of this.sql.exec("SELECT name, data FROM backup_media").toArray()) {
                 backupMedia[row.name] = row.data;
             }
             backupCol.media = { ...(backupCol.media || {}), ...backupMedia };
-            const revision = this.saveFullCollection(backupCol, undefined, false);
+            const revision = this.saveFullCollection(backupCol, undefined, false, true);
             this.clearDeletionTombstone();
             await this.recomputeAndScheduleAlarm();
             this.broadcast({
@@ -962,6 +1117,7 @@ export class AnkiSyncServer extends DurableObject {
                 revision,
                 initialized: true,
                 hasBackup: true,
+                mediaManifest: this.getMediaManifest(),
             });
             return Response.json({ success: true, revision, collection: backupCol });
         }
@@ -1001,7 +1157,6 @@ export class AnkiSyncServer extends DurableObject {
                     unsubSecret,
                 );
 
-                // Enforce maximum 10 subscriptions per user, pruning oldest (S04)
                 this.sql.exec(`
           DELETE FROM push_subscriptions
           WHERE endpoint NOT IN (
@@ -1032,8 +1187,6 @@ export class AnkiSyncServer extends DurableObject {
             }
         }
 
-        // SEC-01: Cross-user detachment requires proving possession of the server-issued `unsub_secret`
-        // for that exact endpoint. Unauthorized attempts are rejected with 403 Forbidden.
         if (url.pathname === "/push/detach" && request.method === "POST") {
             try {
                 const body: { endpoint?: string; unsubSecret?: string } = await request.json();
@@ -1083,6 +1236,13 @@ export class AnkiSyncServer extends DurableObject {
         if (url.pathname === "/push/preferences" && request.method === "POST") {
             try {
                 const incoming: Partial<PushPreferences> = await request.json();
+                // L-04: Reject invalid 24-hour notification time values explicitly
+                if (incoming.dailyTime !== undefined && !isValidDailyTime(incoming.dailyTime)) {
+                    return Response.json(
+                        { error: "Invalid dailyTime (must be HH:MM in 24-hour range 00:00..23:59)" },
+                        { status: 400 },
+                    );
+                }
                 const current = this.getPushPreferences();
                 const updated: PushPreferences = {
                     dailyMode: incoming.dailyMode === "fixed"
@@ -1090,7 +1250,7 @@ export class AnkiSyncServer extends DurableObject {
                         : incoming.dailyMode === "adaptive"
                         ? "adaptive"
                         : current.dailyMode,
-                    dailyTime: typeof incoming.dailyTime === "string" && /^\d{2}:\d{2}$/.test(incoming.dailyTime)
+                    dailyTime: isValidDailyTime(incoming.dailyTime)
                         ? incoming.dailyTime
                         : current.dailyTime,
                     tzOffsetMinutes: typeof incoming.tzOffsetMinutes === "number"
@@ -1244,10 +1404,29 @@ export class AnkiSyncServer extends DurableObject {
         return { sent, failed, pruned, total: rows.length };
     }
 
-    private sendAck(ws: WebSocket, opId: string | undefined, revision: number) {
+    private sendAck(
+        ws: WebSocket,
+        opId: string | undefined,
+        revision: number,
+        extra?: {
+            cardId?: number;
+            cardState?: Card;
+            revlogEntry?: RevlogEntry;
+            originalRevlogId?: number;
+        },
+    ) {
         if (!opId) { return; }
         try {
-            ws.send(JSON.stringify({ type: "ack", opId, revision } satisfies ServerMessage));
+            ws.send(
+                JSON.stringify(
+                    {
+                        type: "ack",
+                        opId,
+                        revision,
+                        ...extra,
+                    } satisfies ServerMessage,
+                ),
+            );
         } catch {
             // ignore
         }
@@ -1284,7 +1463,6 @@ export class AnkiSyncServer extends DurableObject {
             return;
         }
 
-        // SEC-09: Enforce message byte-size limits before parsing JSON
         const byteLength = new TextEncoder().encode(message).byteLength;
         if (byteLength > MAX_WS_MESSAGE_BYTES) {
             this.sendOpError(
@@ -1359,6 +1537,7 @@ export class AnkiSyncServer extends DurableObject {
                             initialized: this.isInitialized(),
                             hasBackup: Boolean(this.getMeta("backup_snapshot")),
                             deleted: Boolean(this.getDeletionTombstone()),
+                            mediaManifest: this.getMediaManifest(),
                         } satisfies ServerMessage,
                     ),
                 );
@@ -1369,7 +1548,6 @@ export class AnkiSyncServer extends DurableObject {
             const currentGeneration = this.getMeta("col_generation") ?? "0";
             const msgGeneration = msg.generation ?? "0";
 
-            // DATA-03: Reject stale-generation operations and automatic seeding onto a deleted collection
             if (
                 msgGeneration !== currentGeneration
                 || (msg.type === "import_collection" && msg.seedOnUninitialized && this.getDeletionTombstone())
@@ -1384,15 +1562,16 @@ export class AnkiSyncServer extends DurableObject {
                 );
                 return;
             }
-            const alreadyRev = this.getAlreadyAppliedRevision(opId);
-            if (alreadyRev !== null) {
-                this.sendAck(ws, opId, alreadyRev);
+            const alreadyApplied = this.getAlreadyAppliedOp(opId);
+            if (alreadyApplied !== null) {
+                this.sendAck(ws, opId, alreadyApplied.revision, alreadyApplied.extra);
                 return;
             }
 
             if (msg.type === "answer_card") {
                 let rev = 0;
-                let finalState: Partial<Card> = msg.nextState;
+                let finalState: Card | undefined;
+                const originalRevlogId = msg.revlogEntry.id;
                 const revlogEntry: RevlogEntry = { ...msg.revlogEntry };
 
                 this.ctx.storage.transactionSync(() => {
@@ -1405,6 +1584,22 @@ export class AnkiSyncServer extends DurableObject {
                         );
                     }
                     const card: Card = JSON.parse(row[0].json);
+
+                    // NEW-04 / H-01: Reject concurrent reviews answered from a stale card version
+                    if (
+                        msg.baseReps !== undefined
+                        && !msg.forceOverwrite
+                        && (card.reps || 0) !== msg.baseReps
+                    ) {
+                        throw new OpError(
+                            `Concurrent review conflict on card ${msg.cardId}: expected ${msg.baseReps} reviews, server has ${
+                                card.reps || 0
+                            }.`,
+                            "conflict_revision",
+                            true,
+                        );
+                    }
+
                     const nextReps = Math.max((card.reps || 0) + 1, msg.nextState.reps || 0);
                     Object.assign(card, msg.nextState, {
                         reps: nextReps,
@@ -1427,17 +1622,28 @@ export class AnkiSyncServer extends DurableObject {
                         JSON.stringify(revlogEntry),
                     );
                     this.setMeta("last_activity_ms", String(Date.now()));
-                    rev = this.bumpRevision(opId);
+                    rev = this.bumpRevision(opId, {
+                        cardId: msg.cardId,
+                        cardState: finalState,
+                        revlogEntry,
+                        originalRevlogId,
+                    });
                 });
 
-                this.sendAck(ws, opId, rev);
+                // M-04: Return authoritative cardState and revlogEntry (including repaired revlog ID) in ack
+                this.sendAck(ws, opId, rev, {
+                    cardId: msg.cardId,
+                    cardState: finalState,
+                    revlogEntry,
+                    originalRevlogId,
+                });
                 await this.recomputeAndScheduleAlarm();
                 this.broadcast(
                     {
                         type: "answer_card",
                         opId,
                         cardId: msg.cardId,
-                        nextState: finalState,
+                        nextState: finalState || msg.nextState,
                         revlogEntry,
                         revision: rev,
                     },
@@ -1461,10 +1667,34 @@ export class AnkiSyncServer extends DurableObject {
                             true,
                         );
                     }
+                    if (existingRows.length === 0) {
+                        const deckCount = Number(
+                            this.sql.exec("SELECT COUNT(*) as c FROM decks").toArray()[0]?.c || 0,
+                        );
+                        if (deckCount >= MAX_ACCOUNT_DECKS) {
+                            throw new OpError(
+                                `Account deck limit exceeded (max ${MAX_ACCOUNT_DECKS}).`,
+                                "validation",
+                                false,
+                            );
+                        }
+                    }
 
-                    // UX-01: When renaming a parent deck, cascade the new prefix to all `Parent::Child` subdecks
                     if (existingRows.length > 0) {
                         const prevDeck: Deck = JSON.parse(existingRows[0].json);
+                        // H-04: Optimistic concurrency check on deck edits
+                        if (
+                            msg.expectedMod !== undefined
+                            && !msg.forceOverwrite
+                            && (prevDeck.mod || 0) > msg.expectedMod
+                        ) {
+                            throw new OpError(
+                                `Conflict: deck '${prevDeck.name}' was modified more recently on another device.`,
+                                "conflict_revision",
+                                true,
+                            );
+                        }
+
                         if (prevDeck.name && prevDeck.name !== msg.deck.name) {
                             const oldPrefix = `${prevDeck.name}::`;
                             const newPrefix = `${msg.deck.name}::`;
@@ -1597,16 +1827,38 @@ export class AnkiSyncServer extends DurableObject {
 
             if (msg.type === "upsert_note") {
                 let rev = 0;
+                const authoritativeCards: Card[] = [];
+
                 this.ctx.storage.transactionSync(() => {
+                    const existingNoteRows = this.sql
+                        .exec("SELECT json FROM notes WHERE id = ?", msg.note.id)
+                        .toArray();
                     if (msg.isNew) {
-                        const existingNote = this.sql
-                            .exec("SELECT id FROM notes WHERE id = ?", msg.note.id)
-                            .toArray();
-                        if (existingNote.length > 0) {
+                        if (existingNoteRows.length > 0) {
                             throw new OpError(
                                 `ID collision: note ${msg.note.id} already exists on the server.`,
                                 "id_collision",
                                 true,
+                            );
+                        }
+                        const noteCount = Number(
+                            this.sql.exec("SELECT COUNT(*) as c FROM notes").toArray()[0]?.c || 0,
+                        );
+                        if (noteCount + 1 > MAX_ACCOUNT_NOTES) {
+                            throw new OpError(
+                                `Account note limit exceeded (max ${MAX_ACCOUNT_NOTES}).`,
+                                "validation",
+                                false,
+                            );
+                        }
+                        const cardCount = Number(
+                            this.sql.exec("SELECT COUNT(*) as c FROM cards").toArray()[0]?.c || 0,
+                        );
+                        if (cardCount + msg.cards.length > MAX_ACCOUNT_CARDS) {
+                            throw new OpError(
+                                `Account card limit exceeded (max ${MAX_ACCOUNT_CARDS}).`,
+                                "validation",
+                                false,
                             );
                         }
                         for (const card of msg.cards) {
@@ -1620,6 +1872,20 @@ export class AnkiSyncServer extends DurableObject {
                                     true,
                                 );
                             }
+                        }
+                    } else if (existingNoteRows.length > 0) {
+                        // H-04: Optimistic concurrency check on existing note edits
+                        const prevNote: Note = JSON.parse(existingNoteRows[0].json);
+                        if (
+                            msg.expectedMod !== undefined
+                            && !msg.forceOverwrite
+                            && (prevNote.mod || 0) > msg.expectedMod
+                        ) {
+                            throw new OpError(
+                                `Conflict: note ${msg.note.id} was modified more recently on another device.`,
+                                "conflict_revision",
+                                true,
+                            );
                         }
                     }
 
@@ -1663,12 +1929,25 @@ export class AnkiSyncServer extends DurableObject {
                         msg.note.id,
                         JSON.stringify(msg.note),
                     );
+
+                    // NEW-01: When editing an existing note (`!msg.isNew`), NEVER overwrite existing
+                    // card scheduling state (`ivl`, `due`, `reps`, `lapses`, `queue`, `type`, `data`).
+                    // Only insert cards that do not yet exist (e.g. newly added cloze ordinals).
                     for (const card of msg.cards) {
-                        this.sql.exec(
-                            "INSERT OR REPLACE INTO cards (id, json) VALUES (?, ?)",
-                            card.id,
-                            JSON.stringify(card),
-                        );
+                        const existingCardRows = this.sql
+                            .exec("SELECT json FROM cards WHERE id = ?", card.id)
+                            .toArray();
+                        if (!msg.isNew && existingCardRows.length > 0) {
+                            const serverCard: Card = JSON.parse(existingCardRows[0].json);
+                            authoritativeCards.push(serverCard);
+                        } else {
+                            this.sql.exec(
+                                "INSERT OR REPLACE INTO cards (id, json) VALUES (?, ?)",
+                                card.id,
+                                JSON.stringify(card),
+                            );
+                            authoritativeCards.push(card);
+                        }
                     }
                     if (this.getDeletionTombstone()) {
                         this.clearDeletionTombstone();
@@ -1679,15 +1958,20 @@ export class AnkiSyncServer extends DurableObject {
                 this.sendAck(ws, opId, rev);
                 await this.recomputeAndScheduleAlarm();
                 this.broadcast(
-                    { type: "upsert_note", opId, note: msg.note, cards: msg.cards, revision: rev },
+                    {
+                        type: "upsert_note",
+                        opId,
+                        note: msg.note,
+                        cards: authoritativeCards,
+                        isNew: msg.isNew,
+                        revision: rev,
+                    },
                     ws,
                 );
                 return;
             }
 
             if (msg.type === "delete_note") {
-                // DATA-02: Ignore client-supplied `msg.cardIds`. Derive affected card IDs
-                // strictly from authoritative server-side `c.nid === msg.noteId` relationships.
                 let rev = 0;
                 const removedCardIds = new Set<number>();
 
@@ -1721,7 +2005,6 @@ export class AnkiSyncServer extends DurableObject {
             if (msg.type === "update_card") {
                 let rev = 0;
                 this.ctx.storage.transactionSync(() => {
-                    // DATA-11: Verify referenced note and deck exist on the server
                     const noteRow = this.sql
                         .exec("SELECT id FROM notes WHERE id = ?", msg.card.nid)
                         .toArray();
@@ -1743,6 +2026,21 @@ export class AnkiSyncServer extends DurableObject {
                         );
                     }
 
+                    // NEW-01 & H-04: Reject stale card updates if the server card has newer mod or reps
+                    const existingCardRows = this.sql
+                        .exec("SELECT json FROM cards WHERE id = ?", msg.card.id)
+                        .toArray();
+                    if (existingCardRows.length > 0 && !msg.forceOverwrite) {
+                        const prevCard: Card = JSON.parse(existingCardRows[0].json);
+                        if (msg.expectedMod !== undefined && (prevCard.mod || 0) > msg.expectedMod) {
+                            throw new OpError(
+                                `Conflict: card ${msg.card.id} was modified more recently on another device.`,
+                                "conflict_revision",
+                                true,
+                            );
+                        }
+                    }
+
                     this.sql.exec(
                         "INSERT OR REPLACE INTO cards (id, json) VALUES (?, ?)",
                         msg.card.id,
@@ -1759,17 +2057,38 @@ export class AnkiSyncServer extends DurableObject {
 
             if (msg.type === "save_media") {
                 let rev = 0;
+                const safeName = normalizeMediaFilename(msg.filename) || msg.filename;
                 this.ctx.storage.transactionSync(() => {
+                    this.checkAccountMediaQuota(safeName, msg.dataUrl);
                     this.sql.exec(
                         "INSERT OR REPLACE INTO media (name, data) VALUES (?, ?)",
-                        msg.filename,
+                        safeName,
                         msg.dataUrl,
                     );
                     rev = this.bumpRevision(opId);
                 });
                 this.sendAck(ws, opId, rev);
                 this.broadcast(
-                    { type: "save_media", opId, filename: msg.filename, dataUrl: msg.dataUrl, revision: rev },
+                    { type: "save_media", opId, filename: safeName, dataUrl: msg.dataUrl, revision: rev },
+                    ws,
+                );
+                return;
+            }
+
+            if (msg.type === "delete_media") {
+                let rev = 0;
+                const normalizedNames = msg.filenames
+                    .map(fn => normalizeMediaFilename(fn) || fn)
+                    .filter(Boolean);
+                this.ctx.storage.transactionSync(() => {
+                    for (const fn of normalizedNames) {
+                        this.sql.exec("DELETE FROM media WHERE name = ?", fn);
+                    }
+                    rev = this.bumpRevision(opId);
+                });
+                this.sendAck(ws, opId, rev);
+                this.broadcast(
+                    { type: "delete_media", opId, filenames: normalizedNames, revision: rev },
                     ws,
                 );
                 return;
@@ -1809,19 +2128,26 @@ export class AnkiSyncServer extends DurableObject {
                             revision: this.getRevision(),
                             initialized: this.isInitialized(),
                             hasBackup: Boolean(this.getMeta("backup_snapshot")),
+                            mediaManifest: this.getMediaManifest(),
                         },
                         ws,
                     );
                     return;
                 }
 
-                const rev = this.saveFullCollection(msg.collection, opId);
+                const rev = this.saveFullCollection(
+                    msg.collection,
+                    opId,
+                    true,
+                    Boolean(msg.allowNoBackup),
+                    msg.keepMediaNames,
+                );
                 this.clearDeletionTombstone();
                 this.setMeta("last_activity_ms", String(Date.now()));
                 this.sendAck(ws, opId, rev);
                 await this.recomputeAndScheduleAlarm();
                 this.broadcast(
-                    { type: "import_collection", opId, collection: msg.collection, revision: rev },
+                    { type: "import_collection", opId, collection: this.getFullCollection(), revision: rev },
                     ws,
                 );
                 return;

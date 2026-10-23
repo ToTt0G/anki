@@ -304,3 +304,109 @@ it("DATA-05, DATA-06, UX-09 & PERF-08: blocks clearing offline cache with 3 pend
         await clearUserOfflineData(userId);
     }
 });
+
+it("NEW-01, NEW-02, M-04 & H-05: durable media save, note edit preserving card scheduling, ack revlog reconciliation, and guarded backup restore", async () => {
+    const userId = "new-audit-client";
+    const col = createDefaultCollection();
+    const firstCard = Object.values(col.cards)[0];
+    firstCard.ivl = 25;
+    firstCard.reps = 4;
+    await saveCollectionToIdb(userId, col, 3, true, true);
+
+    const originals = { window: globalThis.window, fetch: globalThis.fetch, WebSocket: globalThis.WebSocket };
+    Object.assign(globalThis, {
+        window: { location: { protocol: "https:", host: "test.example" } },
+        WebSocket: Socket,
+    });
+    globalThis.fetch = async (url: any) => {
+        if (String(url) === "/api/collection/restore-backup") {
+            return Response.json({ revision: 5, collection: createDefaultCollection() });
+        }
+        return Response.json({ ticket: "test" });
+    };
+
+    const validPng =
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+    const client = new SyncClient(userId, async () => "token", () => {}, () => {});
+    try {
+        await client.connect();
+        const socket = Socket.instances.at(-1)!;
+        socket.onopen?.();
+
+        // NEW-02 & L-02: Durable media save awaits IDB persistence and canonicalizes filename
+        const mediaRes = await client.saveMedia("path/to/attachment.png", validPng);
+        assert.equal(mediaRes.ok, true);
+        assert.equal(mediaRes.filename, "path_to_attachment.png");
+        const loadedAfterMedia = await (await import("../src/core/idb-storage")).loadCollectionFromIdb(userId);
+        assert.equal(loadedAfterMedia?.collection.media["path_to_attachment.png"], validPng);
+
+        // NEW-01: Editing note with a stale card copy (ivl: 0, reps: 0) preserves local card scheduling (ivl: 25, reps: 4)
+        const note = client.getCollection().notes[firstCard.nid];
+        client.upsertNote(
+            { ...note, fields: ["Edited Front", "Edited Back"] },
+            [{ ...firstCard, ivl: 0, reps: 0 }],
+            false,
+        );
+        assert.equal(client.getCollection().cards[firstCard.id].ivl, 25);
+        assert.equal(client.getCollection().cards[firstCard.id].reps, 4);
+
+        // H-05: Restoring backup while pending ops exist in outbox must reject without discardPending: true
+        await assert.rejects(
+            client.restoreServerBackup(),
+            /unsynced or conflicted/,
+        );
+
+        // M-04: Ack carrying repaired revlogEntry ID updates client revlog in place
+        const revTs = 1700000090000;
+        client.answerCard(firstCard.id, { ivl: 50, reps: 5 }, {
+            id: revTs,
+            cid: firstCard.id,
+            usn: 0,
+            ease: 3,
+            ivl: 50,
+            lastIvl: 25,
+            factor: 2500,
+            time: 1000,
+            type: 1,
+        });
+        await until(() => socket.messages.some(m => m.type === "answer_card"));
+        const answerMsg = socket.messages.find(m => m.type === "answer_card");
+        socket.receive({
+            type: "ack",
+            opId: answerMsg.opId,
+            revision: 6,
+            cardId: firstCard.id,
+            cardState: { ...firstCard, ivl: 52, reps: 5 },
+            originalRevlogId: revTs,
+            revlogEntry: {
+                id: revTs + 7,
+                cid: firstCard.id,
+                usn: 0,
+                ease: 3,
+                ivl: 52,
+                lastIvl: 25,
+                factor: 2500,
+                time: 1000,
+                type: 1,
+            },
+        });
+        await until(() => client.getCollection().cards[firstCard.id].ivl === 52);
+        assert.ok(
+            client.getCollection().revlog.some(r => r.id === revTs + 7),
+            "M-04: Client revlog updated to server-repaired revlog ID",
+        );
+        assert.ok(
+            !client.getCollection().revlog.some(r => r.id === revTs),
+            "M-04: Pre-collision revlog ID replaced",
+        );
+
+        // H-05: Confirming discardPending: true allows backup restoration
+        const restored = await client.restoreServerBackup({ discardPending: true });
+        assert.equal(restored, true);
+        assert.equal(client.getPendingOutboxCount(), 0);
+    } finally {
+        client.disconnect();
+        Object.assign(globalThis, originals);
+        await clearUserOfflineData(userId);
+    }
+});

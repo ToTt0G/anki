@@ -1,13 +1,18 @@
-// klanki Service Worker (PWA & Web Push) (N01, N02, N07)
+// klanki Service Worker (PWA & Web Push) (N01, N02, N07, PERF-07, U-07)
 const CACHE_PREFIX = "klanki-web-";
-const CACHE_NAME = "klanki-web-v25";
+const CACHE_NAME = "klanki-web-v26";
 const MAX_RUNTIME_CACHE_ENTRIES = 60;
 
-const PRECACHE_URLS = [
+// U-07: Separate essential shell assets from optional assets so a missing optional
+// resource never aborts Service Worker installation.
+const ESSENTIAL_PRECACHE_URLS = [
     "/",
     "/index.html",
     "/theme-init.js",
     "/manifest.webmanifest",
+];
+
+const OPTIONAL_PRECACHE_URLS = [
     "/favicon.png",
     "/favicon.ico",
     "/icons/icon-96.png",
@@ -22,6 +27,8 @@ const PRECACHE_URLS = [
     "/vendor/mathjax/precache-svg.json",
 ];
 
+const PRECACHE_URLS = [...ESSENTIAL_PRECACHE_URLS, ...OPTIONAL_PRECACHE_URLS];
+
 function isCacheableStaticPath(pathname) {
     return (
         pathname.startsWith("/assets/")
@@ -34,7 +41,6 @@ function isCacheableStaticPath(pathname) {
 }
 
 async function trimCache(cache, maxEntries) {
-    // Keep the offline shell and all bundled math resources when trimming runtime assets.
     const keys = (await cache.keys()).filter(request => {
         const path = new URL(request.url).pathname;
         return !PRECACHE_URLS.includes(path) && !path.startsWith("/vendor/mathjax/");
@@ -47,16 +53,30 @@ async function trimCache(cache, maxEntries) {
     }
 }
 
-// 1. Install lifecycle: pre-cache static shell & local WASM runtime
+// 1. Install lifecycle: pre-cache essential shell strictly, and optional/math assets resiliently (U-07)
 self.addEventListener("install", (event) => {
     event.waitUntil(
         caches.open(CACHE_NAME).then(async cache => {
-            const manifest = await fetch("/vendor/mathjax/precache-svg.json");
-            if (!manifest.ok) { throw new Error("Math assets unavailable"); }
-            const mathUrls = await manifest.json();
-            await cache.addAll([...PRECACHE_URLS, ...mathUrls]);
+            await cache.addAll(ESSENTIAL_PRECACHE_URLS);
+            let mathUrls = [];
+            try {
+                const manifest = await fetch("/vendor/mathjax/precache-svg.json");
+                if (manifest.ok) {
+                    mathUrls = await manifest.json();
+                }
+            } catch (_e) {
+                // MathJax precache is optional during install
+            }
+            const optionalAll = [...OPTIONAL_PRECACHE_URLS, ...mathUrls];
+            await Promise.allSettled(optionalAll.map(url => cache.add(url)));
         }).then(() => self.skipWaiting()),
     );
+});
+
+self.addEventListener("message", (event) => {
+    if (event.data && event.data.type === "SKIP_WAITING") {
+        self.skipWaiting();
+    }
 });
 
 // 2. Activate lifecycle: claim clients & prune only klanki-owned obsolete caches (N01)
@@ -72,16 +92,14 @@ self.addEventListener("activate", (event) => {
     );
 });
 
-// 3. Fetch handler: Approved same-origin static assets only with bounded eviction (N02)
+// 3. Fetch handler: Approved same-origin static assets only with bounded eviction (N02, PERF-07)
 self.addEventListener("fetch", (event) => {
     const url = new URL(event.request.url);
 
-    // Never intercept cross-origin requests (Clerk, OAuth, etc.)
     if (url.origin !== self.location.origin) {
         return;
     }
 
-    // Never cache API, WebSocket, or OAuth callback requests
     if (
         url.pathname.startsWith("/api/")
         || url.pathname.startsWith("/sso-callback")
@@ -91,7 +109,6 @@ self.addEventListener("fetch", (event) => {
         return;
     }
 
-    // Handle navigation requests (SPA HTML) — network first with offline shell fallback
     if (event.request.mode === "navigate") {
         event.respondWith(
             fetch(event.request).catch(() => caches.match("/index.html") || caches.match("/")),
@@ -99,7 +116,6 @@ self.addEventListener("fetch", (event) => {
         return;
     }
 
-    // Only cache approved static asset paths with bounded eviction (N02)
     if (!isCacheableStaticPath(url.pathname)) {
         return;
     }

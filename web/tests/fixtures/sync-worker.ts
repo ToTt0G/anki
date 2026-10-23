@@ -10,6 +10,11 @@ export class TestSyncServer extends AnkiSyncServer {
             this.ctx.storage.sql.exec("UPDATE applied_ops SET applied_at = ?", Date.now() - 30 * 86400000);
             return Response.json({ ok: true });
         }
+        if (url.pathname === "/test/set-meta") {
+            const { key, val } = (await request.json()) as { key: string; val: string };
+            this.ctx.storage.sql.exec("INSERT OR REPLACE INTO col_meta (key, val) VALUES (?, ?)", key, val);
+            return Response.json({ ok: true });
+        }
         if (url.pathname === "/test/due-summary") {
             const { now, prefs } = await request.json() as any;
             const original = Date.now;

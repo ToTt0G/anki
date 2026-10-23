@@ -479,6 +479,7 @@ export function validateCollectionPayload(col: any): string | null {
     }
 
     let totalMediaBytes = 0;
+    const normalizedMedia: Record<string, string> = {};
     for (const [filename, dataUrl] of mediaEntries) {
         if (typeof dataUrl !== "string") {
             return "Media value must be a string";
@@ -491,6 +492,10 @@ export function validateCollectionPayload(col: any): string | null {
         if (totalMediaBytes > MAX_TOTAL_MEDIA_BYTES) {
             return "Collection media exceeds aggregate size budget";
         }
+        normalizedMedia[mediaValidation.safeFilename] = mediaValidation.canonicalDataUrl;
+    }
+    if (col.media) {
+        col.media = normalizedMedia;
     }
 
     return null;
@@ -543,6 +548,12 @@ export function validateClientMessage(raw: any): { ok: true; msg: ClientMessage 
                     error: "answer_card revlogEntry.cid must match cardId",
                 };
             }
+            if (raw.baseReps !== undefined && !isNonNegativeInt(raw.baseReps)) {
+                return { ok: false, error: "answer_card baseReps must be a non-negative integer" };
+            }
+            if (raw.forceOverwrite !== undefined && typeof raw.forceOverwrite !== "boolean") {
+                return { ok: false, error: "answer_card forceOverwrite must be a boolean" };
+            }
             return { ok: true, msg: raw as ClientMessage };
         }
 
@@ -551,6 +562,12 @@ export function validateClientMessage(raw: any): { ok: true; msg: ClientMessage 
             if (err) { return { ok: false, error: err }; }
             if (raw.isNew !== undefined && typeof raw.isNew !== "boolean") {
                 return { ok: false, error: "upsert_deck isNew must be a boolean" };
+            }
+            if (raw.expectedMod !== undefined && !isNonNegativeInt(raw.expectedMod)) {
+                return { ok: false, error: "upsert_deck expectedMod must be a non-negative integer" };
+            }
+            if (raw.forceOverwrite !== undefined && typeof raw.forceOverwrite !== "boolean") {
+                return { ok: false, error: "upsert_deck forceOverwrite must be a boolean" };
             }
             return { ok: true, msg: raw as ClientMessage };
         }
@@ -576,8 +593,8 @@ export function validateClientMessage(raw: any): { ok: true; msg: ClientMessage 
         case "upsert_note": {
             const noteErr = validateNoteObject(raw.note);
             if (noteErr) { return { ok: false, error: noteErr }; }
-            if (!Array.isArray(raw.cards) || raw.cards.length === 0 || raw.cards.length > 64) {
-                return { ok: false, error: "upsert_note requires 1..64 cards" };
+            if (!Array.isArray(raw.cards) || (raw.isNew && raw.cards.length === 0) || raw.cards.length > 64) {
+                return { ok: false, error: "upsert_note requires 0..64 cards (at least 1 when isNew)" };
             }
             for (const c of raw.cards) {
                 const cardErr = validateCardObject(c);
@@ -589,6 +606,12 @@ export function validateClientMessage(raw: any): { ok: true; msg: ClientMessage 
             }
             if (raw.isNew !== undefined && typeof raw.isNew !== "boolean") {
                 return { ok: false, error: "upsert_note isNew must be a boolean" };
+            }
+            if (raw.expectedMod !== undefined && !isNonNegativeInt(raw.expectedMod)) {
+                return { ok: false, error: "upsert_note expectedMod must be a non-negative integer" };
+            }
+            if (raw.forceOverwrite !== undefined && typeof raw.forceOverwrite !== "boolean") {
+                return { ok: false, error: "upsert_note forceOverwrite must be a boolean" };
             }
             return { ok: true, msg: raw as ClientMessage };
         }
@@ -603,6 +626,12 @@ export function validateClientMessage(raw: any): { ok: true; msg: ClientMessage 
         case "update_card": {
             const err = validateCardObject(raw.card);
             if (err) { return { ok: false, error: err }; }
+            if (raw.expectedMod !== undefined && !isNonNegativeInt(raw.expectedMod)) {
+                return { ok: false, error: "update_card expectedMod must be a non-negative integer" };
+            }
+            if (raw.forceOverwrite !== undefined && typeof raw.forceOverwrite !== "boolean") {
+                return { ok: false, error: "update_card forceOverwrite must be a boolean" };
+            }
             return { ok: true, msg: raw as ClientMessage };
         }
 
@@ -616,6 +645,21 @@ export function validateClientMessage(raw: any): { ok: true; msg: ClientMessage 
             const mediaValidation = validateMediaDataUrl(raw.filename, raw.dataUrl);
             if (!mediaValidation.ok) {
                 return { ok: false, error: mediaValidation.error };
+            }
+            // L-02 & L-03: Canonicalize filename and dataUrl in the validated message
+            raw.filename = mediaValidation.safeFilename;
+            raw.dataUrl = mediaValidation.canonicalDataUrl;
+            return { ok: true, msg: raw as ClientMessage };
+        }
+
+        case "delete_media": {
+            if (
+                !Array.isArray(raw.filenames)
+                || raw.filenames.length === 0
+                || raw.filenames.length > MAX_MEDIA_ITEMS
+                || !raw.filenames.every((fn: any) => typeof fn === "string" && fn.trim().length > 0 && fn.length <= 255)
+            ) {
+                return { ok: false, error: "delete_media requires 1..2500 valid filenames" };
             }
             return { ok: true, msg: raw as ClientMessage };
         }
@@ -634,6 +678,17 @@ export function validateClientMessage(raw: any): { ok: true; msg: ClientMessage 
             }
             if (raw.seedOnUninitialized !== undefined && typeof raw.seedOnUninitialized !== "boolean") {
                 return { ok: false, error: "import_collection seedOnUninitialized must be a boolean" };
+            }
+            if (raw.allowNoBackup !== undefined && typeof raw.allowNoBackup !== "boolean") {
+                return { ok: false, error: "import_collection allowNoBackup must be a boolean" };
+            }
+            if (
+                raw.keepMediaNames !== undefined
+                && (!Array.isArray(raw.keepMediaNames)
+                    || raw.keepMediaNames.length > MAX_MEDIA_ITEMS
+                    || !raw.keepMediaNames.every((m: any) => typeof m === "string" && m.length <= 255))
+            ) {
+                return { ok: false, error: "import_collection keepMediaNames must be an array of filenames" };
             }
             return { ok: true, msg: raw as ClientMessage };
         }

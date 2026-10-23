@@ -9,6 +9,19 @@ export interface RenderedCard {
     frontHtml: string;
     backHtml: string;
     css: string;
+    hasTypeAnswer?: boolean;
+}
+
+export interface TypedAnswerDiffSegment {
+    text: string;
+    status: "correct" | "wrong" | "missing";
+}
+
+export interface TypedAnswerComparison {
+    isExact: boolean;
+    typedSegments: TypedAnswerDiffSegment[];
+    expectedSegments: TypedAnswerDiffSegment[];
+    html: string;
 }
 
 /**
@@ -38,13 +51,102 @@ export function stripHtml(html: string): string {
     return extractTextFromHtml(html);
 }
 
+/**
+ * Compare a learner's typed response against the expected field text and generate
+ * Anki-compatible diff segments and HTML (U-01).
+ */
+export function compareTypedAnswer(typedRaw: string, expectedRaw: string): TypedAnswerComparison {
+    const expected = stripHtml(expectedRaw).trim();
+    const typed = String(typedRaw ?? "").trim();
+
+    if (!typed) {
+        return {
+            isExact: false,
+            typedSegments: [],
+            expectedSegments: [{ text: expected, status: "missing" }],
+            html: `<div class="type-answer-result"><span class="type-missed">${escapeHtmlText(expected)}</span></div>`,
+        };
+    }
+
+    if (typed === expected) {
+        return {
+            isExact: true,
+            typedSegments: [{ text: typed, status: "correct" }],
+            expectedSegments: [{ text: expected, status: "correct" }],
+            html: `<div class="type-answer-result"><span class="type-good">${escapeHtmlText(expected)}</span></div>`,
+        };
+    }
+
+    // Character-by-character prefix/suffix alignment
+    const typedChars = Array.from(typed);
+    const expChars = Array.from(expected);
+    let prefixLen = 0;
+    const minLen = Math.min(typedChars.length, expChars.length);
+    while (prefixLen < minLen && typedChars[prefixLen] === expChars[prefixLen]) {
+        prefixLen++;
+    }
+
+    let suffixLen = 0;
+    while (
+        suffixLen < minLen - prefixLen
+        && typedChars[typedChars.length - 1 - suffixLen] === expChars[expChars.length - 1 - suffixLen]
+    ) {
+        suffixLen++;
+    }
+
+    const pushSeg = (arr: TypedAnswerDiffSegment[], text: string, status: TypedAnswerDiffSegment["status"]) => {
+        if (!text) { return; }
+        const last = arr[arr.length - 1];
+        if (last && last.status === status) {
+            last.text += text;
+        } else {
+            arr.push({ text, status });
+        }
+    };
+
+    const typedSegments: TypedAnswerDiffSegment[] = [];
+    pushSeg(typedSegments, typedChars.slice(0, prefixLen).join(""), "correct");
+    pushSeg(typedSegments, typedChars.slice(prefixLen, typedChars.length - suffixLen).join(""), "wrong");
+    pushSeg(typedSegments, typedChars.slice(typedChars.length - suffixLen).join(""), "correct");
+
+    const expectedSegments: TypedAnswerDiffSegment[] = [];
+    pushSeg(expectedSegments, expChars.slice(0, prefixLen).join(""), "correct");
+    pushSeg(expectedSegments, expChars.slice(prefixLen, expChars.length - suffixLen).join(""), "missing");
+    pushSeg(expectedSegments, expChars.slice(expChars.length - suffixLen).join(""), "correct");
+
+    const renderSegs = (segs: TypedAnswerDiffSegment[]) =>
+        segs
+            .map(s => {
+                const cls = s.status === "correct"
+                    ? "type-good"
+                    : s.status === "wrong"
+                    ? "type-bad"
+                    : "type-missed";
+                return `<span class="${cls}">${escapeHtmlText(s.text)}</span>`;
+            })
+            .join("");
+
+    const html = `<div class="type-answer-result"><div class="type-comparison-typed">${
+        renderSegs(typedSegments)
+    }</div><div class="type-comparison-arrow">↓</div><div class="type-comparison-expected">${
+        renderSegs(expectedSegments)
+    }</div></div>`;
+
+    return {
+        isExact: false,
+        typedSegments,
+        expectedSegments,
+        html,
+    };
+}
+
 export function renderCardTemplate(
     card: Card,
     note: Note,
     model: NoteType,
     mediaMap?: Record<string, string>,
+    typedAnswer?: string,
 ): RenderedCard {
-    // Map field values by field name
     const fieldsMap: Record<string, string> = {};
     model.flds.forEach((fld, idx) => {
         fieldsMap[fld.name] = note.fields[idx] || "";
@@ -59,13 +161,19 @@ export function renderCardTemplate(
 
     const isCloze = model.type === 1;
     const clozeNum = card.ord + 1;
+    let hasTypeAnswer = false;
 
     function processTemplate(tmplText: string, isBack: boolean, frontProcessed: string): string {
         let out = tmplText;
 
         // 1. Handle {{FrontSide}} on back template
         if (isBack) {
-            out = out.replace(/\{\{FrontSide\}\}/g, frontProcessed);
+            // If {{FrontSide}} is expanded on the back, replace the interactive type-input box with the comparison
+            const frontForBack = frontProcessed.replace(
+                /<div class="type-answer-box"><input[^>]*><\/div>/gi,
+                "",
+            );
+            out = out.replace(/\{\{FrontSide\}\}/g, frontForBack);
         }
 
         // 2. Handle conditional sections: {{#Field}}...{{/Field}}
@@ -86,15 +194,14 @@ export function renderCardTemplate(
             return isBack ? renderClozeBack(val, clozeNum) : renderClozeFront(val, clozeNum);
         });
 
-        // 5. Handle type answer: {{type:FieldName}}
+        // 5. Handle type answer: {{type:FieldName}} (U-01)
         out = out.replace(/\{\{type:([^}]+)\}\}/g, (_m, fieldName) => {
+            hasTypeAnswer = true;
             const val = fieldsMap[fieldName.trim()] || "";
             if (isBack) {
-                return `<div class="type-answer-result"><span class="type-good">${
-                    escapeHtmlText(stripHtml(val))
-                }</span></div>`;
+                return compareTypedAnswer(typedAnswer ?? "", val).html;
             } else {
-                return `<div class="type-answer-box"><input type="text" class="type-input" placeholder="" /></div>`;
+                return `<div class="type-answer-box"><input type="text" class="type-input" placeholder="Type answer..." /></div>`;
             }
         });
 
@@ -128,7 +235,7 @@ export function renderCardTemplate(
             return `<audio controls class="anki-audio" src="${src}"></audio>`;
         });
 
-        // 9. Resolve images: handles relative src, encoded filenames, and ensures responsive bounds (UX-12)
+        // 9. Resolve images: handles relative src, encoded filenames, and ensures responsive bounds (UX-12, L-08)
         out = out.replace(/<img\b([^>]*)src=["']([^"']+)["']([^>]*)>/gi, (_full, beforeAttrs, src, afterAttrs) => {
             const trimmedSrc = src.trim();
             let resolvedSrc = trimmedSrc;
@@ -162,5 +269,6 @@ export function renderCardTemplate(
         frontHtml,
         backHtml,
         css: sanitizeCardCss(model.css || ""),
+        hasTypeAnswer,
     };
 }

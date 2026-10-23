@@ -1,11 +1,16 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-// PWA Service Worker Registration & Standalone Detection
+// PWA Service Worker Registration, Update Recovery & Standalone Detection (U-07)
 
 export interface BeforeInstallPromptEvent extends Event {
     prompt: () => Promise<void>;
     userChoice: Promise<{ outcome: "accepted" | "dismissed"; platform: string }>;
+}
+
+export interface ServiceWorkerCallbacks {
+    onUpdateAvailable?: (registration: ServiceWorkerRegistration) => void;
+    onRegistrationError?: (errorMessage: string) => void;
 }
 
 let deferredInstallPrompt: BeforeInstallPromptEvent | null = null;
@@ -56,15 +61,23 @@ export async function promptPwaInstall(): Promise<boolean> {
     }
 }
 
+export function applyServiceWorkerUpdate(registration: ServiceWorkerRegistration): void {
+    if (registration.waiting) {
+        registration.waiting.postMessage({ type: "SKIP_WAITING" });
+    }
+    window.location.reload();
+}
+
 /**
- * Register Service Worker with auto-update handling
+ * Register Service Worker with visible update notification and error recovery (U-07).
  */
-export async function registerServiceWorker(): Promise<ServiceWorkerRegistration | null> {
+export async function registerServiceWorker(
+    callbacks?: ServiceWorkerCallbacks,
+): Promise<ServiceWorkerRegistration | null> {
     if (typeof window === "undefined" || !("serviceWorker" in navigator)) {
         return null;
     }
 
-    // Set up install event capture
     window.addEventListener("beforeinstallprompt", (e) => {
         e.preventDefault();
         deferredInstallPrompt = e as BeforeInstallPromptEvent;
@@ -81,21 +94,25 @@ export async function registerServiceWorker(): Promise<ServiceWorkerRegistration
             scope: "/",
         });
 
-        // Check for updates
+        if (registration.waiting && navigator.serviceWorker.controller) {
+            callbacks?.onUpdateAvailable?.(registration);
+        }
+
         registration.addEventListener("updatefound", () => {
             const newWorker = registration.installing;
             if (newWorker) {
                 newWorker.addEventListener("statechange", () => {
                     if (newWorker.state === "installed" && navigator.serviceWorker.controller) {
-                        console.log("New version of klanki available.");
+                        callbacks?.onUpdateAvailable?.(registration);
                     }
                 });
             }
         });
 
         return registration;
-    } catch (err) {
-        console.warn("Service Worker registration failed:", err);
+    } catch (err: any) {
+        const msg = err?.message || "Service Worker registration failed";
+        callbacks?.onRegistrationError?.(msg);
         return null;
     }
 }

@@ -19,12 +19,32 @@ interface Props {
     onSuspendCard: (cardId: number) => void;
     onBuryCard: (cardId: number) => void;
     onDeleteCard: (cardId: number) => void;
-    /**
-     * Temporary Custom Study session (C10): a filtered list of card IDs (e.g. "forgot today").
-     * The reviewer walks this list without touching the underlying scheduling records of
-     * cards the user never answers — answering applies the normal scheduler, as on desktop.
-     */
     customCardIds?: number[];
+}
+
+/**
+ * Determine whether the Reviewer UI should reset (`isAnswerShown = false`, `typedAnswer = ""`)
+ * when `collection` updates (U-05). Unrelated sync acknowledgments or note text edits on the
+ * same active card scheduling state must NOT reset the visible study card.
+ */
+export function shouldResetReviewCardState(
+    prevCard: Card | null,
+    nextCard: Card | null,
+): boolean {
+    if (!prevCard || !nextCard) {
+        return prevCard !== nextCard;
+    }
+    if (prevCard.id !== nextCard.id) {
+        return true;
+    }
+    if (
+        prevCard.reps !== nextCard.reps
+        || prevCard.queue !== nextCard.queue
+        || prevCard.due !== nextCard.due
+    ) {
+        return true;
+    }
+    return false;
 }
 
 export const Reviewer: React.FC<Props> = ({
@@ -44,9 +64,11 @@ export const Reviewer: React.FC<Props> = ({
             : getNextStudyCard(collection, deck.id)
     );
     const [isAnswerShown, setIsAnswerShown] = useState<boolean>(false);
+    const [typedAnswer, setTypedAnswer] = useState<string>("");
     const [showMoreMenu, setShowMoreMenu] = useState<boolean>(false);
     const [confirmDeleteNote, setConfirmDeleteNote] = useState<boolean>(false);
     const cardStartTimeRef = useRef<number>(Date.now());
+    const prevDeckIdRef = useRef<number>(deck.id);
     // UX-09: Synchronous lock preventing duplicate rating submissions before React re-renders
     const ratingLockRef = useRef<string | null>(null);
     const deleteDialogRef = useAccessibleModal<HTMLDivElement>(
@@ -77,10 +99,35 @@ export const Reviewer: React.FC<Props> = ({
         return getNextStudyCard(col, deck.id);
     };
 
+    // U-05: Keep review UI state stable across unrelated collection updates
     useEffect(() => {
+        const deckChanged = prevDeckIdRef.current !== deck.id;
+        prevDeckIdRef.current = deck.id;
+
+        if (!deckChanged && currentCard) {
+            const updatedActive = collection.cards[currentCard.id];
+            const stillInCustomQueue = !customRemainingIds
+                || (customRemainingIds.includes(currentCard.id)
+                    && !answeredCustomIdsRef.current.has(currentCard.id));
+            if (
+                updatedActive
+                && updatedActive.queue >= 0
+                && stillInCustomQueue
+                && !shouldResetReviewCardState(currentCard, updatedActive)
+            ) {
+                setCurrentCard(updatedActive);
+                return;
+            }
+        }
+
         const next = pickNextCard(collection);
+        if (!shouldResetReviewCardState(currentCard, next) && !deckChanged) {
+            setCurrentCard(next);
+            return;
+        }
         setCurrentCard(next);
         setIsAnswerShown(false);
+        setTypedAnswer("");
         setConfirmDeleteNote(false);
         ratingLockRef.current = null;
         cardStartTimeRef.current = Date.now();
@@ -131,7 +178,6 @@ export const Reviewer: React.FC<Props> = ({
         onAnswerCard(currentCard.id, chosen.nextState, revlog);
     };
 
-    // Scoped keyboard shortcuts that never hijack focused buttons/selects/inputs or modals (U03)
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
             if (e.ctrlKey || e.altKey || e.metaKey) { return; }
@@ -216,7 +262,7 @@ export const Reviewer: React.FC<Props> = ({
         return <div>Card data missing</div>;
     }
 
-    const rendered = renderCardTemplate(currentCard, note, model, collection.media);
+    const rendered = renderCardTemplate(currentCard, note, model, collection.media, typedAnswer);
     const schedulingOptions = calculateScheduling(currentCard, config);
     const tmpl = model.tmpls[currentCard.ord] || model.tmpls[0];
     const backIncludesFrontSide = Boolean(tmpl?.afmt?.includes("FrontSide"));
@@ -233,13 +279,12 @@ export const Reviewer: React.FC<Props> = ({
 
     return (
         <div className="reviewer-container">
-            {/* Minimal Header */}
             <div className="reviewer-header">
                 <button
                     type="button"
                     onClick={onExitStudy}
                     aria-label="Back to Decks"
-                    style={{ padding: "5px 9px" }}
+                    style={{ padding: "6px 10px" }}
                     title="Back to Decks"
                 >
                     <ArrowLeft size={16} />
@@ -274,7 +319,7 @@ export const Reviewer: React.FC<Props> = ({
                         onClick={() => setShowMoreMenu(!showMoreMenu)}
                         aria-label="More card actions"
                         aria-expanded={showMoreMenu}
-                        style={{ padding: "5px 9px" }}
+                        style={{ padding: "6px 10px" }}
                         title="Card actions"
                     >
                         <MoreHorizontal size={16} />
@@ -295,13 +340,13 @@ export const Reviewer: React.FC<Props> = ({
                                 style={{
                                     position: "absolute",
                                     right: 0,
-                                    top: 34,
+                                    top: 36,
                                     background: "var(--bg-primary)",
                                     border: "1px solid var(--border-color)",
                                     borderRadius: 6,
                                     boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
                                     zIndex: 20,
-                                    minWidth: 135,
+                                    minWidth: 145,
                                     overflow: "hidden",
                                     display: "flex",
                                     flexDirection: "column",
@@ -362,7 +407,6 @@ export const Reviewer: React.FC<Props> = ({
                 </div>
             </div>
 
-            {/* Sandboxed Card Body (S01, C12, U09) */}
             <div
                 className="review-card-area"
                 onClick={() => {
@@ -372,13 +416,17 @@ export const Reviewer: React.FC<Props> = ({
                 <SandboxedCardFrame
                     html={displayedHtml}
                     css={rendered.css}
+                    typedValue={typedAnswer}
                     onCardClick={() => {
+                        if (!isAnswerShown) { handleShowAnswer(); }
+                    }}
+                    onTypedAnswerChange={val => setTypedAnswer(val)}
+                    onTypedAnswerSubmit={() => {
                         if (!isAnswerShown) { handleShowAnswer(); }
                     }}
                 />
             </div>
 
-            {/* Footer Rating Controls */}
             <div className="reviewer-footer">
                 {!isAnswerShown
                     ? (
@@ -417,7 +465,6 @@ export const Reviewer: React.FC<Props> = ({
                     )}
             </div>
 
-            {/* Delete Note Confirmation Dialog (U13, U08) */}
             {confirmDeleteNote && (
                 <div
                     className="modal-backdrop"

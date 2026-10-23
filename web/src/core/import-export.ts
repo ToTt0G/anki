@@ -3,12 +3,13 @@
 
 import JSZip from "jszip";
 import initSqlJs from "sql.js";
+import { findClozeNumbers } from "./cloze";
 import { generateUniqueId } from "./ids";
 import { inspectMediaBytes, MAX_SINGLE_MEDIA_BYTES, normalizeMediaFilename } from "./media-validation";
 import { sanitizeCardCss, sanitizeCardHtml } from "./sanitize";
 import { normalizeReviewDueDay, toRelativeAnkiDueDay } from "./scheduler";
 import { safeDecodeURIComponent } from "./template";
-import { Card, CardQueue, CardType, Collection, Deck, Note, NoteType } from "./types";
+import { Card, CardQueue, CardType, Collection, Deck, Note, NoteType, RevlogEntry } from "./types";
 
 export { MAX_SINGLE_MEDIA_BYTES };
 
@@ -32,12 +33,15 @@ export interface ImportResult {
     mediaCount: number;
     duplicateCount?: number;
     deckNames?: string[];
+    warnings?: string[];
 }
 
 export interface ImportOptions {
     signal?: AbortSignal;
     timeoutMs?: number;
     onProgress?: (stage: string) => void;
+    /** Opt-in to overwrite existing card scheduling when re-importing duplicate cards (H-02). Defaults to false. */
+    overwriteScheduling?: boolean;
 }
 
 // Resource budgets for untrusted archives (SEC-06)
@@ -66,7 +70,6 @@ const ZIP64_EXTRA_ID = 0x0001;
 
 const LE16 = (dv: DataView, off: number) => dv.getUint16(off, true);
 const LE32 = (dv: DataView, off: number) => dv.getUint32(off, true);
-/** Read an unsigned 64-bit little-endian value (returns Infinity beyond Number.MAX_SAFE_INTEGER). */
 function LE64(dv: DataView, off: number): number {
     const lo = LE32(dv, off);
     const hi = LE32(dv, off + 4);
@@ -76,8 +79,7 @@ function LE64(dv: DataView, off: number): number {
 
 /**
  * Parse the ZIP central directory so each member's *uncompressed* size is known before any
- * decompression happens (SEC-06). JSZip only exposes sizes after fully inflating an entry,
- * which a maliciously compressed (zip-bomb) member could abuse for transient memory blow-up.
+ * decompression happens (SEC-06).
  */
 export function readZipCentralDirectory(bytes: ArrayBuffer): Map<string, ZipMemberInfo> {
     const dv = new DataView(bytes);
@@ -245,6 +247,8 @@ export async function importApkg(
     const startedAtMs = Date.now();
     const timeoutMs = options?.timeoutMs ?? DEFAULT_IMPORT_TIMEOUT_MS;
     const signal = options?.signal;
+    const overwriteScheduling = Boolean(options?.overwriteScheduling);
+    const warnings: string[] = [];
 
     if (file.size > MAX_ARCHIVE_BYTES) {
         throw new Error(
@@ -255,12 +259,15 @@ export async function importApkg(
     checkBudgetAndCancellation(startedAtMs, timeoutMs, signal);
     options?.onProgress?.("Reading archive headers...");
 
-    const archiveBytes = await file.arrayBuffer();
+    // U-04: Parse central directory and release the raw archive ArrayBuffer immediately after
     let centralDirectory: Map<string, ZipMemberInfo>;
-    try {
-        centralDirectory = readZipCentralDirectory(archiveBytes);
-    } catch (e) {
-        throw new Error((e as Error)?.message || "Invalid ZIP archive.");
+    {
+        const archiveBytes = await file.arrayBuffer();
+        try {
+            centralDirectory = readZipCentralDirectory(archiveBytes);
+        } catch (e) {
+            throw new Error((e as Error)?.message || "Invalid ZIP archive.");
+        }
     }
     const expandedSizeOf = (name: string): number | undefined => centralDirectory.get(name)?.uncompressedSize;
 
@@ -294,7 +301,7 @@ export async function importApkg(
     checkBudgetAndCancellation(startedAtMs, timeoutMs, signal);
     options?.onProgress?.("Decompressing collection database...");
 
-    const dbBinary = await inflateZipMember(dbFile, MAX_EXPANDED_BYTES, signal);
+    let dbBinary: Uint8Array | null = await inflateZipMember(dbFile, MAX_EXPANDED_BYTES, signal);
     let totalExpandedBytes = dbBinary.byteLength;
     if (totalExpandedBytes > MAX_EXPANDED_BYTES) {
         throw new Error("Decompressed database exceeds memory budget.");
@@ -302,6 +309,7 @@ export async function importApkg(
 
     const SQL = await getSql();
     const db = new SQL.Database(dbBinary);
+    dbBinary = null; // U-04: Release decompressed buffer copy once SQLite WASM DB is initialized
 
     let deckCount = 0;
     let noteCount = 0;
@@ -312,14 +320,14 @@ export async function importApkg(
     const importedDeckNames: string[] = [];
 
     try {
-        // 1. Parse media map with resource budgets & signature validation (SEC-06, SEC-13)
+        // 1. Parse media map with resource budgets & signature validation (SEC-06, SEC-13, M-07, L-02)
         const mediaFile = zip.file("media");
         const extractedMedia: Record<string, string> = {};
         const mediaMapSize = mediaFile ? expandedSizeOf("media") : undefined;
         const mediaMapAllowed = mediaMapSize === undefined || mediaMapSize <= MAX_MEDIA_MAP_BYTES;
         if (mediaFile && !mediaMapAllowed) {
-            console.warn(
-                `Media map exceeds budget (${mediaMapSize} bytes decompressed); skipping media import.`,
+            warnings.push(
+                `Skipped media map because its decompressed size (${mediaMapSize} bytes) exceeds the safety budget.`,
             );
         }
         if (mediaFile && mediaMapAllowed) {
@@ -341,7 +349,10 @@ export async function importApkg(
                 for (const [archiveKey, realFilename] of mediaEntries) {
                     checkBudgetAndCancellation(startedAtMs, timeoutMs, signal);
                     const safeFilename = normalizeMediaFilename(realFilename);
-                    if (!safeFilename) { continue; }
+                    if (!safeFilename) {
+                        warnings.push(`Skipped media '${String(realFilename)}': invalid or disallowed filename.`);
+                        continue;
+                    }
 
                     const entry = zip.file(archiveKey);
                     if (!entry) { continue; }
@@ -349,6 +360,7 @@ export async function importApkg(
                     const memberSize = expandedSizeOf(String(archiveKey));
                     if (memberSize !== undefined) {
                         if (memberSize > MAX_SINGLE_MEDIA_BYTES) {
+                            warnings.push(`Skipped media '${safeFilename}': exceeds single-file size limit.`);
                             continue;
                         }
                         totalExpandedBytes += memberSize;
@@ -363,6 +375,7 @@ export async function importApkg(
                         signal,
                     );
                     if (rawBytes.byteLength > MAX_SINGLE_MEDIA_BYTES) {
+                        warnings.push(`Skipped media '${safeFilename}': exceeds single-file size limit.`);
                         continue;
                     }
                     totalExpandedBytes += rawBytes.byteLength - (memberSize ?? 0);
@@ -370,9 +383,9 @@ export async function importApkg(
                         throw new Error("Archive decompressed media exceeds memory budget.");
                     }
 
-                    // SEC-13: Verify magic bytes and image dimensions rather than trusting extension
                     const inspected = inspectMediaBytes(rawBytes);
                     if (!inspected.ok) {
+                        warnings.push(`Skipped media '${safeFilename}': ${inspected.error}.`);
                         continue;
                     }
 
@@ -397,179 +410,191 @@ export async function importApkg(
                 ) {
                     throw e;
                 }
-                console.warn("Could not parse media file in apkg:", e);
+                warnings.push(`Media table could not be parsed: ${e?.message || "malformed media JSON"}.`);
             }
         }
 
-        // 2. Read col metadata including `crt` for canonical due-date conversion (C01)
+        // 2. Read col metadata including `crt` — abort if required models/decks metadata is corrupt (M-07)
         checkBudgetAndCancellation(startedAtMs, timeoutMs, signal);
         options?.onProgress?.("Reading decks and note types...");
         const colRes = db.exec("SELECT crt, models, decks, dconf FROM col LIMIT 1");
+        if (colRes.length === 0 || colRes[0].values.length === 0) {
+            throw new Error("Invalid .apkg database: missing required collection metadata (col table).");
+        }
+
         let sourceCrtSec = targetCol.crt || Math.floor(Date.now() / 1000);
         const deckIdRemap = new Map<number, number>();
         const modelIdRemap = new Map<number, number>();
 
-        if (colRes.length > 0 && colRes[0].values.length > 0) {
-            const [rawCrt, modelsJson, decksJson, dconfJson] = colRes[0].values[0];
-            if (typeof rawCrt === "number" && rawCrt > 0) {
-                sourceCrtSec = rawCrt;
-                if (!targetCol.crt) {
-                    targetCol.crt = rawCrt;
-                }
+        const [rawCrt, modelsJson, decksJson, dconfJson] = colRes[0].values[0];
+        if (typeof rawCrt === "number" && rawCrt > 0) {
+            sourceCrtSec = rawCrt;
+            if (!targetCol.crt) {
+                targetCol.crt = rawCrt;
+            }
+        }
+
+        // 3. Parse models with collision-safe ID mapping & count limits (C06, SEC-06, M-07)
+        let modelsObj: Record<string, any>;
+        try {
+            modelsObj = JSON.parse(String(modelsJson || ""));
+            if (!modelsObj || typeof modelsObj !== "object" || Array.isArray(modelsObj)) {
+                throw new Error("models is not an object");
+            }
+        } catch {
+            throw new Error("Invalid .apkg database: corrupt or missing note types (models JSON).");
+        }
+        const modelEntries = Object.entries<any>(modelsObj);
+        if (modelEntries.length === 0) {
+            throw new Error("Invalid .apkg database: package contains no note types.");
+        }
+        if (modelEntries.length > MAX_IMPORT_MODELS) {
+            throw new Error(`Archive contains too many note types (${modelEntries.length} > ${MAX_IMPORT_MODELS}).`);
+        }
+        for (const [midStr, m] of modelEntries) {
+            const sourceMid = Number(midStr);
+            let targetMid = sourceMid;
+            const existingModel = targetCol.models[sourceMid];
+            if (existingModel && existingModel.name !== (m.name || "Imported Note Type")) {
+                targetMid = generateUniqueId(targetCol.models);
+            }
+            modelIdRemap.set(sourceMid, targetMid);
+
+            const model: NoteType = {
+                id: targetMid,
+                name: String(m.name || "Imported Note Type").slice(0, 256),
+                type: m.type === 1 ? 1 : 0,
+                mod: m.mod || Math.floor(Date.now() / 1000),
+                usn: 0,
+                flds: (m.flds || []).slice(0, 64).map((f: any, idx: number) => ({
+                    name: String(f.name || `Field ${idx + 1}`).slice(0, 256),
+                    ord: f.ord ?? idx,
+                    sticky: !!f.sticky,
+                    rtl: !!f.rtl,
+                    font: f.font || "Arial",
+                    size: f.size || 20,
+                })),
+                tmpls: (m.tmpls || []).slice(0, 64).map((t: any, idx: number) => ({
+                    name: String(t.name || `Card ${idx + 1}`).slice(0, 256),
+                    ord: t.ord ?? idx,
+                    qfmt: String(t.qfmt || "{{Front}}").slice(0, 128_000),
+                    afmt: String(t.afmt || "{{FrontSide}}\n\n<hr id=answer>\n\n{{Back}}").slice(0, 128_000),
+                })),
+                css: sanitizeCardCss(String(m.css || "").slice(0, 128_000)),
+            };
+            targetCol.models[targetMid] = model;
+        }
+
+        // 4. Parse decks with name matching, collision-safe ID mapping & count limits (C06, SEC-06, M-07)
+        let decksObj: Record<string, any>;
+        try {
+            decksObj = JSON.parse(String(decksJson || ""));
+            if (!decksObj || typeof decksObj !== "object" || Array.isArray(decksObj)) {
+                throw new Error("decks is not an object");
+            }
+        } catch {
+            throw new Error("Invalid .apkg database: corrupt or missing decks metadata.");
+        }
+        const deckEntries = Object.entries<any>(decksObj);
+        if (deckEntries.length === 0) {
+            throw new Error("Invalid .apkg database: package contains no decks.");
+        }
+        if (deckEntries.length > MAX_IMPORT_DECKS) {
+            throw new Error(`Archive contains too many decks (${deckEntries.length} > ${MAX_IMPORT_DECKS}).`);
+        }
+        const existingDeckByName = new Map<string, number>();
+        for (const d of Object.values(targetCol.decks)) {
+            existingDeckByName.set(d.name, d.id);
+        }
+
+        for (const [didStr, d] of deckEntries) {
+            const sourceDid = Number(didStr);
+            const deckName = String(d.name || "Imported Deck").slice(0, 512);
+
+            if (
+                hasAnki21b
+                && deckName.toLowerCase().includes("please update to the latest anki")
+            ) {
+                throw new Error(
+                    "This package uses Anki's newer .anki21b format. Please re-export from Anki with 'Support older Anki versions' checked.",
+                );
             }
 
-            // 3. Parse models with collision-safe ID mapping & count limits (C06, SEC-06)
-            try {
-                const modelsObj = JSON.parse(modelsJson as string);
-                const modelEntries = Object.entries<any>(modelsObj);
-                if (modelEntries.length > MAX_IMPORT_MODELS) {
-                    throw new Error(
-                        `Archive contains too many note types (${modelEntries.length} > ${MAX_IMPORT_MODELS}).`,
-                    );
-                }
-                for (const [midStr, m] of modelEntries) {
-                    const sourceMid = Number(midStr);
-                    let targetMid = sourceMid;
-                    const existingModel = targetCol.models[sourceMid];
-                    if (existingModel && existingModel.name !== (m.name || "Imported Note Type")) {
-                        targetMid = generateUniqueId(targetCol.models);
-                    }
-                    modelIdRemap.set(sourceMid, targetMid);
-
-                    const model: NoteType = {
-                        id: targetMid,
-                        name: String(m.name || "Imported Note Type").slice(0, 256),
-                        type: m.type === 1 ? 1 : 0,
-                        mod: m.mod || Math.floor(Date.now() / 1000),
-                        usn: 0,
-                        flds: (m.flds || []).slice(0, 64).map((f: any, idx: number) => ({
-                            name: String(f.name || `Field ${idx + 1}`).slice(0, 256),
-                            ord: f.ord ?? idx,
-                            sticky: !!f.sticky,
-                            rtl: !!f.rtl,
-                            font: f.font || "Arial",
-                            size: f.size || 20,
-                        })),
-                        tmpls: (m.tmpls || []).slice(0, 64).map((t: any, idx: number) => ({
-                            name: String(t.name || `Card ${idx + 1}`).slice(0, 256),
-                            ord: t.ord ?? idx,
-                            qfmt: String(t.qfmt || "{{Front}}").slice(0, 128_000),
-                            afmt: String(t.afmt || "{{FrontSide}}\n\n<hr id=answer>\n\n{{Back}}").slice(0, 128_000),
-                        })),
-                        css: sanitizeCardCss(String(m.css || "").slice(0, 128_000)),
-                    };
-                    targetCol.models[targetMid] = model;
-                }
-            } catch (e: any) {
-                if (e?.message?.includes("too many note types")) { throw e; }
-                console.warn("Failed to parse models JSON:", e);
+            const matchedByName = existingDeckByName.get(deckName);
+            let targetDid: number;
+            if (matchedByName !== undefined) {
+                targetDid = matchedByName;
+            } else if (!targetCol.decks[sourceDid]) {
+                targetDid = sourceDid;
+            } else {
+                targetDid = generateUniqueId(targetCol.decks);
             }
 
-            // 4. Parse decks with name matching, collision-safe ID mapping & count limits (C06, SEC-06)
-            try {
-                const decksObj = JSON.parse(decksJson as string);
-                const deckEntries = Object.entries<any>(decksObj);
-                if (deckEntries.length > MAX_IMPORT_DECKS) {
-                    throw new Error(`Archive contains too many decks (${deckEntries.length} > ${MAX_IMPORT_DECKS}).`);
+            deckIdRemap.set(sourceDid, targetDid);
+            if (!targetCol.decks[targetDid]) {
+                const deck: Deck = {
+                    id: targetDid,
+                    name: deckName,
+                    desc: String(d.desc || "").slice(0, 16_384),
+                    collapsed: !!d.collapsed,
+                    conf: d.conf || 1,
+                    dyn: d.dyn || 0,
+                    mod: d.mod || Math.floor(Date.now() / 1000),
+                    usn: 0,
+                };
+                targetCol.decks[targetDid] = deck;
+                existingDeckByName.set(deckName, targetDid);
+                if (targetDid !== 1) {
+                    deckCount++;
+                    importedDeckNames.push(deckName);
                 }
-                const existingDeckByName = new Map<string, number>();
-                for (const d of Object.values(targetCol.decks)) {
-                    existingDeckByName.set(d.name, d.id);
+            }
+        }
+
+        // 5. Parse dconf with count limits & warning collection (M-07)
+        try {
+            if (dconfJson) {
+                const dconfObj = JSON.parse(dconfJson as string);
+                const dconfEntries = Object.entries<any>(dconfObj);
+                if (dconfEntries.length > MAX_IMPORT_DCONF) {
+                    throw new Error(`Archive contains too many deck configs (${dconfEntries.length}).`);
                 }
-
-                for (const [didStr, d] of deckEntries) {
-                    const sourceDid = Number(didStr);
-                    const deckName = String(d.name || "Imported Deck").slice(0, 512);
-
-                    if (
-                        hasAnki21b
-                        && deckName.toLowerCase().includes("please update to the latest anki")
-                    ) {
-                        throw new Error(
-                            "This package uses Anki's newer .anki21b format. Please re-export from Anki with 'Support older Anki versions' checked.",
-                        );
-                    }
-
-                    const matchedByName = existingDeckByName.get(deckName);
-                    let targetDid: number;
-                    if (matchedByName !== undefined) {
-                        targetDid = matchedByName;
-                    } else if (!targetCol.decks[sourceDid]) {
-                        targetDid = sourceDid;
-                    } else {
-                        targetDid = generateUniqueId(targetCol.decks);
-                    }
-
-                    deckIdRemap.set(sourceDid, targetDid);
-                    if (!targetCol.decks[targetDid]) {
-                        const deck: Deck = {
-                            id: targetDid,
-                            name: deckName,
-                            desc: String(d.desc || "").slice(0, 16_384),
-                            collapsed: !!d.collapsed,
-                            conf: d.conf || 1,
-                            dyn: d.dyn || 0,
-                            mod: d.mod || Math.floor(Date.now() / 1000),
-                            usn: 0,
+                for (const [dcidStr, dc] of dconfEntries) {
+                    const dcid = Number(dcidStr);
+                    if (!targetCol.dconf[dcid]) {
+                        targetCol.dconf[dcid] = {
+                            id: dcid,
+                            name: String(dc.name || "Default").slice(0, 256),
+                            new: {
+                                delays: dc.new?.delays || [1, 10],
+                                ints: dc.new?.ints || [1, 4],
+                                initialFactor: dc.new?.initialFactor || 2500,
+                                perDay: dc.new?.perDay ?? 20,
+                                order: dc.new?.order ?? 1,
+                            },
+                            rev: {
+                                perDay: dc.rev?.perDay ?? 200,
+                                ease4: dc.rev?.ease4 || 1.3,
+                                ivlFct: dc.rev?.ivlFct || 1.0,
+                                maxIvl: dc.rev?.maxIvl || 36500,
+                                hardFactor: dc.rev?.hardFactor || 1.2,
+                            },
+                            lapse: {
+                                delays: dc.lapse?.delays || [10],
+                                mult: dc.lapse?.mult ?? 0,
+                                minInt: dc.lapse?.minInt || 1,
+                                leechFails: dc.lapse?.leechFails || 8,
+                                leechAction: dc.lapse?.leechAction ?? 0,
+                            },
+                            timer: dc.timer || 0,
+                            maxTaken: dc.maxTaken || 60,
                         };
-                        targetCol.decks[targetDid] = deck;
-                        existingDeckByName.set(deckName, targetDid);
-                        if (targetDid !== 1) {
-                            deckCount++;
-                            importedDeckNames.push(deckName);
-                        }
                     }
                 }
-            } catch (e: any) {
-                if (e?.message?.includes(".anki21b") || e?.message?.includes("too many decks")) { throw e; }
-                console.warn("Failed to parse decks JSON:", e);
             }
-
-            // 5. Parse dconf with count limits
-            try {
-                if (dconfJson) {
-                    const dconfObj = JSON.parse(dconfJson as string);
-                    const dconfEntries = Object.entries<any>(dconfObj);
-                    if (dconfEntries.length > MAX_IMPORT_DCONF) {
-                        throw new Error(`Archive contains too many deck configs (${dconfEntries.length}).`);
-                    }
-                    for (const [dcidStr, dc] of dconfEntries) {
-                        const dcid = Number(dcidStr);
-                        if (!targetCol.dconf[dcid]) {
-                            targetCol.dconf[dcid] = {
-                                id: dcid,
-                                name: String(dc.name || "Default").slice(0, 256),
-                                new: {
-                                    delays: dc.new?.delays || [1, 10],
-                                    ints: dc.new?.ints || [1, 4],
-                                    initialFactor: dc.new?.initialFactor || 2500,
-                                    perDay: dc.new?.perDay ?? 20,
-                                    order: dc.new?.order ?? 1,
-                                },
-                                rev: {
-                                    perDay: dc.rev?.perDay ?? 200,
-                                    ease4: dc.rev?.ease4 || 1.3,
-                                    ivlFct: dc.rev?.ivlFct || 1.0,
-                                    maxIvl: dc.rev?.maxIvl || 36500,
-                                    hardFactor: dc.rev?.hardFactor || 1.2,
-                                },
-                                lapse: {
-                                    delays: dc.lapse?.delays || [10],
-                                    mult: dc.lapse?.mult ?? 0,
-                                    minInt: dc.lapse?.minInt || 1,
-                                    leechFails: dc.lapse?.leechFails || 8,
-                                    leechAction: dc.lapse?.leechAction ?? 0,
-                                },
-                                timer: dc.timer || 0,
-                                maxTaken: dc.maxTaken || 60,
-                            };
-                        }
-                    }
-                }
-            } catch (e: any) {
-                if (e?.message?.includes("too many deck configs")) { throw e; }
-                console.warn("Failed to parse dconf JSON:", e);
-            }
+        } catch (e: any) {
+            if (e?.message?.includes("too many deck configs")) { throw e; }
+            warnings.push(`Deck configuration (dconf) could not be parsed; using default preset.`);
         }
 
         // 6. Read notes with GUID deduplication & collision-safe ID remapping (C06, S01)
@@ -655,7 +680,7 @@ export async function importApkg(
             }
         }
 
-        // 7. Read cards and normalize review/day-learning due dates from sourceCrtSec (C01, C05, C06)
+        // 7. Read cards and preserve newer existing study progress on duplicates unless overwriteScheduling is set (H-02)
         checkBudgetAndCancellation(startedAtMs, timeoutMs, signal);
         options?.onProgress?.("Importing cards...");
         const cardIdRemap = new Map<number, number>();
@@ -721,7 +746,7 @@ export async function importApkg(
 
                 cardIdRemap.set(sourceCid, targetCid);
 
-                const cardObj: Card = {
+                const importedCardObj: Card = {
                     id: targetCid,
                     nid: targetNid,
                     did: targetDid,
@@ -742,15 +767,27 @@ export async function importApkg(
                     data: (data as string) || "{}",
                 };
 
-                targetCol.cards[targetCid] = cardObj;
-                existingCardByNidOrd.set(`${targetNid}:${cardOrd}`, cardObj);
+                // H-02: Preserve existing card scheduling when merging duplicate cards unless
+                // `overwriteScheduling` is explicitly enabled or the existing card is unstudied
+                // and older than the imported card.
+                if (existingCard && !overwriteScheduling) {
+                    const existingIsMoreStudied = (existingCard.reps || 0) > (importedCardObj.reps || 0);
+                    const existingIsNewer = (existingCard.mod || 0) >= (importedCardObj.mod || 0);
+                    if (existingIsMoreStudied || existingIsNewer || (existingCard.reps || 0) > 0) {
+                        targetCol.cards[targetCid] = existingCard;
+                        continue;
+                    }
+                }
+
+                targetCol.cards[targetCid] = importedCardObj;
+                existingCardByNidOrd.set(`${targetNid}:${cardOrd}`, importedCardObj);
                 if (!existingCard) {
                     cardCount++;
                 }
             }
         }
 
-        // 8. Read revlog with remapped card IDs, collision-free revlog IDs, and record-count cap (D11, SEC-06)
+        // 8. Read revlog with remapped card IDs and identity-aware collision handling (M-08, SEC-06)
         try {
             const countRes = db.exec("SELECT COUNT(*) FROM revlog");
             const totalRevlogInDb = Number(countRes?.[0]?.values?.[0]?.[0] || 0);
@@ -774,30 +811,52 @@ export async function importApkg(
                 if (!targetCol.revlog) {
                     targetCol.revlog = [];
                 }
-                const existingRevIds = new Set(targetCol.revlog.map(r => r.id));
+                const existingRevById = new Map<number, RevlogEntry>(
+                    targetCol.revlog.map(r => [r.id, r]),
+                );
                 for (let idx = 0; idx < revlogRes[0].values.length; idx++) {
                     if ((idx & 0x3ff) === 0) {
                         checkBudgetAndCancellation(startedAtMs, timeoutMs, signal);
                     }
                     const row = revlogRes[0].values[idx];
                     const [id, cid, usn, ease, ivl, lastIvl, factor, time, type] = row;
-                    const revId = id as number;
+                    let revId = id as number;
                     const mappedCid = cardIdRemap.get(cid as number) ?? (cid as number);
-                    if (existingRevIds.has(revId)) {
-                        continue;
+                    const easeVal = (ease as any) || 3;
+                    const ivlVal = ivl as number;
+                    const lastIvlVal = (lastIvl as number) || 0;
+
+                    // M-08: Compare full record identity on revId collision. Skip only if it is the
+                    // exact same review; if it is a distinct review with a colliding timestamp ID,
+                    // increment revId so distinct review history is preserved.
+                    const colliding = existingRevById.get(revId);
+                    if (colliding) {
+                        if (
+                            colliding.cid === mappedCid
+                            && colliding.ease === easeVal
+                            && colliding.ivl === ivlVal
+                            && colliding.lastIvl === lastIvlVal
+                        ) {
+                            continue;
+                        }
+                        while (existingRevById.has(revId)) {
+                            revId++;
+                        }
                     }
-                    existingRevIds.add(revId);
-                    targetCol.revlog.push({
+
+                    const newRevEntry: RevlogEntry = {
                         id: revId,
                         cid: mappedCid,
                         usn: (usn as number) || 0,
-                        ease: (ease as any) || 3,
-                        ivl: ivl as number,
-                        lastIvl: (lastIvl as number) || 0,
+                        ease: easeVal,
+                        ivl: ivlVal,
+                        lastIvl: lastIvlVal,
                         factor: (factor as number) || 2500,
                         time: (time as number) || 0,
                         type: (type as number) || 0,
-                    });
+                    };
+                    existingRevById.set(revId, newRevEntry);
+                    targetCol.revlog.push(newRevEntry);
                     revlogCount++;
                 }
             }
@@ -809,7 +868,7 @@ export async function importApkg(
             ) {
                 throw e;
             }
-            console.warn("Notice: revlog table not found or empty in apkg:", e);
+            // revlog table is optional in minimal .apkg exports
         }
 
         Object.assign(targetCol.media, extractedMedia);
@@ -822,6 +881,7 @@ export async function importApkg(
             mediaCount,
             duplicateCount,
             deckNames: importedDeckNames,
+            warnings: warnings.length > 0 ? warnings : undefined,
         };
     } finally {
         db.close();
@@ -829,14 +889,15 @@ export async function importApkg(
 }
 
 /**
- * Determine which media filenames are actually referenced by a set of exported notes
- * and note types (templates + CSS) so exporting a single deck never discloses private
- * media from other decks (SEC-03).
+ * Determine which media filenames are explicitly referenced by `notes` (and optionally
+ * `models` when inspecting the whole collection for orphaned media).
+ * Uses exact filename extraction from `src=`, `href=`, `[sound:...]`, and `url(...)` —
+ * never broad substring matching or shared note-type templates on single-deck exports (SEC-03, NEW-06).
  */
 export function extractReferencedMediaFilenames(
     notes: Note[],
-    models: NoteType[],
-    availableMedia?: Record<string, string>,
+    models: NoteType[] = [],
+    includeModelTemplates: boolean = false,
 ): Set<string> {
     const referenced = new Set<string>();
     const addCandidate = (raw: string) => {
@@ -847,26 +908,27 @@ export function extractReferencedMediaFilenames(
         const decoded = safeDecodeURIComponent(trimmed);
         const baseRaw = trimmed.split("/").pop() || trimmed;
         const baseDecoded = safeDecodeURIComponent(baseRaw);
+        const normalized = normalizeMediaFilename(baseDecoded);
         referenced.add(trimmed);
         referenced.add(decoded);
         referenced.add(baseRaw);
         referenced.add(baseDecoded);
+        if (normalized) {
+            referenced.add(normalized);
+        }
     };
 
     const scanText = (text: string) => {
         if (!text) { return; }
-        // 1. HTML src="..." or href="..."
         const attrRe = /\b(?:src|href)\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))/gi;
         let m: RegExpExecArray | null;
         while ((m = attrRe.exec(text)) !== null) {
             addCandidate(m[1] ?? m[2] ?? m[3] ?? "");
         }
-        // 2. Anki [sound:filename.mp3]
         const soundRe = /\[sound:([^\]]+)\]/gi;
         while ((m = soundRe.exec(text)) !== null) {
             addCandidate(m[1]);
         }
-        // 3. CSS url(...)
         const urlRe = /url\(\s*(?:"([^"]+)"|'([^']+)'|([^"')]+))\s*\)/gi;
         while ((m = urlRe.exec(text)) !== null) {
             addCandidate(m[1] ?? m[2] ?? m[3] ?? "");
@@ -878,25 +940,40 @@ export function extractReferencedMediaFilenames(
             scanText(fld);
         }
     }
-    for (const model of models) {
-        scanText(model.css || "");
-        for (const tmpl of model.tmpls || []) {
-            scanText(tmpl.qfmt || "");
-            scanText(tmpl.afmt || "");
-        }
-    }
-
-    // Also match any availableMedia key that appears verbatim in any exported note field
-    if (availableMedia) {
-        const combinedFields = notes.map(n => (n.fields || []).join("\n")).join("\n");
-        for (const filename of Object.keys(availableMedia)) {
-            if (combinedFields.includes(filename) || combinedFields.includes(encodeURI(filename))) {
-                referenced.add(filename);
+    if (includeModelTemplates) {
+        for (const model of models) {
+            scanText(model.css || "");
+            for (const tmpl of model.tmpls || []) {
+                scanText(tmpl.qfmt || "");
+                scanText(tmpl.afmt || "");
             }
         }
     }
 
     return referenced;
+}
+
+/**
+ * Find media filenames stored in `col.media` that are not referenced by any note or note type (L-10).
+ */
+export function findOrphanedMediaFilenames(col: Collection): string[] {
+    const referenced = extractReferencedMediaFilenames(
+        Object.values(col.notes || {}),
+        Object.values(col.models || {}),
+        true,
+    );
+    const orphaned: string[] = [];
+    for (const filename of Object.keys(col.media || {})) {
+        const normalized = normalizeMediaFilename(filename) || filename;
+        if (
+            !referenced.has(filename)
+            && !referenced.has(normalized)
+            && !referenced.has(safeDecodeURIComponent(filename))
+        ) {
+            orphaned.push(filename);
+        }
+    }
+    return orphaned.sort((a, b) => a.localeCompare(b));
 }
 
 export async function exportApkg(col: Collection, did?: number): Promise<Blob> {
@@ -1105,25 +1182,28 @@ export async function exportApkg(col: Collection, did?: number): Promise<Blob> {
     zip.file("collection.anki2", binaryDb);
     zip.file("collection.anki21", binaryDb);
 
-    // SEC-03: Only package media files referenced by the exported notes and note types
-    // when exporting a specific deck, preventing accidental disclosure of other decks' media.
+    // SEC-03 & NEW-06: Build an exact, deck-scoped media reference manifest from `exportedNotes` only
+    // when exporting a specific deck, so shared note-type templates or substring matches never
+    // leak unrelated media from other decks.
     const referencedMedia = did !== undefined
-        ? extractReferencedMediaFilenames(exportedNotes, Object.values(exportedModels), col.media)
+        ? extractReferencedMediaFilenames(exportedNotes, [], false)
         : null;
 
     const mediaMap: Record<string, string> = {};
     let mediaIdx = 0;
 
     for (const [filename, dataUrl] of Object.entries(col.media || {})) {
+        const normalizedFn = normalizeMediaFilename(filename) || filename;
         if (
             referencedMedia
             && !referencedMedia.has(filename)
+            && !referencedMedia.has(normalizedFn)
             && !referencedMedia.has(safeDecodeURIComponent(filename))
         ) {
             continue;
         }
         const idxStr = String(mediaIdx++);
-        mediaMap[idxStr] = filename;
+        mediaMap[idxStr] = normalizedFn;
 
         if (dataUrl.startsWith("data:")) {
             const base64 = dataUrl.split(",")[1];
@@ -1159,10 +1239,6 @@ export async function exportApkg(col: Collection, did?: number): Promise<Blob> {
     return await zip.generateAsync({ type: "blob", mimeType: "application/apkg" });
 }
 
-/**
- * Merge a JSON collection bundle into `targetCol` using collision-safe ID remapping
- * and GUID deduplication so user records with colliding IDs are never overwritten (UX-06).
- */
 export function mergeImportedCollectionBundle(
     targetCol: Collection,
     bundle: Partial<Collection>,
@@ -1308,11 +1384,79 @@ export async function importEp1100Decks(targetCol: Collection): Promise<Collecti
 }
 
 /**
- * Full RFC 4180 compliant CSV / TSV parser with automatic delimiter detection,
- * BOM stripping, quoted fields, escaped quotes (""), and multiline field support (C07).
+ * Shared cloze-aware card generator for both manual note creation and CSV/TSV imports (U-02, U-03).
+ * Uses an O(1) incrementing `nextDueRef` counter instead of recalculating `Object.keys(cards).length`.
  */
+export function createCardsForNote(
+    note: Note,
+    model: NoteType,
+    did: number,
+    allocatedCardIds: Set<number>,
+    nextDueRef: { value: number },
+    nowSec: number,
+): Card[] {
+    const cards: Card[] = [];
+    const isCloze = model.type === 1;
+
+    if (isCloze) {
+        const clozeNums = findClozeNumbers((note.fields || []).join("\n"));
+        const numsToGenerate = clozeNums.length > 0 ? clozeNums : [1];
+        for (const num of numsToGenerate) {
+            const cardId = generateUniqueId(allocatedCardIds);
+            allocatedCardIds.add(cardId);
+            cards.push({
+                id: cardId,
+                nid: note.id,
+                did,
+                ord: Math.max(0, num - 1),
+                mod: nowSec,
+                usn: 0,
+                type: 0,
+                queue: 0,
+                due: nextDueRef.value++,
+                ivl: 0,
+                factor: 2500,
+                reps: 0,
+                lapses: 0,
+                left: 0,
+                odue: 0,
+                odid: 0,
+                flags: 0,
+                data: "{}",
+            });
+        }
+    } else {
+        model.tmpls.forEach((_tmpl, ord) => {
+            const cardId = generateUniqueId(allocatedCardIds);
+            allocatedCardIds.add(cardId);
+            cards.push({
+                id: cardId,
+                nid: note.id,
+                did,
+                ord,
+                mod: nowSec,
+                usn: 0,
+                type: 0,
+                queue: 0,
+                due: nextDueRef.value++,
+                ivl: 0,
+                factor: 2500,
+                reps: 0,
+                lapses: 0,
+                left: 0,
+                odue: 0,
+                odid: 0,
+                flags: 0,
+                data: "{}",
+            });
+        });
+    }
+
+    return cards;
+}
+
 export function parseDelimitedRows(rawText: string, explicitDelimiter?: string): string[][] {
-    const text = rawText.replace(/^\uFEFF/, ""); // Strip UTF-8 BOM
+    const text = rawText.replace(/^\uFEFF/, "");
     if (!text.trim()) { return []; }
 
     let delimiter = explicitDelimiter || "\t";
@@ -1429,6 +1573,10 @@ export function importCsv(
     let noteCount = 0;
     let cardCount = 0;
     const now = Math.floor(Date.now() / 1000);
+    // U-03: Pre-build allocated ID sets and O(1) due counter instead of O(N^2) Object.keys(cards).length
+    const allocatedNoteIds = new Set<number>(Object.keys(targetCol.notes).map(Number));
+    const allocatedCardIds = new Set<number>(Object.keys(targetCol.cards).map(Number));
+    const nextDueRef = { value: allocatedCardIds.size + 1 };
 
     for (const parts of rows) {
         if (parts.length < 1 || !parts[0]?.trim()) { continue; }
@@ -1445,7 +1593,8 @@ export function importCsv(
                 .filter(Boolean)
             : [];
 
-        const noteId = generateUniqueId(targetCol.notes);
+        const noteId = generateUniqueId(allocatedNoteIds);
+        allocatedNoteIds.add(noteId);
         const note: Note = {
             id: noteId,
             guid: `csv_${noteId}`,
@@ -1462,31 +1611,19 @@ export function importCsv(
         targetCol.notes[noteId] = note;
         noteCount++;
 
-        model.tmpls.forEach((_tmpl, ord) => {
-            const cardId = generateUniqueId(targetCol.cards);
-            const card: Card = {
-                id: cardId,
-                nid: noteId,
-                did,
-                ord,
-                mod: now,
-                usn: 0,
-                type: 0,
-                queue: 0,
-                due: Object.keys(targetCol.cards).length + 1,
-                ivl: 0,
-                factor: 2500,
-                reps: 0,
-                lapses: 0,
-                left: 0,
-                odue: 0,
-                odid: 0,
-                flags: 0,
-                data: "{}",
-            };
-            targetCol.cards[cardId] = card;
+        // U-02: Use shared cloze-aware card generator
+        const generatedCards = createCardsForNote(
+            note,
+            model,
+            did,
+            allocatedCardIds,
+            nextDueRef,
+            now,
+        );
+        for (const card of generatedCards) {
+            targetCol.cards[card.id] = card;
             cardCount++;
-        });
+        }
     }
 
     return {
@@ -1498,13 +1635,8 @@ export function importCsv(
     };
 }
 
-/**
- * Serialize a single TSV cell with spreadsheet-formula neutralization (`=`, `+`, `-`, `@`,
- * `\t`, `\r`) and RFC 4180 quoting when tabs, quotes, or newlines are present (SEC-08).
- */
 export function serializeTsvCell(raw: string): string {
     let val = String(raw ?? "").replace(/\r?\n/g, "<br>");
-    // Neutralize formula-leading characters (including after leading whitespace)
     if (/^\s*[=+\-@]/.test(val) || /^[\t\r]/.test(val)) {
         val = `'${val}`;
     }

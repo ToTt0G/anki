@@ -2,6 +2,7 @@
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 import { verifyToken } from "@clerk/backend";
+import { buildProductionCspHeader } from "../src/core/csp-constants";
 
 export interface AuthEnv {
     CLERK_SECRET_KEY?: string;
@@ -25,50 +26,6 @@ export interface WsTicketPayload {
 }
 
 const WS_TICKET_TTL_MS = 60_000; // 60 seconds
-const SANDBOX_SCRIPT_CSP_HASHES = [
-    "'sha256-stX6x4Az4u2vr94UhGjdZCWgIulsXyj9h7RloDHULYU='",
-    "'sha256-W4QU42zWPRVLkL6rZ+XjOZx0Oa/5f0tVZ2EiT4F29lc='",
-    "'sha256-zAXtycnq0blyQQ0OfBuGEcVlqH/lE4IrzpQmiVTQNGM='",
-    "'sha256-hymwm38jknxySgpQKwSsst8JQxCbt1YCwm22jLh2Q6w='",
-    "'sha256-Nm6Uy/PKSThkE9ZKkQ7PXbAYRJ++0DJ1+T1vLoHVxZY='",
-    "'sha256-pB3EhwN7ddba51Z342/i8D0dJoTyMtlvBCKhGzUFFmA='",
-    "'sha256-N7RJZYk9r7QkgR86eHGKuiz9RQziqTRLU6Wn4k8odKc='",
-    "'sha256-tEZh/BNKW1OtPvW/TVh+m0Eul0Ic8z4NqyCV6g6KNJE='",
-    "'sha256-Yk1ZuLhYXT1pqBBrh7rGL4oklbbK6nkGoljOHxX/HqQ='",
-    "'sha256-fcclbrxYIjec359QRVkwnZfF8m4J4hUNJd1G41pqz5Q='",
-    "'sha256-dla8Rxy3WkMWf2vesoTJXzIzF4k9Jt9M6qZ21Amsnb8='",
-    "'sha256-c9IIo0Je0n3qftYfWYS0Osz7qJSbrXB30+rEfmaLp2Q='",
-    "'sha256-1ncf7gdy2yZXeWyNDiDhh4uzI39tPtHoKOGDSk/3Q8o='",
-    "'sha256-KrsDLKDq/5+yMiootdFLoFjnk00+VpdMVfV0BZ6Qekw='",
-    "'sha256-R8RuARlJ8HAO0CaYsaf8JDzA36lSnkmTXkXuXgkpm9o='",
-    "'sha256-DSY+zyZx0cwTE1uLSvzcpNQBUamupRtpQC5ord5M+Mk='",
-    "'sha256-nBHgZE2r21rfkGWt739iJDQOrsuW5Ip86aJ948cFbzw='",
-    "'sha256-oeS+HiDRkKVTx0eWBUM19fd5BBTeuWbNyKeOlBooo1E='",
-    "'sha256-f9yPfNoWMPNczVeTeboErdnexQxmzrvAWksSkCezJDU='",
-    "'sha256-2cDjljT0Pw4pxtboKjYk4J+YNXR/rlulYVZmD9Sqt5s='",
-    "'sha256-MMCcoZtdd4wXGMR+49drCjAd0gQPEfC0rjstWdZ//iE='",
-    "'sha256-ptRgTL06fnuWkesQgpHd0Ak7l1A1U1dHjGtjeq0NVBk='",
-    "'sha256-9CW4Na605Dc7YXa2IlkNcmkvGoXwUBjhA1+/z8O+GEI='",
-    "'sha256-iAT3VvNplGkGkZw4j1h/gM8tH9kVH3btN1cNAa+Nf7P0w='".replace("GkGk", "Gk"),
-    "'sha256-2NXs11q8Qwam1YlELfpmpDRd7hKINHWRvdrxlVE4gWM='",
-    "'sha256-n1WvJWYEuJp5gLn5A8bzPOPC0OJ5/TR7mkM/5MWN55Q='",
-    "'sha256-42R8hI8mrSKNBwQ/HmPFamRtqdIKbA8YCkBn+p4Q+sw='",
-    "'sha256-BCctaaC2R4PNW2aCDW+CIO5RBAnQsSw4YmQEvp7ZaJw='",
-    "'sha256-rsLh4cQjEpzz0v6GmAZCM1En0RYXNP/kfdme1nYDhic='",
-    "'sha256-pBZppK6SSrg8vD0I+VrpBJCjPNZJ7YZeg2dQEbhwirk='",
-    "'sha256-kxejOwDhFOZ5uzzwffBhAjQhMUEqPaztJbcz2jNPLM0='",
-    "'sha256-uQ7Pg4pvU2OyYKTdTpOYEquvBi+RI0/iD9Y9HH6IpD8='",
-    "'sha256-g9WtQ+pHi6+FXg75RW1j0tc10Qx4q3VEAZ4MsLgIOoM='",
-    "'sha256-1Qj4I8LPOVCb3QiPbdF/3iC0gaix1wKqJAYaAPOABsM='",
-    "'sha256-olm4bJ9J/qCKu8Bb9OXtUQ5lhwudfRJ0BOhIZJO4rUA='",
-    "'sha256-oUB/C6ar3fU+0wSKrux9UpDfohOHgYFnn0pixgRRV4Q='",
-    "'sha256-bqpMk4FFpqzgQoBrLQxxDI1NgGOGyX6dDsDG1uX8MM8='",
-    "'sha256-zXg/BI9k9qN1DXFq8OEO0vZTnNGB2s8SBOMj4uQb1kA='",
-    "'sha256-kD59DRHV1jnrE5Mf09p41Ju/nFm1foKpRdqft7cQE30='",
-    "'sha256-QzXXImcbdxhtZJDjJq2tX3J+0tuVTer+zi0QgDy2UaE='",
-    "'sha256-/a+s48E9TyqeMBO/mG/KBNYxdcae7JmxdwXwBqZSjcc='",
-    "'sha256-1CldwzdEg2k1wTmf7s5RWVd7NMXI/7nxxjJM2C4DqII='",
-].join(" ");
 
 export const PRODUCTION_AUTHORIZED_ORIGINS = [
     "https://klanki.ezryder.us",
@@ -148,23 +105,7 @@ export function withSecurityHeaders(response: Response): Response {
         headers.set("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload");
     }
     if (!headers.has("Content-Security-Policy")) {
-        headers.set(
-            "Content-Security-Policy",
-            [
-                "default-src 'self'",
-                `script-src 'self' ${SANDBOX_SCRIPT_CSP_HASHES} 'wasm-unsafe-eval' https://clerk.klanki.ezryder.us https://*.clerk.accounts.dev https://challenges.cloudflare.com`,
-                "connect-src 'self' wss://klanki.ezryder.us https://clerk.klanki.ezryder.us https://*.clerk.accounts.dev",
-                "img-src 'self' data: blob: https://img.clerk.com https://*.clerk.com",
-                "media-src 'self' data: blob:",
-                "style-src 'self' 'unsafe-inline'",
-                "font-src 'self' data:",
-                "frame-src 'self' blob: https://challenges.cloudflare.com https://clerk.klanki.ezryder.us https://*.clerk.accounts.dev",
-                "worker-src 'self' blob:",
-                "frame-ancestors 'none'",
-                "base-uri 'self'",
-                "object-src 'none'",
-            ].join("; "),
-        );
+        headers.set("Content-Security-Policy", buildProductionCspHeader());
     }
 
     return new Response(response.body, {

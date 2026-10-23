@@ -249,10 +249,10 @@ export default {
                 );
             }
 
-            // Enforce request body size limits before forwarding to Durable Object (SEC-09)
+            // Enforce request body size limits before forwarding to Durable Object (SEC-09, NEW-05)
             let forwardBody: string | null = null;
             if (request.method !== "GET" && request.method !== "HEAD") {
-                const maxBytes = url.pathname === "/api/collection"
+                const maxBytes = url.pathname === "/api/collection" || url.pathname === "/api/media"
                     ? MAX_HTTP_IMPORT_BYTES
                     : MAX_HTTP_API_BYTES;
                 const bounded = await readBoundedBodyText(request, maxBytes);

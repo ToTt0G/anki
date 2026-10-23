@@ -18,6 +18,8 @@ import {
     validateCollectionPayload,
     validatePushSubscriptionInput,
 } from "../server/validation.ts";
+import { shouldResetReviewCardState } from "../src/components/Reviewer.tsx";
+import { buildProductionCspHeader } from "../src/core/csp-constants.ts";
 import { createDefaultCollection } from "../src/core/default-data.ts";
 import {
     clearUserOfflineData,
@@ -33,12 +35,14 @@ import { generateUniqueId, generateUniqueIds } from "../src/core/ids.ts";
 import {
     exportApkg,
     exportDeckCsv,
+    findOrphanedMediaFilenames,
     importApkg,
     importCsv,
     mergeImportedCollectionBundle,
     parseDelimitedRows,
     serializeTsvCell,
 } from "../src/core/import-export.ts";
+import { selectMathJaxSourcesForHtml } from "../src/core/mathjax.ts";
 import { inspectMediaBytes, normalizeMediaFilename, validateMediaDataUrl } from "../src/core/media-validation.ts";
 import { decodeHtmlEntities, extractTextFromHtml, sanitizeCardCss, sanitizeCardHtml } from "../src/core/sanitize.ts";
 import {
@@ -60,6 +64,7 @@ import {
     getTodayDay,
     isCardDue,
     isCardDueInLearnQueue,
+    isValidDailyTime,
     normalizeReviewDueDay,
     resetCardProgress,
     restoreCardQueue,
@@ -69,7 +74,8 @@ import {
 import { searchCards } from "../src/core/search.ts";
 import { calculateDueForecast, calculateTodayStats } from "../src/core/stats.ts";
 import { applyClientMutationLocally, computeReconnectDelayMs } from "../src/core/sync-client.ts";
-import { renderCardTemplate, safeDecodeURIComponent, stripHtml } from "../src/core/template.ts";
+import { compareTypedAnswer, renderCardTemplate, safeDecodeURIComponent, stripHtml } from "../src/core/template.ts";
+import { resolveClerkPublishableKey } from "../src/main.tsx";
 
 const VALID_PNG_DATA_URL =
     "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
@@ -309,6 +315,23 @@ describe("A. Security & Privacy (SEC-01–SEC-13, S01–S12, V01–V03)", () => 
         const validMedia = validateMediaDataUrl("valid.png", VALID_PNG_DATA_URL);
         assert.equal(validMedia.ok, true);
 
+        // L-03: Declared MIME that disagrees with binary signature must be rejected
+        const mismatchedMime = VALID_PNG_DATA_URL.replace("data:image/png;", "data:audio/mpeg;");
+        const mismatchRes = validateMediaDataUrl("song.mp3", mismatchedMime);
+        assert.equal(mismatchRes.ok, false);
+        if (!mismatchRes.ok) {
+            assert.match(mismatchRes.error, /Declared MIME type/);
+        }
+
+        // L-01 & L-04: Clerk key config validation and 24-hour notification time validation
+        assert.throws(() => resolveClerkPublishableKey({}), /Missing VITE_CLERK_PUBLISHABLE_KEY/);
+        assert.equal(resolveClerkPublishableKey({ VITE_CLERK_PUBLISHABLE_KEY: "pk_test_123" }), "pk_test_123");
+        assert.equal(isValidDailyTime("09:00"), true);
+        assert.equal(isValidDailyTime("23:59"), true);
+        assert.equal(isValidDailyTime("24:00"), false);
+        assert.equal(isValidDailyTime("99:99"), false);
+        assert.equal(isValidDailyTime("09:60"), false);
+
         // PNG header with oversized dimensions (10000 x 10000 > 8192) must be rejected
         const oversizedPng = new Uint8Array(24);
         oversizedPng.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
@@ -322,17 +345,44 @@ describe("A. Security & Privacy (SEC-01–SEC-13, S01–S12, V01–V03)", () => 
         }
     });
 
-    it("CI-05 / SEC-05 / SEC-07: real Chromium browser renders SandboxedCardFrame under hash-based CSP while isolating adversarial HTML", async () => {
+    it("CI-05 / SEC-05 / SEC-07 / M-02 / M-10: verifies static and Worker CSP parity and mandatorily runs real Chromium browser sandbox check", async () => {
         const fs = await import("node:fs");
         const path = await import("node:path");
+        const os = await import("node:os");
         const http = await import("node:http");
         const { execFileSync, spawn } = await import("node:child_process");
         const esbuild = await import("esbuild");
 
+        // M-02: Verify static `public/_headers` CSP and Worker `withSecurityHeaders()` CSP are byte-for-byte identical
+        const headersFileText = fs.readFileSync("public/_headers", "utf8");
+        const staticCspLine = headersFileText
+            .split("\n")
+            .find(l => l.trim().startsWith("Content-Security-Policy:")) || "";
+        const staticCsp = staticCspLine.replace(/^\s*Content-Security-Policy:\s*/, "").trim();
+        const workerCsp = withSecurityHeaders(new Response("ok")).headers.get("Content-Security-Policy") || "";
+        assert.equal(
+            staticCsp,
+            buildProductionCspHeader(),
+            "Static _headers CSP must match buildProductionCspHeader()",
+        );
+        assert.equal(workerCsp, staticCsp, "Worker CSP and static _headers CSP must be byte-for-byte identical");
+
+        // M-10: Discover Playwright or system Chromium binary and require mandatory execution (never silently skip)
+        const pwCacheDir = path.join(os.homedir(), ".cache", "ms-playwright");
+        const pwBins: string[] = [];
+        if (fs.existsSync(pwCacheDir)) {
+            for (const dir of fs.readdirSync(pwCacheDir)) {
+                pwBins.push(
+                    path.join(pwCacheDir, dir, "chrome-headless-shell-linux64", "chrome-headless-shell"),
+                    path.join(pwCacheDir, dir, "chrome-linux64", "chrome"),
+                    path.join(pwCacheDir, dir, "chrome-linux", "chrome"),
+                );
+            }
+        }
+
         const candidates = [
             process.env.CHROME_BIN,
-            "/home/t3dev/.cache/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-linux64/chrome-headless-shell",
-            "/home/t3dev/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome",
+            ...pwBins,
             "/usr/bin/google-chrome",
             "/usr/bin/google-chrome-stable",
             "/usr/bin/chromium",
@@ -346,9 +396,10 @@ describe("A. Security & Privacy (SEC-01–SEC-13, S01–S12, V01–V03)", () => 
             }
         });
 
-        if (candidates.length === 0) {
-            return;
-        }
+        assert.ok(
+            candidates.length > 0,
+            "M-10: A working headless Chromium binary must be installed for browser security verification",
+        );
         const chromeBin = candidates[0];
 
         const entryCode = `
@@ -495,11 +546,8 @@ describe("A. Security & Privacy (SEC-01–SEC-13, S01–S12, V01–V03)", () => 
             while (!report && !procExited && Date.now() - start < 10000) {
                 await new Promise(r => setTimeout(r, 40));
             }
-            if (!report && procExited) {
-                // System browser binary exited early in headless container without display/AppArmor profile
-                return;
-            }
-            assert.ok(report, "Browser security report must be received");
+            // M-10: Never silently skip if browser failed to report
+            assert.ok(report, "Browser security report must be received from headless Chromium");
             assert.equal(report.xssExecuted, false, "No adversarial script or event handler may execute");
             assert.equal(
                 report.opaqueOriginIsolated,
@@ -954,7 +1002,7 @@ describe("C. Anki Scheduler, FSRS Reference Validation, Search, Export & Perform
         );
         assert.equal(Object.keys(exportedMediaMap).length, 1);
 
-        // Verify re-import and GUID deduplication
+        // Verify re-import preserves newer study progress by default (H-02) and remaps distinct colliding revlog IDs (M-08)
         const destCol = createDefaultCollection();
         destCol.notes = {};
         destCol.cards = {};
@@ -965,8 +1013,63 @@ describe("C. Anki Scheduler, FSRS Reference Validation, Search, Export & Perform
         assert.equal(destCol.media["public_diagram.png"], VALID_PNG_DATA_URL);
         assert.equal(destCol.media["private_photo.png"], undefined);
 
+        // H-02: Advance local study progress on destCol.cards[targetCid] to ivl=45, reps=5, mod=now+1000
+        destCol.cards[targetCid].ivl = 45;
+        destCol.cards[targetCid].reps = 5;
+        destCol.cards[targetCid].due = today + 45;
+        destCol.cards[targetCid].mod = Math.floor(Date.now() / 1000) + 1000;
+
+        // Re-importing the older deck1Blob must preserve the newer local scheduling (ivl=45, reps=5)
         const secondImport = await importApkg(deck1Blob, destCol);
         assert.equal(secondImport.duplicateCount, firstImport.noteCount);
+        assert.equal(destCol.cards[targetCid].ivl, 45, "H-02: Newer local interval preserved on re-import");
+        assert.equal(destCol.cards[targetCid].reps, 5, "H-02: Newer local reps preserved on re-import");
+
+        // NEW-06 & L-10: Shared model template media or plain-text substring must not leak, and orphaned media is detected
+        sourceCol.media["unused_orphan.png"] = VALID_PNG_DATA_URL;
+        assert.ok(findOrphanedMediaFilenames(sourceCol).includes("unused_orphan.png"));
+        assert.ok(!findOrphanedMediaFilenames(sourceCol).includes("public_diagram.png"));
+    });
+
+    it("U-01, U-02, U-05 & U-06: typed-answer diff comparison, cloze CSV import, Reviewer state stability, and selective MathJax extension loading", () => {
+        // U-01: Typed-answer comparison
+        const exact = compareTypedAnswer("Stockholm", "Stockholm");
+        assert.equal(exact.isExact, true);
+        assert.ok(exact.html.includes("type-good"));
+
+        const mismatch = compareTypedAnswer("Stockhlm", "Stockholm");
+        assert.equal(mismatch.isExact, false);
+        assert.ok(mismatch.html.includes("type-missed"), "Missing 'o' highlighted as type-missed");
+
+        // U-02: CSV import with a Cloze note type generates one card per distinct cloze number
+        const clozeCol = createDefaultCollection();
+        clozeCol.notes = {};
+        clozeCol.cards = {};
+        const clozeModel = Object.values(clozeCol.models).find(m => m.type === 1)!;
+        const csvClozeRes = importCsv(
+            "\"{{c1::TCP}} uses {{c2::3-way}} handshake on port {{c3::80}}\"\tExtra info\tnetworking",
+            clozeCol,
+            1,
+            clozeModel.id,
+        );
+        assert.equal(csvClozeRes.noteCount, 1);
+        assert.equal(csvClozeRes.cardCount, 3, "U-02: Cloze CSV note with c1, c2, c3 must generate 3 cards");
+
+        // U-05: Reviewer state remains stable across unrelated collection updates on the same active card
+        const baseCard: any = { id: 10, nid: 1, did: 1, ord: 0, reps: 2, queue: 2, due: 20500 };
+        assert.equal(shouldResetReviewCardState(baseCard, { ...baseCard, mod: 9999 }), false);
+        assert.equal(shouldResetReviewCardState(baseCard, { ...baseCard, reps: 3 }), true);
+        assert.equal(shouldResetReviewCardState(baseCard, { ...baseCard, id: 11 }), true);
+
+        // U-06: Selective MathJax extension loading
+        const fakeSources = {
+            "[tex]/color": "data:text/javascript;base64,COLOR",
+            "[tex]/mhchem": "data:text/javascript;base64,CHEM",
+        };
+        assert.deepEqual(selectMathJaxSourcesForHtml("\\(x^2 + y^2\\)", fakeSources), {});
+        assert.deepEqual(selectMathJaxSourcesForHtml("\\(\\color{red}{x}\\)", fakeSources), {
+            "[tex]/color": "data:text/javascript;base64,COLOR",
+        });
     });
 
     it("UX-06, PERF-01, PERF-05 & SCHED-02: collision-safe bundle merge, O(N) deck counts, backoff jitter, and DST calendar math", () => {

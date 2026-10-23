@@ -461,4 +461,194 @@ it("SCHED-01 & SCHED-02: server due counts and daily push alarms use IANA timezo
         Date.UTC(2026, 2, 8, 13, 0, 0),
         "Spring-forward DST alarm must fire at 09:00 EDT (13:00 UTC), not 10:00 EDT (14:00 UTC)",
     );
+
+    // L-04: Reject impossible 24-hour notification times
+    const badTimeRes = await request(user, "/push/preferences", {
+        dailyMode: "fixed",
+        dailyTime: "25:99",
+    });
+    assert.equal(badTimeRes.status, 400);
+    const goodTimeRes = await request(user, "/push/preferences", {
+        dailyMode: "fixed",
+        dailyTime: "23:45",
+    });
+    assert.equal(goodTimeRes.status, 200);
+});
+
+it("NEW-01, NEW-04/H-01, M-04 & H-04: preserves card scheduling on note edits, detects concurrent review/entity conflicts, and returns repaired revlog IDs in ack", async () => {
+    const user = "concurrency-and-ack";
+    const col = createDefaultCollection();
+    const firstCard = Object.values(col.cards)[0];
+    const firstNote = col.notes[firstCard.nid];
+    await request(user, "/collection", { ...col, expectedRevision: 0 });
+
+    const { socket, send } = await socketFor(user);
+    try {
+        // 1. Review card from baseReps=0 -> succeeds and returns authoritative cardState & revlogEntry in ack (M-04)
+        const revTimestamp = 1700000050000;
+        const ack1 = await send({
+            type: "answer_card",
+            opId: "rev-1",
+            cardId: firstCard.id,
+            baseReps: 0,
+            nextState: { type: 2, queue: 2, ivl: 14, due: 20500, reps: 1 },
+            revlogEntry: {
+                id: revTimestamp,
+                cid: firstCard.id,
+                usn: 0,
+                ease: 3,
+                ivl: 14,
+                lastIvl: 0,
+                factor: 2500,
+                time: 1200,
+                type: 0,
+            },
+        });
+        assert.equal(ack1.type, "ack");
+        assert.equal(ack1.cardState?.ivl, 14);
+        assert.equal(ack1.cardState?.reps, 1);
+        assert.equal(ack1.revlogEntry?.id, revTimestamp);
+
+        // 2. NEW-04 / H-01: Concurrent review from stale baseReps=0 must be rejected with conflict_revision
+        const staleRev = await send({
+            type: "answer_card",
+            opId: "rev-stale",
+            cardId: firstCard.id,
+            baseReps: 0,
+            nextState: { type: 1, queue: 1, ivl: -60, due: 1700000060, reps: 1 },
+            revlogEntry: {
+                id: revTimestamp + 1,
+                cid: firstCard.id,
+                usn: 0,
+                ease: 1,
+                ivl: -60,
+                lastIvl: 0,
+                factor: 2500,
+                time: 1000,
+                type: 0,
+            },
+        });
+        assert.equal(staleRev.type, "op_error");
+        assert.equal(staleRev.kind, "conflict_revision");
+
+        // 3. M-04: Review with colliding revlogEntry.id repairs ID and returns repaired ID in ack
+        const ackCollision = await send({
+            type: "answer_card",
+            opId: "rev-2-colliding-ts",
+            cardId: firstCard.id,
+            baseReps: 1,
+            nextState: { type: 2, queue: 2, ivl: 30, due: 20516, reps: 2 },
+            revlogEntry: {
+                id: revTimestamp, // Collides with rev-1's timestamp!
+                cid: firstCard.id,
+                usn: 0,
+                ease: 4,
+                ivl: 30,
+                lastIvl: 14,
+                factor: 2650,
+                time: 900,
+                type: 1,
+            },
+        });
+        assert.equal(ackCollision.type, "ack");
+        assert.equal(ackCollision.originalRevlogId, revTimestamp);
+        assert.equal(ackCollision.revlogEntry?.id, revTimestamp + 1, "Repaired revlog ID returned in ack");
+
+        // 4. NEW-01: Editing the note with a stale card snapshot (ivl: 0, reps: 0) must NOT overwrite card scheduling (ivl: 30, reps: 2)
+        const noteEditAck = await send({
+            type: "upsert_note",
+            opId: "note-edit-1",
+            isNew: false,
+            expectedMod: firstNote.mod,
+            note: { ...firstNote, fields: ["Updated Front Text", "Updated Back Text"], mod: firstNote.mod + 10 },
+            cards: [{ ...firstCard, ivl: 0, reps: 0, queue: 0, type: 0 }],
+        });
+        assert.equal(noteEditAck.type, "ack");
+
+        const afterNoteEdit: any = await (await request(user, "/collection")).json();
+        assert.equal(afterNoteEdit.notes[firstNote.id].fields[0], "Updated Front Text");
+        assert.equal(
+            afterNoteEdit.cards[firstCard.id].ivl,
+            30,
+            "Note edit must preserve existing card interval (30d)",
+        );
+        assert.equal(
+            afterNoteEdit.cards[firstCard.id].reps,
+            2,
+            "Note edit must preserve existing card reps (2)",
+        );
+
+        // 5. H-04: Editing the note again with stale expectedMod (firstNote.mod) is rejected with conflict_revision
+        const staleNoteEdit = await send({
+            type: "upsert_note",
+            opId: "note-edit-stale",
+            isNew: false,
+            expectedMod: firstNote.mod,
+            note: { ...firstNote, fields: ["Stale Overwrite", "Back"], mod: firstNote.mod + 20 },
+            cards: [],
+        });
+        assert.equal(staleNoteEdit.type, "op_error");
+        assert.equal(staleNoteEdit.kind, "conflict_revision");
+    } finally {
+        socket.close();
+    }
+});
+
+it("H-03, NEW-05 & L-10: aborts overwrite when backup snapshot fails, supports chunked media keepMediaNames, and deletes orphaned media", async () => {
+    const user = "backup-and-media-chunks";
+    const col = createDefaultCollection();
+    await request(user, "/collection", { ...col, expectedRevision: 0 });
+
+    // Upload media chunk via POST /media (NEW-05)
+    const mediaUploadRes = await request(user, "/media", {
+        filename: "chunk_img.png",
+        dataUrl: VALID_PNG_DATA_URL,
+        opId: "chunk-1",
+    });
+    assert.equal(mediaUploadRes.status, 200);
+
+    // H-03: Simulate backup storage failure -> overwrite must abort without replacing existing collection
+    await request(user, "/test/set-meta", { key: "test_fail_backup", val: "1" });
+    const replacement = createDefaultCollection();
+    replacement.decks[1].name = "Should Not Commit When Backup Fails";
+    const failedOverwrite = await request(user, "/collection", {
+        ...replacement,
+        expectedRevision: 2,
+        opId: "fail-backup-import",
+    });
+    assert.equal(failedOverwrite.status, 500);
+    const afterFailedBackup: any = await (await request(user, "/collection")).json();
+    assert.equal(afterFailedBackup.decks[1].name, "Default", "Original collection preserved when backup fails");
+
+    // Re-enable backup and import with keepMediaNames (NEW-05)
+    await request(user, "/test/set-meta", { key: "test_fail_backup", val: "0" });
+    const chunkedImport = await request(user, "/collection", {
+        ...replacement,
+        media: {},
+        keepMediaNames: ["chunk_img.png"],
+        expectedRevision: 2,
+        opId: "ok-chunked-import",
+    });
+    assert.equal(chunkedImport.status, 200);
+    const afterChunked: any = await (await request(user, "/collection")).json();
+    assert.equal(
+        afterChunked.media["chunk_img.png"],
+        VALID_PNG_DATA_URL,
+        "Chunk-uploaded media retained via keepMediaNames",
+    );
+
+    // L-10: Delete orphaned media via delete_media WebSocket message
+    const { socket, send } = await socketFor(user);
+    try {
+        const delAck = await send({
+            type: "delete_media",
+            opId: "del-orphan-1",
+            filenames: ["chunk_img.png"],
+        });
+        assert.equal(delAck.type, "ack");
+        const afterDeleteMedia: any = await (await request(user, "/collection")).json();
+        assert.equal(afterDeleteMedia.media["chunk_img.png"], undefined, "Orphaned media deleted");
+    } finally {
+        socket.close();
+    }
 });

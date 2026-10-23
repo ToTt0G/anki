@@ -1,7 +1,7 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-import { CheckCircle, RotateCcw, UploadCloud, X } from "lucide-react";
+import { AlertCircle, CheckCircle, RotateCcw, UploadCloud, X } from "lucide-react";
 import React, { useRef, useState } from "react";
 import { importApkg, importCsv, ImportResult } from "../core/import-export";
 import { SyncStatus } from "../core/sync-client";
@@ -13,9 +13,25 @@ interface Props {
     syncStatus?: SyncStatus;
     pendingOutboxCount?: number;
     onImportComplete: (updatedCol: Collection) => void;
-    onRestoreBackup?: () => Promise<boolean>;
+    onRestoreBackup?: (options?: { discardPending?: boolean }) => Promise<boolean>;
     hasBackup?: boolean;
     onClose: () => void;
+}
+
+/**
+ * Shallow per-map clone that avoids duplicating multi-megabyte media base64 strings in memory (U-04).
+ */
+function cloneCollectionForImport(col: Collection): Collection {
+    return {
+        ...col,
+        decks: { ...(col.decks || {}) },
+        dconf: { ...(col.dconf || {}) },
+        models: { ...(col.models || {}) },
+        notes: { ...(col.notes || {}) },
+        cards: { ...(col.cards || {}) },
+        revlog: [...(col.revlog || [])],
+        media: { ...(col.media || {}) },
+    };
 }
 
 export const ImportModal: React.FC<Props> = ({
@@ -29,10 +45,12 @@ export const ImportModal: React.FC<Props> = ({
 }) => {
     const [isProcessing, setIsProcessing] = useState<boolean>(false);
     const [progressStage, setProgressStage] = useState<string>("Inspecting package...");
+    const [preserveScheduling, setPreserveScheduling] = useState<boolean>(true);
     const [stagedCol, setStagedCol] = useState<Collection | null>(null);
     const [previewResult, setPreviewResult] = useState<ImportResult | null>(null);
     const [committedResult, setCommittedResult] = useState<ImportResult | null>(null);
     const [restoredSuccess, setRestoredSuccess] = useState<boolean>(false);
+    const [confirmRestoreDiscard, setConfirmRestoreDiscard] = useState<boolean>(false);
     const [errorMsg, setErrorMsg] = useState<string | null>(null);
     const fileInputRef = useRef<HTMLInputElement | null>(null);
     const abortControllerRef = useRef<AbortController | null>(null);
@@ -57,7 +75,7 @@ export const ImportModal: React.FC<Props> = ({
         setRestoredSuccess(false);
 
         try {
-            const clonedCol: Collection = JSON.parse(JSON.stringify(collection));
+            const clonedCol = cloneCollectionForImport(collection);
 
             if (
                 file.name.endsWith(".apkg")
@@ -67,6 +85,7 @@ export const ImportModal: React.FC<Props> = ({
                 const res = await importApkg(file, clonedCol, {
                     signal: controller.signal,
                     onProgress: stage => setProgressStage(stage),
+                    overwriteScheduling: !preserveScheduling,
                 });
                 setStagedCol(clonedCol);
                 setPreviewResult(res);
@@ -99,18 +118,25 @@ export const ImportModal: React.FC<Props> = ({
         setStagedCol(null);
     };
 
-    const handleRestore = async () => {
+    const handleRestore = async (discardPending: boolean = false) => {
         if (!onRestoreBackup) { return; }
+        if (pendingOutboxCount > 0 && !discardPending) {
+            setConfirmRestoreDiscard(true);
+            return;
+        }
         setIsProcessing(true);
         setErrorMsg(null);
         try {
-            const ok = await onRestoreBackup();
+            const ok = await onRestoreBackup({ discardPending });
             if (ok) {
                 setRestoredSuccess(true);
                 setCommittedResult(null);
+                setConfirmRestoreDiscard(false);
             } else {
                 setErrorMsg("No pre-import backup snapshot found.");
             }
+        } catch (err: any) {
+            setErrorMsg(err?.message || "Could not restore backup.");
         } finally {
             setIsProcessing(false);
         }
@@ -123,7 +149,6 @@ export const ImportModal: React.FC<Props> = ({
         }
     };
 
-    // UX-04: Distinguish local save vs waiting to sync vs backed up to cloud
     const commitStatusHeading = syncStatus === "connected" && pendingOutboxCount === 0
         ? "Backed up to cloud"
         : syncStatus === "connected"
@@ -138,7 +163,7 @@ export const ImportModal: React.FC<Props> = ({
                 aria-modal="true"
                 aria-labelledby="import-modal-title"
                 className="modal-content"
-                style={{ maxWidth: 440 }}
+                style={{ maxWidth: 450 }}
                 onClick={e => e.stopPropagation()}
             >
                 <div className="modal-header">
@@ -155,7 +180,7 @@ export const ImportModal: React.FC<Props> = ({
                     </button>
                 </div>
 
-                <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
                     <input
                         type="file"
                         ref={fileInputRef}
@@ -168,6 +193,32 @@ export const ImportModal: React.FC<Props> = ({
                         }}
                     />
 
+                    {/* H-02: Opt-in toggle for preserving vs resetting duplicate card scheduling */}
+                    <label
+                        htmlFor="import-preserve-scheduling"
+                        style={{
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            gap: 8,
+                            padding: "8px 12px",
+                            borderRadius: 8,
+                            background: "var(--bg-secondary)",
+                            border: "1px solid var(--border-color)",
+                            fontSize: 12.5,
+                            color: "var(--text-secondary)",
+                            cursor: "pointer",
+                        }}
+                    >
+                        <span>Preserve existing study progress on duplicate cards</span>
+                        <input
+                            id="import-preserve-scheduling"
+                            type="checkbox"
+                            checked={preserveScheduling}
+                            onChange={e => setPreserveScheduling(e.target.checked)}
+                        />
+                    </label>
+
                     <button
                         type="button"
                         onDragOver={e => e.preventDefault()}
@@ -176,7 +227,7 @@ export const ImportModal: React.FC<Props> = ({
                         style={{
                             border: "2px dashed var(--border-color)",
                             borderRadius: 8,
-                            padding: "32px 16px",
+                            padding: "28px 16px",
                             textAlign: "center",
                             cursor: "pointer",
                             background: "var(--bg-secondary)",
@@ -192,7 +243,7 @@ export const ImportModal: React.FC<Props> = ({
                             Choose or drop .apkg or CSV/TSV file
                         </div>
                         <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
-                            Previews decks, notes, cards, and duplicates before committing
+                            Previews decks, notes, cards, duplicates, and warnings before committing
                         </div>
                     </button>
 
@@ -214,7 +265,7 @@ export const ImportModal: React.FC<Props> = ({
                                 <button
                                     type="button"
                                     onClick={() => abortControllerRef.current?.abort()}
-                                    style={{ fontSize: 12, padding: "3px 8px" }}
+                                    style={{ fontSize: 12, padding: "4px 10px" }}
                                 >
                                     Cancel
                                 </button>
@@ -231,7 +282,6 @@ export const ImportModal: React.FC<Props> = ({
                         </div>
                     )}
 
-                    {/* Import Preview Confirmation Step (U14) */}
                     {previewResult && (
                         <div
                             style={{
@@ -271,6 +321,30 @@ export const ImportModal: React.FC<Props> = ({
                                     </div>
                                 )}
                             </div>
+
+                            {/* M-07: Surface partial import warnings clearly in the preview UI */}
+                            {previewResult.warnings && previewResult.warnings.length > 0 && (
+                                <div
+                                    role="alert"
+                                    style={{
+                                        padding: "8px 10px",
+                                        borderRadius: 6,
+                                        background: "rgba(217, 119, 6, 0.1)",
+                                        border: "1px solid rgba(217, 119, 6, 0.4)",
+                                        fontSize: 12,
+                                        color: "var(--text-primary)",
+                                    }}
+                                >
+                                    <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 600 }}>
+                                        <AlertCircle size={13} color="var(--color-again)" />
+                                        <span>{previewResult.warnings.length} import warning(s):</span>
+                                    </div>
+                                    <ul style={{ margin: "4px 0 0 18px", padding: 0 }}>
+                                        {previewResult.warnings.slice(0, 5).map((w, idx) => <li key={idx}>{w}</li>)}
+                                    </ul>
+                                </div>
+                            )}
+
                             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
                                 <button
                                     type="button"
@@ -330,6 +404,41 @@ export const ImportModal: React.FC<Props> = ({
                             Previous collection backup restored.
                         </div>
                     )}
+
+                    {/* H-05: Confirmation when restoring a backup while pending outbox ops exist */}
+                    {confirmRestoreDiscard && (
+                        <div
+                            role="alert"
+                            style={{
+                                padding: "10px 12px",
+                                borderRadius: 8,
+                                background: "rgba(217, 119, 6, 0.1)",
+                                border: "1px solid rgba(217, 119, 6, 0.4)",
+                                fontSize: 12.5,
+                                display: "flex",
+                                flexDirection: "column",
+                                gap: 8,
+                            }}
+                        >
+                            <div style={{ color: "var(--color-again)", fontWeight: 500 }}>
+                                You have {pendingOutboxCount} unsynced local{" "}
+                                {pendingOutboxCount === 1 ? "change" : "changes"}. Restoring the pre-import backup will
+                                discard those unsynced changes so they do not replay over the restored backup.
+                            </div>
+                            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+                                <button type="button" onClick={() => setConfirmRestoreDiscard(false)}>
+                                    Cancel
+                                </button>
+                                <button
+                                    type="button"
+                                    className="primary"
+                                    onClick={() => void handleRestore(true)}
+                                >
+                                    Discard Unsynced & Restore
+                                </button>
+                            </div>
+                        </div>
+                    )}
                 </div>
 
                 <div className="modal-footer" style={{ justifyContent: "space-between" }}>
@@ -337,7 +446,7 @@ export const ImportModal: React.FC<Props> = ({
                         ? (
                             <button
                                 type="button"
-                                onClick={handleRestore}
+                                onClick={() => void handleRestore(false)}
                                 disabled={isProcessing}
                                 style={{ fontSize: 12.5 }}
                             >
