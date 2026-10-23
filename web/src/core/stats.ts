@@ -144,14 +144,16 @@ export function calculateDueForecast(col: Collection, days = 30): DueForecastIte
 
     let cumulative = 0;
     const result: DueForecastItem[] = [];
-    const startOfDayMs = getLocalDayStartMs();
+    const now = new Date();
 
     for (let i = 0; i < days; i++) {
         const day = today + i;
         const due = countsByDay[day] || 0;
         cumulative += due;
 
-        const d = new Date(startOfDayMs + i * 86_400_000);
+        // Use true calendar-day addition rather than fixed 86,400,000 ms offsets so
+        // DST spring-forward/fall-back transitions never duplicate or skip dates (SCHED-02).
+        const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + i);
         const dateStr = `${d.getMonth() + 1}/${d.getDate()}`;
 
         result.push({

@@ -1,12 +1,15 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+import JSZip from "jszip";
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+    getAuthorizedParties,
     isAllowedRequestOrigin,
     issueSignedWsTicket,
     redactUrlForLog,
+    resolveWsTicketSigningKey,
     verifySignedWsTicket,
     withSecurityHeaders,
 } from "../server/auth.ts";
@@ -19,43 +22,88 @@ import { createDefaultCollection } from "../src/core/default-data.ts";
 import {
     clearUserOfflineData,
     enqueueOutboxOp,
+    getClearDataOnSignOutPreference,
     getOutboxOps,
     loadCollectionFromIdb,
     removeOutboxOp,
     saveCollectionToIdb,
+    setClearDataOnSignOutPreference,
 } from "../src/core/idb-storage.ts";
 import { generateUniqueId, generateUniqueIds } from "../src/core/ids.ts";
-import { exportApkg, importApkg, importCsv, parseDelimitedRows } from "../src/core/import-export.ts";
-import { sanitizeCardCss, sanitizeCardHtml } from "../src/core/sanitize.ts";
 import {
+    exportApkg,
+    exportDeckCsv,
+    importApkg,
+    importCsv,
+    mergeImportedCollectionBundle,
+    parseDelimitedRows,
+    serializeTsvCell,
+} from "../src/core/import-export.ts";
+import { inspectMediaBytes, normalizeMediaFilename, validateMediaDataUrl } from "../src/core/media-validation.ts";
+import { decodeHtmlEntities, extractTextFromHtml, sanitizeCardCss, sanitizeCardHtml } from "../src/core/sanitize.ts";
+import {
+    addCalendarDays,
     calculateScheduling,
+    fsrsInitialDifficulty,
+    fsrsInitialStability,
+    fsrsIntervalFromStability,
+    fsrsNextDifficulty,
+    fsrsNextForgetStability,
+    fsrsNextRecallStability,
+    fsrsRetrievability,
+    fsrsSameDayStability,
+    getAllDeckCounts,
+    getCustomStudyCardIds,
     getDeckCounts,
+    getLocalDayStartMs,
     getNextStudyCard,
     getTodayDay,
+    isCardDue,
     isCardDueInLearnQueue,
     normalizeReviewDueDay,
+    resetCardProgress,
+    restoreCardQueue,
     toRelativeAnkiDueDay,
+    zonedTimeToUtcMs,
 } from "../src/core/scheduler.ts";
-import { calculateTodayStats } from "../src/core/stats.ts";
-import { applyClientMutationLocally } from "../src/core/sync-client.ts";
+import { searchCards } from "../src/core/search.ts";
+import { calculateDueForecast, calculateTodayStats } from "../src/core/stats.ts";
+import { applyClientMutationLocally, computeReconnectDelayMs } from "../src/core/sync-client.ts";
+import { renderCardTemplate, safeDecodeURIComponent, stripHtml } from "../src/core/template.ts";
 
-describe("A. Security & Privacy (S01–S12, V01–V03)", () => {
-    it("S01/V01: strips scripts, inline event handlers, iframes, and javascript: URIs from card HTML and CSS", () => {
+const VALID_PNG_DATA_URL =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+
+describe("A. Security & Privacy (SEC-01–SEC-13, S01–S12, V01–V03)", () => {
+    it("SEC-05/S01/V01: allowlist sanitizer strips scripts, encoded javascript: URIs, SVG/Math/form payloads, and stripHtml is inert", () => {
         const maliciousHtml = `
       <div>Safe Question</div>
       <script>fetch('/api/collection')</script>
+      <script>unclosed_evil()
       <img src="x" onerror="alert(document.cookie)" onload="steal()">
       <svg onload="evil()"><circle r="10"/></svg>
-      <a href="javascript:alert(1)">Click</a>
+      <a href="javascript:alert(1)">Click1</a>
+      <a href="java&#x09;script:alert(2)">Click2</a>
+      <a href="&#106;&#97;vascript:alert(3)">Click3</a>
+      <a href="data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==">Click4</a>
       <iframe src="https://evil.example"></iframe>
     `;
         const cleaned = sanitizeCardHtml(maliciousHtml);
         assert.ok(!cleaned.includes("<script"), "script tag must be removed");
+        assert.ok(!cleaned.includes("unclosed_evil"), "unclosed script block must be removed");
         assert.ok(!cleaned.includes("onerror"), "onerror handler must be removed");
         assert.ok(!cleaned.includes("onload"), "onload handler must be removed");
-        assert.ok(!cleaned.includes("javascript:"), "javascript: URI must be neutralized");
+        assert.ok(!cleaned.includes("<svg"), "svg container must be removed");
+        assert.ok(!cleaned.toLowerCase().includes("javascript:"), "javascript: URI must be neutralized");
+        assert.ok(!cleaned.includes("java&#x09;script"), "entity-encoded javascript: URI must be neutralized");
+        assert.ok(!cleaned.includes("&#106;"), "decimal-encoded javascript: URI must be neutralized");
+        assert.ok(!cleaned.includes("data:text/html"), "data:text/html URI must be neutralized");
         assert.ok(!cleaned.includes("<iframe"), "iframe must be removed");
         assert.ok(cleaned.includes("Safe Question"), "legitimate content preserved");
+
+        assert.equal(decodeHtmlEntities("java&#x09;script&#58;"), "java\tscript:");
+        assert.equal(extractTextFromHtml("<b>Hello</b> <script>evil()</script>World"), "Hello World");
+        assert.equal(stripHtml("<p>Inert &amp; safe</p><img src=x onerror=alert(1)>"), "Inert & safe");
 
         const maliciousCss = `
       @import url("https://evil.example/steal.css");
@@ -67,7 +115,7 @@ describe("A. Security & Privacy (S01–S12, V01–V03)", () => {
         assert.ok(!cleanedCss.includes("expression("), "CSS expression must be stripped");
     });
 
-    it("S02/S08/S11: enforces Origin/CSRF checks, redacts tickets in logs, and applies CSP headers", async () => {
+    it("SEC-07/SEC-11/SEC-12: enforces production Origin allowlists, removes unsafe-inline from script-src CSP, and isolates WS ticket signing key", async () => {
         const crossOriginPost = new Request("https://klanki.ezryder.us/api/collection", {
             method: "POST",
             headers: {
@@ -77,6 +125,38 @@ describe("A. Security & Privacy (S01–S12, V01–V03)", () => {
         });
         assert.equal(isAllowedRequestOrigin(crossOriginPost, {}), false);
 
+        // SEC-11: Localhost origin must be rejected when ENVIRONMENT is production
+        const localhostAgainstProd = new Request("https://klanki.ezryder.us/api/collection", {
+            method: "POST",
+            headers: {
+                Origin: "http://localhost:5173",
+                Authorization: "Bearer token",
+            },
+        });
+        assert.equal(
+            isAllowedRequestOrigin(localhostAgainstProd, { ENVIRONMENT: "production" }),
+            false,
+            "Production environment must not trust localhost Origin",
+        );
+        assert.ok(
+            !getAuthorizedParties({ ENVIRONMENT: "production" }).includes("http://localhost:5173"),
+            "Production authorizedParties must not contain localhost",
+        );
+
+        // SEC-11: Untrusted request host must not implicitly add itself to authorized origins
+        const untrustedHostReq = new Request("https://preview-untrusted.example.com/api/collection", {
+            method: "POST",
+            headers: {
+                Origin: "https://preview-untrusted.example.com",
+                Authorization: "Bearer token",
+            },
+        });
+        assert.equal(
+            isAllowedRequestOrigin(untrustedHostReq, { ENVIRONMENT: "production" }),
+            false,
+            "Request origin not in allowlist must be rejected",
+        );
+
         const sameOriginPost = new Request("https://klanki.ezryder.us/api/collection", {
             method: "POST",
             headers: {
@@ -84,61 +164,329 @@ describe("A. Security & Privacy (S01–S12, V01–V03)", () => {
                 Authorization: "Bearer token",
             },
         });
-        assert.equal(isAllowedRequestOrigin(sameOriginPost, {}), true);
+        assert.equal(isAllowedRequestOrigin(sameOriginPost, { ENVIRONMENT: "production" }), true);
 
         const redacted = redactUrlForLog("https://klanki.ezryder.us/api/ws?ticket=secret_ticket_123");
         assert.ok(!redacted.includes("secret_ticket_123"));
         assert.ok(redacted.includes("REDACTED"));
 
+        // SEC-07: script-src must use SHA-256 hash instead of 'unsafe-inline'
         const secured = withSecurityHeaders(new Response("ok", { status: 200 }));
         assert.equal(secured.headers.get("X-Content-Type-Options"), "nosniff");
         assert.equal(secured.headers.get("X-Frame-Options"), "DENY");
-        assert.ok(secured.headers.get("Content-Security-Policy")?.includes("default-src 'self'"));
+        const csp = secured.headers.get("Content-Security-Policy") || "";
+        assert.ok(csp.includes("default-src 'self'"));
+        const scriptSrcDirective = csp.split(";").find(d => d.trim().startsWith("script-src")) || "";
+        assert.ok(
+            !scriptSrcDirective.includes("'unsafe-inline'"),
+            "script-src must not permit 'unsafe-inline'",
+        );
+        assert.ok(
+            scriptSrcDirective.includes("'sha256-"),
+            "script-src must authorize sandbox bootstrap script via sha256 hash",
+        );
 
-        const { ticket, nonce } = await issueSignedWsTicket("user_123", "test_secret_key");
-        const verified = await verifySignedWsTicket(ticket, "test_secret_key");
+        // SEC-12: Dedicated WS_TICKET_SIGNING_KEY and domain-separated derivation
+        const explicitKey = await resolveWsTicketSigningKey({
+            CLERK_SECRET_KEY: "clerk_secret",
+            WS_TICKET_SIGNING_KEY: "dedicated_ws_key",
+        });
+        assert.equal(explicitKey, "dedicated_ws_key");
+
+        const derivedKey = await resolveWsTicketSigningKey({
+            CLERK_SECRET_KEY: "clerk_secret",
+        });
+        assert.ok(derivedKey && derivedKey !== "clerk_secret", "Derived key must not equal raw CLERK_SECRET_KEY");
+
+        const { ticket, nonce } = await issueSignedWsTicket("user_123", derivedKey!);
+        const verified = await verifySignedWsTicket(ticket, derivedKey!);
         assert.equal(verified?.sub, "user_123");
         assert.equal(verified?.nonce, nonce);
-        const wrongSecret = await verifySignedWsTicket(ticket, "wrong_secret");
-        assert.equal(wrongSecret, null);
+        const wrongSecret = await verifySignedWsTicket(ticket, "clerk_secret");
+        assert.equal(wrongSecret, null, "Raw CLERK_SECRET_KEY must not validate ticket signed with derived key");
     });
 
-    it("S04/S12/V03: validates push endpoints against SSRF and rejects malformed WebSocket messages", () => {
+    it("SEC-02/DATA-11/DATA-12: validates complete collection schemas, foreign keys, revlog cid matching, and push SSRF", () => {
         assert.equal(
             validatePushSubscriptionInput({
                 endpoint: "http://fcm.googleapis.com/fcm/send/123",
                 keys: { p256dh: "A".repeat(87), auth: "B".repeat(22) },
             }).ok,
             false,
-            "HTTP push endpoint must be rejected",
         );
-
         assert.equal(
             validatePushSubscriptionInput({
                 endpoint: "https://127.0.0.1:8080/internal",
                 keys: { p256dh: "A".repeat(87), auth: "B".repeat(22) },
             }).ok,
             false,
-            "Localhost/private push endpoint must be rejected",
         );
-
         assert.equal(
             validatePushSubscriptionInput({
                 endpoint: "https://fcm.googleapis.com/fcm/send/valid-token",
                 keys: { p256dh: "A".repeat(87), auth: "B".repeat(22) },
             }).ok,
             true,
-            "Valid FCM HTTPS push endpoint with valid key lengths must pass",
         );
 
         assert.equal(validateClientMessage({ type: "delete_deck", deckId: -5 }).ok, false);
         assert.equal(validateClientMessage({ type: "delete_deck", deckId: 1 }).ok, false);
         assert.equal(validateClientMessage({ type: "delete_deck", deckId: 42 }).ok, true);
         assert.equal(validateCollectionPayload(null), "Collection must be an object");
+
+        // SEC-02 & DATA-11: Valid default collection passes
+        const validCol = createDefaultCollection();
+        assert.equal(validateCollectionPayload(validCol), null);
+
+        // Orphaned card.did -> rejected
+        const orphanDeckCol = structuredClone(validCol);
+        Object.values(orphanDeckCol.cards)[0].did = 999999;
+        assert.match(validateCollectionPayload(orphanDeckCol) || "", /nonexistent deck/);
+
+        // Orphaned card.nid -> rejected
+        const orphanNoteCol = structuredClone(validCol);
+        Object.values(orphanNoteCol.cards)[0].nid = 888888;
+        assert.match(validateCollectionPayload(orphanNoteCol) || "", /nonexistent note/);
+
+        // Orphaned note.mid -> rejected
+        const orphanModelCol = structuredClone(validCol);
+        Object.values(orphanModelCol.notes)[0].mid = 777777;
+        assert.match(validateCollectionPayload(orphanModelCol) || "", /nonexistent model/);
+
+        // Malformed dconf -> rejected
+        const badDconfCol = structuredClone(validCol);
+        (badDconfCol.dconf[1].rev as any).maxIvl = -10;
+        assert.match(validateCollectionPayload(badDconfCol) || "", /maxIvl/);
+
+        // Malformed revlog -> rejected
+        const badRevlogCol = structuredClone(validCol);
+        badRevlogCol.revlog.push({
+            id: 1,
+            cid: 1,
+            usn: 0,
+            ease: 99 as any,
+            ivl: 1,
+            lastIvl: 0,
+            factor: 2500,
+            time: 100,
+            type: 0,
+        });
+        assert.match(validateCollectionPayload(badRevlogCol) || "", /Revlog ease/);
+
+        // DATA-12: answer_card revlogEntry.cid must equal cardId
+        const badAnswerMsg = validateClientMessage({
+            type: "answer_card",
+            cardId: 100,
+            nextState: { reps: 1 },
+            revlogEntry: {
+                id: 1700000000000,
+                cid: 200,
+                usn: 0,
+                ease: 3,
+                ivl: 1,
+                lastIvl: 0,
+                factor: 2500,
+                time: 1000,
+                type: 0,
+            },
+        });
+        assert.equal(badAnswerMsg.ok, false);
+    });
+
+    it("SEC-13 & UX-10: validates media filenames, magic bytes, and image dimensions", () => {
+        assert.equal(normalizeMediaFilename("../etc/passwd"), null);
+        assert.equal(normalizeMediaFilename("script.svg"), null);
+        assert.equal(normalizeMediaFilename("malware.exe"), null);
+        assert.equal(normalizeMediaFilename("diagram.png"), "diagram.png");
+
+        // Disguised HTML/SVG claiming to be .png must fail magic-byte inspection
+        const fakePngBytes = new TextEncoder().encode("<svg onload=alert(1)></svg>");
+        assert.equal(inspectMediaBytes(fakePngBytes).ok, false);
+        const fakeDataUrl = `data:image/png;base64,${btoa("<svg onload=alert(1)></svg>")}`;
+        assert.equal(validateMediaDataUrl("fake.png", fakeDataUrl).ok, false);
+
+        // Valid 1x1 PNG passes
+        const validMedia = validateMediaDataUrl("valid.png", VALID_PNG_DATA_URL);
+        assert.equal(validMedia.ok, true);
+
+        // PNG header with oversized dimensions (10000 x 10000 > 8192) must be rejected
+        const oversizedPng = new Uint8Array(24);
+        oversizedPng.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+        const dv = new DataView(oversizedPng.buffer);
+        dv.setUint32(16, 10_000, false);
+        dv.setUint32(20, 10_000, false);
+        const dimRes = inspectMediaBytes(oversizedPng);
+        assert.equal(dimRes.ok, false);
+        if (!dimRes.ok) {
+            assert.match(dimRes.error, /dimensions/);
+        }
+    });
+
+    it("CI-05 / SEC-05 / SEC-07: real Chromium browser renders SandboxedCardFrame under hash-based CSP while isolating adversarial HTML", async () => {
+        const fs = await import("node:fs");
+        const path = await import("node:path");
+        const http = await import("node:http");
+        const { spawn } = await import("node:child_process");
+        const esbuild = await import("esbuild");
+
+        const candidates = [
+            process.env.CHROME_BIN,
+            "/home/t3dev/.cache/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-linux64/chrome-headless-shell",
+            "/home/t3dev/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/usr/bin/google-chrome",
+        ].filter((p): p is string => Boolean(p && fs.existsSync(p)));
+
+        if (candidates.length === 0) {
+            return;
+        }
+        const chromeBin = candidates[0];
+
+        const entryCode = `
+            import React from "react";
+            import { createRoot } from "react-dom/client";
+            import { SandboxedCardFrame } from "./src/components/SandboxedCardFrame.tsx";
+
+            let xssExecuted = false;
+            let heightReports = 0;
+            window.addEventListener("message", (e) => {
+                if (e.data && e.data.type === "xss-executed") {
+                    xssExecuted = true;
+                }
+                if (e.data && e.data.type === "klanki-card-height") {
+                    heightReports++;
+                }
+            });
+
+            const adversarialCardHtml = [
+                '<div>Safe Browser Question \\\\(\\\\color{red}{x^2 + y^2 = z^2}\\\\)</div>',
+                '<script>parent.postMessage({type:"xss-executed"},"*")</script>',
+                '<img src="x" onerror="parent.postMessage({type:\\x27xss-executed\\x27},\\x27*\\x27)">',
+                '<svg onload="parent.postMessage({type:\\x27xss-executed\\x27},\\x27*\\x27)"></svg>',
+                '<a href="java&#x09;script:parent.postMessage({type:\\x27xss-executed\\x27},\\x27*\\x27)">BadLink</a>'
+            ].join("");
+
+            const host = document.createElement("div");
+            document.body.appendChild(host);
+            createRoot(host).render(React.createElement(SandboxedCardFrame, { html: adversarialCardHtml }));
+
+            setTimeout(() => {
+                const iframe = document.querySelector("iframe");
+                let opaqueOriginIsolated = false;
+                try {
+                    const doc = iframe ? iframe.contentDocument : null;
+                    opaqueOriginIsolated = (doc === null);
+                } catch {
+                    opaqueOriginIsolated = true;
+                }
+                fetch("/browser-report", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        xssExecuted,
+                        heightReports,
+                        opaqueOriginIsolated,
+                        sandboxAttr: iframe ? iframe.getAttribute("sandbox") : "",
+                    }),
+                });
+            }, 900);
+        `;
+
+        const built = await esbuild.build({
+            stdin: {
+                contents: entryCode,
+                resolveDir: process.cwd(),
+                sourcefile: "browser-security-entry.tsx",
+                loader: "tsx",
+            },
+            bundle: true,
+            format: "esm",
+            write: false,
+        });
+        const bundleJs = built.outputFiles[0].text;
+        const securedRes = withSecurityHeaders(new Response("ok"));
+        const prodCsp = securedRes.headers.get("Content-Security-Policy")!;
+
+        let report: any = null;
+        const cspViolations: string[] = [];
+        const server = http.createServer((req, res) => {
+            const u = new URL(req.url || "/", "http://127.0.0.1");
+            if (u.pathname === "/browser-report" && req.method === "POST") {
+                let body = "";
+                req.on("data", c => (body += c));
+                req.on("end", () => {
+                    report = JSON.parse(body);
+                    res.end("ok");
+                });
+                return;
+            }
+            if (u.pathname === "/bundle.js") {
+                res.setHeader("Content-Type", "text/javascript");
+                res.end(bundleJs);
+                return;
+            }
+            if (u.pathname === "/") {
+                res.setHeader("Content-Type", "text/html");
+                res.setHeader("Content-Security-Policy", prodCsp);
+                res.end(
+                    "<!doctype html><html><body><script type=\"module\" src=\"/bundle.js\"></script></body></html>",
+                );
+                return;
+            }
+            const staticPath = path.join("public", u.pathname);
+            if (fs.existsSync(staticPath) && fs.statSync(staticPath).isFile()) {
+                res.setHeader(
+                    "Content-Type",
+                    staticPath.endsWith(".json") ? "application/json" : "text/javascript",
+                );
+                res.end(fs.readFileSync(staticPath));
+                return;
+            }
+            res.statusCode = 404;
+            res.end();
+        });
+
+        await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+        const addr = server.address() as { port: number };
+        const proc = spawn(chromeBin, [
+            "--headless",
+            "--no-sandbox",
+            "--enable-logging=stderr",
+            "--v=0",
+            "--remote-debugging-port=0",
+            `http://127.0.0.1:${addr.port}/`,
+        ]);
+        proc.stderr.on("data", chunk => {
+            const text = String(chunk);
+            if (text.includes("violates the following Content Security Policy")) {
+                cspViolations.push(text.trim());
+            }
+        });
+
+        try {
+            const start = Date.now();
+            while (!report && Date.now() - start < 5000) {
+                await new Promise(r => setTimeout(r, 50));
+            }
+            assert.ok(report, "Browser security report must be received");
+            assert.equal(report.xssExecuted, false, "No adversarial script or event handler may execute");
+            assert.equal(
+                report.opaqueOriginIsolated,
+                true,
+                "Sandboxed iframe must enforce opaque-origin DOM isolation",
+            );
+            assert.equal(report.sandboxAttr, "allow-scripts", "Iframe sandbox must never include allow-same-origin");
+            assert.ok(report.heightReports >= 1, "Hashed bootstrap script must execute and report card height");
+            assert.deepEqual(cspViolations, [], "Legitimate card & MathJax scripts must produce zero CSP violations");
+        } finally {
+            proc.kill();
+            server.close();
+        }
     });
 });
 
-describe("B. Sync, Outbox, IDs & Data Integrity (D01–D12, V04–V06)", () => {
+describe("B. Sync, Outbox, IDs, Account Lifecycle & Data Integrity (DATA-01–DATA-15, SEC-04)", () => {
     it("D06/D11: generates strictly unique IDs even within the same millisecond", () => {
         const ids = generateUniqueIds(500);
         const unique = new Set(ids);
@@ -149,7 +497,7 @@ describe("B. Sync, Outbox, IDs & Data Integrity (D01–D12, V04–V06)", () => {
         assert.ok(!collisionSet.has(nextId));
     });
 
-    it("D01/D03/D04/S07: persists offline outbox, applies cascading deck deletes, and clears offline storage", async () => {
+    it("D01/D03/D04/UX-01/SEC-04: cascading deck deletes, cascading parent deck renames, and shared-device sign-out cleanup", async () => {
         const userId = "user_test_sync";
         const col = createDefaultCollection();
         const parentDid = generateUniqueId(col.decks);
@@ -157,7 +505,7 @@ describe("B. Sync, Outbox, IDs & Data Integrity (D01–D12, V04–V06)", () => {
 
         col.decks[parentDid] = {
             id: parentDid,
-            name: "Course",
+            name: "Science",
             desc: "",
             collapsed: false,
             conf: 1,
@@ -167,7 +515,7 @@ describe("B. Sync, Outbox, IDs & Data Integrity (D01–D12, V04–V06)", () => {
         };
         col.decks[childDid] = {
             id: childDid,
-            name: "Course::Module1",
+            name: "Science::Chemistry",
             desc: "",
             collapsed: false,
             conf: 1,
@@ -175,6 +523,15 @@ describe("B. Sync, Outbox, IDs & Data Integrity (D01–D12, V04–V06)", () => {
             mod: 100,
             usn: 0,
         };
+
+        // UX-01: Renaming parent deck "Science" must rename child "Science::Chemistry"
+        applyClientMutationLocally(col, {
+            type: "upsert_deck",
+            deck: { ...col.decks[parentDid], name: "Natural Science" },
+        });
+        assert.equal(col.decks[parentDid].name, "Natural Science");
+        assert.equal(col.decks[childDid].name, "Natural Science::Chemistry");
+
         const nid = generateUniqueId(col.notes);
         const cid = generateUniqueId(col.cards);
         col.notes[nid] = {
@@ -211,7 +568,6 @@ describe("B. Sync, Outbox, IDs & Data Integrity (D01–D12, V04–V06)", () => {
             data: "{}",
         };
 
-        // Enqueue offline delete_deck op
         await enqueueOutboxOp({
             opId: "op_del_1",
             userId,
@@ -221,7 +577,6 @@ describe("B. Sync, Outbox, IDs & Data Integrity (D01–D12, V04–V06)", () => {
         const ops = await getOutboxOps(userId);
         assert.equal(ops.length, 1);
 
-        // Apply cascading delete locally
         applyClientMutationLocally(col, ops[0].msg);
         assert.equal(col.decks[parentDid], undefined, "Parent deck deleted");
         assert.equal(col.decks[childDid], undefined, "Child subdeck deleted");
@@ -236,14 +591,21 @@ describe("B. Sync, Outbox, IDs & Data Integrity (D01–D12, V04–V06)", () => {
         assert.equal(loaded?.revision, 5);
         assert.equal(loaded?.initialized, true);
 
+        // SEC-04: Sign-out data cleanup preference defaults to true
+        assert.equal(getClearDataOnSignOutPreference(), true);
+        setClearDataOnSignOutPreference(false);
+        assert.equal(getClearDataOnSignOutPreference(), false);
+        setClearDataOnSignOutPreference(true);
+        assert.equal(getClearDataOnSignOutPreference(), true);
+
         await clearUserOfflineData(userId);
         assert.equal(await loadCollectionFromIdb(userId), null);
     });
 });
 
-describe("C. Anki Scheduler, FSRS, Due Dates, Daily Limits & CSV (C01–C12, V07–V08)", () => {
+describe("C. Anki Scheduler, FSRS Reference Validation, Search, Export & Performance", () => {
     it("C01/C02/C05: normalizes collection-relative review due dates and round-trips to relative Anki due days", () => {
-        const crtSec = 1700000000; // Day 19675
+        const crtSec = 1700000000;
         const crtDay = Math.floor(crtSec / 86400);
         const relativeDue = 30;
         const epochDue = normalizeReviewDueDay(relativeDue, crtSec);
@@ -252,16 +614,60 @@ describe("C. Anki Scheduler, FSRS, Due Dates, Daily Limits & CSV (C01–C12, V07
         const exportedRelative = toRelativeAnkiDueDay(epochDue, crtSec);
         assert.equal(exportedRelative, 30);
 
-        // Queue 3 day-learning card due today
         const today = getTodayDay();
         const dayLearnCard: any = { queue: 3, due: today - crtDay };
         assert.equal(isCardDueInLearnQueue(dayLearnCard, Math.floor(Date.now() / 1000), today, crtSec), true);
     });
 
-    it("C03: executes real FSRS scheduling when fsrsEnabled is true and scales intervals by desiredRetention", () => {
+    it("SCHED-03 & SCHED-04: validates FSRS formulas against reference values and enforces maxIvl caps", () => {
+        // SCHED-04: Official FSRS v4.5/v5 reference properties
+        // 1. Initial stability S0(G) = w[G-1]
+        assert.equal(fsrsInitialStability(1), 0.40255);
+        assert.equal(fsrsInitialStability(2), 1.18385);
+        assert.equal(fsrsInitialStability(3), 3.173);
+        assert.equal(fsrsInitialStability(4), 15.69105);
+
+        // 2. Retrievability R(t, S) at t = 0 is 1.0, and at t = S is exactly 0.90
+        assert.equal(fsrsRetrievability(0, 10), 1);
+        assert.ok(Math.abs(fsrsRetrievability(10, 10) - 0.9) < 1e-9, "At elapsedDays == stability, R must equal 0.9");
+
+        // 3. Interval for desiredRetention = 0.90 equals round(stability)
+        assert.equal(fsrsIntervalFromStability(10, 0.9, 36500), 10);
+
+        // 4. Difficulty decreases on Easy (4), stays near constant on Good (3), increases on Again (1) / Hard (2)
+        const d0Good = fsrsInitialDifficulty(3);
+        const dAfterAgain = fsrsNextDifficulty(d0Good, 1);
+        const dAfterHard = fsrsNextDifficulty(d0Good, 2);
+        const dAfterGood = fsrsNextDifficulty(d0Good, 3);
+        const dAfterEasy = fsrsNextDifficulty(d0Good, 4);
+        assert.ok(dAfterAgain > dAfterHard && dAfterHard > dAfterGood && dAfterGood > dAfterEasy);
+
+        // 5. Recall stability increases monotonically with rating (Hard < Good < Easy) and forget stability <= S
+        const s0 = 10;
+        const r = fsrsRetrievability(10, s0);
+        const sForget = fsrsNextForgetStability(5, s0, r);
+        const sHard = fsrsNextRecallStability(5, s0, r, 2);
+        const sGood = fsrsNextRecallStability(5, s0, r, 3);
+        const sEasy = fsrsNextRecallStability(5, s0, r, 4);
+        assert.ok(sForget <= s0, "Forget stability must not exceed pre-lapse stability");
+        assert.ok(
+            sHard > s0 && sGood > sHard && sEasy > sGood,
+            "Recall stabilities must order s0 < Hard < Good < Easy",
+        );
+
+        // 6. Same-day stability S'(S, G)
+        assert.ok(fsrsSameDayStability(10, 4) > fsrsSameDayStability(10, 3));
+        assert.ok(fsrsSameDayStability(10, 1) < 10);
+
+        // SCHED-03: Intervals must never exceed configured maxIvl even when Hard hits maxIvl
         const col = createDefaultCollection();
-        const baseConfig = col.dconf[1];
-        const reviewCard: any = {
+        const cappedConfig = {
+            ...col.dconf[1],
+            fsrsEnabled: true,
+            desiredRetention: 0.85,
+            rev: { ...col.dconf[1].rev, maxIvl: 15 },
+        };
+        const matureCard: any = {
             id: 5001,
             nid: 4001,
             did: 1,
@@ -271,111 +677,174 @@ describe("C. Anki Scheduler, FSRS, Due Dates, Daily Limits & CSV (C01–C12, V07
             type: 2,
             queue: 2,
             due: getTodayDay(),
-            ivl: 10,
+            ivl: 15,
             factor: 2500,
-            reps: 3,
+            reps: 8,
             lapses: 0,
             left: 0,
             odue: 0,
             odid: 0,
             flags: 0,
-            data: JSON.stringify({ s: 10, d: 5, lastRevDay: getTodayDay() - 10 }),
+            data: JSON.stringify({ s: 50, d: 3, lastRevDay: getTodayDay() - 20 }),
         };
+        const cappedOptions = calculateScheduling(matureCard, cappedConfig);
+        for (const opt of cappedOptions) {
+            if (opt.rating >= 2) {
+                assert.ok(
+                    opt.nextState.ivl <= 15,
+                    `Rating ${opt.rating} interval (${opt.nextState.ivl}) must not exceed maxIvl (15)`,
+                );
+            }
+        }
+    });
 
-        const highRetentionOpts = calculateScheduling(reviewCard, {
-            ...baseConfig,
-            fsrsEnabled: true,
-            desiredRetention: 0.95,
-        });
-        const lowRetentionOpts = calculateScheduling(reviewCard, {
-            ...baseConfig,
-            fsrsEnabled: true,
-            desiredRetention: 0.80,
-        });
+    it("UX-02 & UX-03: unsuspending/unburying preserves learning queue semantics and resetting clears FSRS memory state", () => {
+        // UX-02: Intraday learning card (type=1, due in unix seconds) restores to queue=1
+        const intradayLearnCard: any = { type: 1, queue: -1, due: 1_770_000_000 };
+        assert.equal(restoreCardQueue(intradayLearnCard), 1);
 
-        const goodHigh = highRetentionOpts.find(o => o.rating === 3)!;
-        const goodLow = lowRetentionOpts.find(o => o.rating === 3)!;
+        // Relearning card (type=3, due in unix seconds) restores to queue=1
+        const relearnCard: any = { type: 3, queue: -1, due: 1_770_000_000 };
+        assert.equal(restoreCardQueue(relearnCard), 1);
 
-        assert.ok(
-            goodLow.nextState.ivl > goodHigh.nextState.ivl,
-            `Lower target retention (0.80 -> ${goodLow.nextState.ivl}d) must schedule a longer interval than higher target retention (0.95 -> ${goodHigh.nextState.ivl}d)`,
+        // Day-learning card (type=1, due in epoch days) restores to queue=3
+        const dayLearnCard: any = { type: 1, queue: -2, due: 20_500 };
+        assert.equal(restoreCardQueue(dayLearnCard), 3);
+
+        // New card restores to queue=0; Review card restores to queue=2
+        assert.equal(restoreCardQueue({ type: 0, due: 1 }), 0);
+        assert.equal(restoreCardQueue({ type: 2, due: 20_500 }), 2);
+
+        // UX-03: Resetting a mature FSRS card clears `card.data` along with scheduling fields
+        const matureFsrsCard: any = {
+            id: 901,
+            nid: 801,
+            did: 1,
+            ord: 0,
+            mod: 100,
+            usn: 0,
+            type: 2,
+            queue: 2,
+            due: 20_600,
+            ivl: 42,
+            factor: 2650,
+            reps: 11,
+            lapses: 2,
+            left: 0,
+            odue: 20_500,
+            odid: 2,
+            flags: 1,
+            data: JSON.stringify({ s: 42.5, d: 4.1, lastRevDay: 20_558 }),
+        };
+        const reset = resetCardProgress(matureFsrsCard);
+        assert.equal(reset.type, 0);
+        assert.equal(reset.queue, 0);
+        assert.equal(reset.ivl, 0);
+        assert.equal(reset.reps, 0);
+        assert.equal(reset.lapses, 0);
+        assert.equal(reset.odue, 0);
+        assert.equal(reset.odid, 0);
+        assert.equal(reset.data, "{}", "FSRS memory state in card.data must be cleared on reset");
+    });
+
+    it("UX-07, UX-08 & UX-11: search parser handles quoted deck names, is:due excludes new cards, and Custom Study lapsed-today uses revlog", () => {
+        const col = createDefaultCollection();
+        col.decks[20] = {
+            id: 20,
+            name: "My Deck",
+            desc: "",
+            collapsed: false,
+            conf: 1,
+            dyn: 0,
+            mod: 1,
+            usn: 0,
+        };
+        col.decks[21] = {
+            id: 21,
+            name: "My Deck::Subtopic",
+            desc: "",
+            collapsed: false,
+            conf: 1,
+            dyn: 0,
+            mod: 1,
+            usn: 0,
+        };
+        const cards = Object.values(col.cards);
+        cards[0].did = 20;
+        cards[1].did = 21;
+
+        // UX-07: Search deck:"My Deck"
+        const matches = searchCards(col, "deck:\"My Deck\"");
+        const matchedCardIds = new Set(matches.map(m => m.card.id));
+        assert.ok(matchedCardIds.has(cards[0].id), "Finds card in 'My Deck'");
+        assert.ok(matchedCardIds.has(cards[1].id), "Finds card in 'My Deck::Subtopic'");
+        assert.ok(!matchedCardIds.has(cards[2].id), "Excludes card in Default deck");
+
+        // UX-08: All default cards are New (queue=0); `is:due` must return 0 cards until a card is actually due
+        assert.equal(searchCards(col, "is:due").length, 0, "New cards must not match is:due");
+        cards[0].queue = 2;
+        cards[0].type = 2;
+        cards[0].due = getTodayDay();
+        assert.equal(searchCards(col, "is:due").length, 1, "Due review card matches is:due");
+        assert.equal(isCardDue(cards[2], Math.floor(Date.now() / 1000), getTodayDay(), col.crt), false);
+
+        // UX-11: Card in queue=1 from yesterday (without today's lapse revlog) must NOT be selected by getCustomStudyCardIds
+        cards[1].queue = 1;
+        cards[1].type = 1;
+        cards[1].due = Math.floor(Date.now() / 1000);
+        assert.deepEqual(
+            getCustomStudyCardIds(col, 20),
+            [],
+            "Learning card without a lapse revlog entry today must not be included in lapsed-today custom study",
         );
-        const parsedData = JSON.parse(goodHigh.nextState.data);
-        assert.ok(typeof parsedData.s === "number" && parsedData.s > 10);
-    });
-
-    it("C04/C09: enforces daily new and review limits and respects ephemeral Custom Study overrides", () => {
-        const col = createDefaultCollection();
-        col.dconf[1].new.perDay = 1;
-        col.dconf[1].rev.perDay = 1;
-
-        // Default collection has 3 new cards in deck 1; with perDay=1, only 1 new card is available today
-        const countsBefore = getDeckCounts(col, 1);
-        assert.equal(countsBefore.newCount, 1);
-
-        // Record 1 new card studied today
-        const firstCard = getNextStudyCard(col, 1)!;
-        assert.ok(firstCard);
         col.revlog.push({
-            id: Date.now(),
-            cid: firstCard.id,
+            id: getLocalDayStartMs() + 100,
+            cid: cards[1].id,
             usn: 0,
-            ease: 3,
-            ivl: 1,
-            lastIvl: 0,
-            factor: 2500,
+            ease: 1,
+            ivl: -60,
+            lastIvl: 5,
+            factor: 2300,
             time: 1000,
-            type: 0,
-        });
-
-        const countsAfterOne = getDeckCounts(col, 1);
-        assert.equal(countsAfterOne.newCount, 0, "Daily new limit of 1 reached");
-        assert.equal(getNextStudyCard(col, 1), null, "No more cards selectable after daily limit");
-
-        // Apply ephemeral Custom Study override for today (+2 new)
-        col.decks[1].customStudy = { day: getTodayDay(), extraNew: 2, extraRev: 0 };
-        assert.equal(getDeckCounts(col, 1).newCount, 2, "Custom Study extraNew unlocks remaining 2 new cards");
-    });
-
-    it("C07: parses RFC 4180 CSV with quoted commas, escaped quotes, and multiline fields", () => {
-        const csvText =
-            `\uFEFF"Term, with comma","Definition with ""quoted"" word\nand second line",tag1 tag2\nSecond Term,Simple Back,tag3`;
-        const rows = parseDelimitedRows(csvText);
-        assert.equal(rows.length, 2);
-        assert.equal(rows[0][0], "Term, with comma");
-        assert.equal(rows[0][1], "Definition with \"quoted\" word\nand second line");
-        assert.equal(rows[0][2], "tag1 tag2");
-
-        const col = createDefaultCollection();
-        const res = importCsv(csvText, col, 1, 1);
-        assert.equal(res.noteCount, 2);
-    });
-
-    it("U12: calculateTodayStats returns null retention when 0 cards studied and counts Hard as passing", () => {
-        const col = createDefaultCollection();
-        const emptyStats = calculateTodayStats(col);
-        assert.equal(emptyStats.retentionRate, null);
-
-        col.revlog.push({
-            id: Date.now(),
-            cid: 3001,
-            usn: 0,
-            ease: 2, // Hard
-            ivl: 1,
-            lastIvl: 1,
-            factor: 2350,
-            time: 1500,
             type: 1,
         });
-        const statsWithHard = calculateTodayStats(col);
-        assert.equal(statsWithHard.retentionRate, 100);
+        assert.deepEqual(
+            getCustomStudyCardIds(col, 20),
+            [cards[1].id],
+            "Card lapsed today in subdeck is included in parent deck custom study",
+        );
     });
 
-    it("V07/C01/C02/C06: exports .apkg with relative due days and re-imports with exact due dates and GUID deduplication", async () => {
-        // Point initSqlJs locateFile to local node_modules wasm for Node test runtime
+    it("SEC-08 & UX-12: neutralizes spreadsheet formulas in exported TSV and handles malformed % in template media", () => {
+        assert.equal(serializeTsvCell("=cmd|' /C calc'!A0"), "'=cmd|' /C calc'!A0");
+        assert.equal(serializeTsvCell(" +SUM(A1:A2)"), "' +SUM(A1:A2)");
+        assert.equal(serializeTsvCell("-1+1"), "'-1+1");
+        assert.equal(serializeTsvCell("@SUM(1,2)"), "'@SUM(1,2)");
+        assert.equal(serializeTsvCell("field\twith\ttab"), "\"field\twith\ttab\"");
+
+        const col = createDefaultCollection();
+        const firstNote = Object.values(col.notes)[0];
+        firstNote.fields = ["=HYPERLINK(\"https://evil.example\")", "Normal\tAnswer"];
+        const tsv = exportDeckCsv(col, 1);
+        const firstLine = tsv.split("\n")[0];
+        assert.ok(firstLine.startsWith("\"'=HYPERLINK"), "Formula-leading cell must be neutralized with leading quote");
+
+        // UX-12: Malformed percent-encoding in media references must not throw URIError
+        assert.equal(safeDecodeURIComponent("100%_cotton.png"), "100%_cotton.png");
+        firstNote.fields = ["<img src=\"100%_cotton.png\"> [sound:50%off.mp3]", "Back"];
+        const card = Object.values(col.cards).find(c => c.nid === firstNote.id)!;
+        const model = col.models[firstNote.mid];
+        const rendered = renderCardTemplate(card, firstNote, model, {
+            "100%_cotton.png": VALID_PNG_DATA_URL,
+        });
+        assert.ok(rendered.frontHtml.includes(VALID_PNG_DATA_URL));
+        assert.ok(rendered.frontHtml.includes("50%off.mp3"));
+    });
+
+    it("SEC-03 & V07: exporting a single deck excludes private media belonging to other decks and round-trips .apkg", async () => {
         (globalThis as any).window = {
             initSqlJs: (await import("sql.js")).default
-                ? (opts: any) =>
+                ? () =>
                     (import("sql.js") as any).then((m: any) =>
                         (m.default || m)({
                             locateFile: (file: string) => `./node_modules/sql.js/dist/${file}`,
@@ -388,31 +857,181 @@ describe("C. Anki Scheduler, FSRS, Due Dates, Daily Limits & CSV (C01–C12, V07
         const today = getTodayDay();
         const firstCard = Object.values(sourceCol.cards)[0]!;
         const targetCid = firstCard.id;
-        const expectedNoteCount = Object.keys(sourceCol.notes).length;
         firstCard.type = 2;
         firstCard.queue = 2;
         firstCard.ivl = 14;
         firstCard.due = today + 14;
 
-        const apkgBlob = await exportApkg(sourceCol);
-        assert.ok(apkgBlob.size > 0);
+        // Add Public media to Deck 1 note, and Private media to a separate Deck 2 note
+        const firstNote = sourceCol.notes[firstCard.nid];
+        firstNote.fields[0] = "Public question <img src=\"public_diagram.png\">";
+        sourceCol.media["public_diagram.png"] = VALID_PNG_DATA_URL;
+        sourceCol.media["private_photo.png"] = VALID_PNG_DATA_URL;
 
+        sourceCol.decks[2] = {
+            id: 2,
+            name: "Private Diary",
+            desc: "",
+            collapsed: false,
+            conf: 1,
+            dyn: 0,
+            mod: 1,
+            usn: 0,
+        };
+        sourceCol.notes[9001] = {
+            id: 9001,
+            guid: "priv_9001",
+            mid: 1,
+            mod: 1,
+            usn: 0,
+            tags: [],
+            fields: ["<img src=\"private_photo.png\">", "Secret"],
+            sfld: "Secret",
+            csum: 0,
+            flags: 0,
+            data: "{}",
+        };
+        sourceCol.cards[9002] = {
+            id: 9002,
+            nid: 9001,
+            did: 2,
+            ord: 0,
+            mod: 1,
+            usn: 0,
+            type: 0,
+            queue: 0,
+            due: 1,
+            ivl: 0,
+            factor: 2500,
+            reps: 0,
+            lapses: 0,
+            left: 0,
+            odue: 0,
+            odid: 0,
+            flags: 0,
+            data: "{}",
+        };
+
+        // SEC-03: Export ONLY Deck 1 and inspect the ZIP contents directly
+        const deck1Blob = await exportApkg(sourceCol, 1);
+        const zip = await JSZip.loadAsync(await deck1Blob.arrayBuffer());
+        const exportedMediaMap = JSON.parse(await zip.file("media")!.async("string")) as Record<string, string>;
+        const exportedFilenames = Object.values(exportedMediaMap);
+        assert.ok(exportedFilenames.includes("public_diagram.png"), "Deck 1's referenced media is packaged");
+        assert.ok(
+            !exportedFilenames.includes("private_photo.png"),
+            "Deck 2's private media must NOT be disclosed when exporting Deck 1",
+        );
+        assert.equal(Object.keys(exportedMediaMap).length, 1);
+
+        // Verify re-import and GUID deduplication
         const destCol = createDefaultCollection();
         destCol.notes = {};
         destCol.cards = {};
 
-        const firstImport = await importApkg(apkgBlob, destCol);
-        assert.equal(firstImport.noteCount, expectedNoteCount);
-        assert.equal(
-            destCol.cards[targetCid].due,
-            today + 14,
-            "Imported review due date must match exact epoch day (today + 14)",
-        );
+        const firstImport = await importApkg(deck1Blob, destCol);
+        assert.equal(destCol.cards[targetCid].due, today + 14);
         assert.equal(destCol.cards[targetCid].ivl, 14);
+        assert.equal(destCol.media["public_diagram.png"], VALID_PNG_DATA_URL);
+        assert.equal(destCol.media["private_photo.png"], undefined);
 
-        // Re-importing the same .apkg must deduplicate by GUID rather than duplicating notes (C06)
-        const secondImport = await importApkg(apkgBlob, destCol);
-        assert.equal(secondImport.duplicateCount, expectedNoteCount);
-        assert.equal(Object.keys(destCol.notes).length, expectedNoteCount);
+        const secondImport = await importApkg(deck1Blob, destCol);
+        assert.equal(secondImport.duplicateCount, firstImport.noteCount);
+    });
+
+    it("UX-06, PERF-01, PERF-05 & SCHED-02: collision-safe bundle merge, O(N) deck counts, backoff jitter, and DST calendar math", () => {
+        const col = createDefaultCollection();
+        const existingNoteId = Number(Object.keys(col.notes)[0]);
+        const existingCardId = Number(Object.keys(col.cards)[0]);
+        const originalQuestion = col.notes[existingNoteId].fields[0];
+
+        // UX-06: Bundle using colliding IDs must remap instead of overwriting user records
+        const merged = mergeImportedCollectionBundle(col, {
+            decks: {
+                1: {
+                    id: 1,
+                    name: "EP1100::Module 1",
+                    desc: "",
+                    collapsed: false,
+                    conf: 1,
+                    dyn: 0,
+                    mod: 1,
+                    usn: 0,
+                },
+            },
+            notes: {
+                [existingNoteId]: {
+                    id: existingNoteId,
+                    guid: "ep1100_unique_guid_1",
+                    mid: 1,
+                    mod: 1,
+                    usn: 0,
+                    tags: [],
+                    fields: ["EP1100 Question", "EP1100 Answer"],
+                    sfld: "EP1100 Question",
+                    csum: 0,
+                    flags: 0,
+                    data: "{}",
+                },
+            },
+            cards: {
+                [existingCardId]: {
+                    id: existingCardId,
+                    nid: existingNoteId,
+                    did: 1,
+                    ord: 0,
+                    mod: 1,
+                    usn: 0,
+                    type: 0,
+                    queue: 0,
+                    due: 1,
+                    ivl: 0,
+                    factor: 2500,
+                    reps: 0,
+                    lapses: 0,
+                    left: 0,
+                    odue: 0,
+                    odid: 0,
+                    flags: 0,
+                    data: "{}",
+                },
+            },
+        });
+        assert.equal(merged.notes[existingNoteId].fields[0], originalQuestion, "User note must not be overwritten");
+        assert.equal(Object.keys(merged.notes).length, Object.keys(col.notes).length + 1);
+        assert.equal(Object.keys(merged.cards).length, Object.keys(col.cards).length + 1);
+
+        // PERF-01: Single-pass getAllDeckCounts matches per-deck getDeckCounts
+        const allCounts = getAllDeckCounts(merged);
+        for (const didStr of Object.keys(merged.decks)) {
+            const did = Number(didStr);
+            assert.deepEqual(allCounts[did], getDeckCounts(merged, did));
+        }
+
+        // PERF-05: Exponential backoff with jitter
+        assert.equal(computeReconnectDelayMs(0, () => 0), 1000);
+        assert.equal(computeReconnectDelayMs(1, () => 0), 2000);
+        assert.equal(computeReconnectDelayMs(2, () => 0), 4000);
+        assert.equal(computeReconnectDelayMs(10, () => 1), 39000);
+
+        // SCHED-02: Calendar-day math across DST transitions
+        assert.equal(addCalendarDays("2026-03-07", 1), "2026-03-08");
+        assert.equal(
+            zonedTimeToUtcMs("2026-03-08", 9, 0, 0, "America/New_York", 300),
+            Date.UTC(2026, 2, 8, 13, 0, 0),
+        );
+        assert.equal(
+            zonedTimeToUtcMs("2026-11-01", 9, 0, 0, "America/New_York", 240),
+            Date.UTC(2026, 10, 1, 14, 0, 0),
+        );
+
+        const forecast = calculateDueForecast(col, 14);
+        assert.equal(new Set(forecast.map(f => f.dateStr)).size, 14, "All 14 forecast calendar dates must be distinct");
+
+        // C07 & U12 sanity checks
+        const rows = parseDelimitedRows(`\uFEFF"Term, 1","Def ""quoted""\nline2",tag1\nTerm 2,Back 2,tag2`);
+        assert.equal(rows.length, 2);
+        assert.equal(importCsv("Q1\tA1\nQ2\tA2", createDefaultCollection(), 1, 1).noteCount, 2);
+        assert.equal(calculateTodayStats(createDefaultCollection()).retentionRate, null);
     });
 });

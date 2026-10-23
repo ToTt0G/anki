@@ -27,6 +27,19 @@ function makeOpId(): string {
     return `op_${generateUniqueId()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/**
+ * Exponential backoff with random jitter (0–30%) for WebSocket reconnects (PERF-05).
+ */
+export function computeReconnectDelayMs(
+    attempt: number,
+    randomFn: () => number = Math.random,
+): number {
+    const safeAttempt = Math.max(0, Math.min(attempt, 5));
+    const baseMs = Math.min(30_000, 1_000 * Math.pow(2, safeAttempt));
+    const jitterMs = Math.floor(baseMs * 0.3 * Math.max(0, Math.min(1, randomFn())));
+    return baseMs + jitterMs;
+}
+
 function userMessageForOpError(kind: OpErrorKind | undefined, rawError: string): string {
     switch (kind) {
         case "id_collision":
@@ -38,6 +51,19 @@ function userMessageForOpError(kind: OpErrorKind | undefined, rawError: string):
         default:
             return rawError;
     }
+}
+
+function cloneCollection(col: Collection): Collection {
+    return {
+        ...col,
+        decks: { ...(col.decks || {}) },
+        dconf: { ...(col.dconf || {}) },
+        models: { ...(col.models || {}) },
+        notes: { ...(col.notes || {}) },
+        cards: { ...(col.cards || {}) },
+        revlog: [...(col.revlog || [])],
+        media: { ...(col.media || {}) },
+    };
 }
 
 /**
@@ -60,6 +86,22 @@ export function applyClientMutationLocally(col: Collection, msg: ClientMessage):
             col.revlog.push(msg.revlogEntry);
         }
     } else if (msg.type === "upsert_deck") {
+        // UX-01: When renaming a parent deck, also rename any `Parent::Child` subdecks
+        const existing = col.decks[msg.deck.id];
+        if (existing && existing.name && existing.name !== msg.deck.name) {
+            const oldPrefix = `${existing.name}::`;
+            const newPrefix = `${msg.deck.name}::`;
+            const nowSec = Math.floor(Date.now() / 1000);
+            for (const d of Object.values(col.decks)) {
+                if (d.id !== msg.deck.id && d.name.startsWith(oldPrefix)) {
+                    col.decks[d.id] = {
+                        ...d,
+                        name: `${newPrefix}${d.name.slice(oldPrefix.length)}`,
+                        mod: nowSec,
+                    };
+                }
+            }
+        }
         col.decks[msg.deck.id] = msg.deck;
     } else if (msg.type === "delete_deck") {
         const target = col.decks[msg.deckId];
@@ -96,8 +138,9 @@ export function applyClientMutationLocally(col: Collection, msg: ClientMessage):
             col.cards[c.id] = c;
         }
     } else if (msg.type === "delete_note") {
+        // DATA-02: Only delete cards whose authoritative `nid` matches `msg.noteId`
         for (const card of Object.values(col.cards)) {
-            if (card.nid === msg.noteId || msg.cardIds?.includes(card.id)) {
+            if (card.nid === msg.noteId) {
                 delete col.cards[card.id];
             }
         }
@@ -107,7 +150,16 @@ export function applyClientMutationLocally(col: Collection, msg: ClientMessage):
     } else if (msg.type === "save_media") {
         col.media[msg.filename] = msg.dataUrl;
     } else if (msg.type === "import_collection") {
-        Object.assign(col, msg.collection);
+        col.id = msg.collection.id ?? col.id;
+        col.crt = msg.collection.crt ?? col.crt;
+        col.mod = msg.collection.mod ?? col.mod;
+        col.decks = { ...(msg.collection.decks || {}) };
+        col.dconf = { ...(msg.collection.dconf || {}) };
+        col.models = { ...(msg.collection.models || {}) };
+        col.notes = { ...(msg.collection.notes || {}) };
+        col.cards = { ...(msg.collection.cards || {}) };
+        col.revlog = [...(msg.collection.revlog || [])];
+        col.media = { ...(msg.collection.media || {}) };
     }
 }
 
@@ -119,6 +171,8 @@ export class SyncClient {
     private onStatusChanged: (status: SyncStatus) => void;
     private onError?: (err: string) => void;
     private col: Collection;
+    /** Last authoritative server/hydrated base collection before unacknowledged optimistic ops (DATA-06). */
+    private serverBaseCol: Collection;
     private revision: number = 0;
     private generation: string = "0";
     private messageQueue: Promise<void> = Promise.resolve();
@@ -127,6 +181,8 @@ export class SyncClient {
     private hasBackup: boolean = false;
     private pendingOutboxCount: number = 0;
     private reconnectTimer: any = null;
+    private reconnectAttempts: number = 0;
+    private onlineHandler: (() => void) | null = null;
     private status: SyncStatus = "offline";
     private disposed: boolean = false;
     /** Resolves once offline state (collection + outbox) has been fully loaded (D01). */
@@ -134,6 +190,8 @@ export class SyncClient {
     private hydrated: boolean = false;
     /** Set when a deletion tombstone was observed: automatic re-seeding is disabled (S10). */
     private autoSeedBlocked: boolean = false;
+    /** Duplicate-submit guard for rapid card answers (UX-09). */
+    private lastAnswerGuard: { key: string; at: number } | null = null;
 
     constructor(
         userId: string,
@@ -156,8 +214,20 @@ export class SyncClient {
             // ignore
         }
 
-        this.col = createDefaultCollection();
+        const initial = createDefaultCollection();
+        this.col = initial;
+        this.serverBaseCol = cloneCollection(initial);
         this.hydration = this.hydrateFromStorage();
+
+        if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+            this.onlineHandler = () => {
+                if (!this.disposed && this.status === "offline") {
+                    this.reconnectAttempts = 0;
+                    void this.connect();
+                }
+            };
+            window.addEventListener("online", this.onlineHandler);
+        }
     }
 
     private async hydrateFromStorage() {
@@ -171,7 +241,8 @@ export class SyncClient {
         }
 
         if (loaded) {
-            this.col = loaded.collection;
+            this.col = cloneCollection(loaded.collection);
+            this.serverBaseCol = cloneCollection(loaded.collection);
             this.revision = loaded.revision;
             this.generation = loaded.generation ?? "0";
             this.initialized = loaded.initialized;
@@ -221,11 +292,15 @@ export class SyncClient {
         return ops.filter(op => (op.status ?? "pending") === "conflict");
     }
 
-    public async retryConflictedOp(opId: string): Promise<void> {
+    public async retryConflictedOp(opId: string, forceOverwrite: boolean = true): Promise<void> {
         const entry = (await getOutboxOps(this.userId)).find(op => op.opId === opId && op.status === "conflict");
         if (!entry) { return; }
         if (entry.msg.type === "import_collection") {
-            entry.msg = { ...entry.msg, expectedRevision: this.revision };
+            entry.msg = {
+                ...entry.msg,
+                expectedRevision: this.revision,
+                forceOverwrite,
+            };
         }
         const result = await enqueueOutboxOp({ ...entry, status: "pending", error: undefined });
         if (!result.durable) {
@@ -243,9 +318,22 @@ export class SyncClient {
 
     public async discardConflictedOp(opId: string): Promise<void> {
         await removeOutboxOp(this.userId, opId);
+        await this.reconcileLocalFromBase();
         await this.refreshPendingOutboxCount();
-        // Reconcile with authoritative state so any partial optimistic effect is replaced.
         this.sendDirect({ type: "init", force: true });
+    }
+
+    /**
+     * Rebuild `this.col` from `this.serverBaseCol` plus only pending (non-conflicted)
+     * outbox operations so rejected optimistic mutations are immediately rolled back (DATA-06).
+     */
+    private async reconcileLocalFromBase(): Promise<void> {
+        const pendingOps = (await getOutboxOps(this.userId)).filter(isPendingOutboxEntry);
+        const rebuilt = cloneCollection(this.serverBaseCol);
+        for (const op of pendingOps) {
+            applyClientMutationLocally(rebuilt, op.msg);
+        }
+        this.saveLocalCollection(rebuilt, true);
     }
 
     public saveLocalCollection(col: Collection, includeMedia: boolean = false) {
@@ -269,9 +357,6 @@ export class SyncClient {
 
     public async connect() {
         if (this.disposed) { return; }
-        // Offline initialization must fully finish BEFORE connecting or processing remote
-        // state, otherwise a fast server response could be applied over state that is still
-        // mid-load, and hydration could then clobber it with older local data (D01 race).
         await this.ensureHydrated();
         if (this.disposed) { return; }
         if (
@@ -320,8 +405,8 @@ export class SyncClient {
                     this.ws?.close();
                     return;
                 }
+                this.reconnectAttempts = 0;
                 this.setStatus("connected");
-                // Request authoritative server state and then flush any queued offline ops (D01, D08)
                 this.sendDirect({
                     type: "init",
                     lastMod: this.col.mod,
@@ -380,7 +465,7 @@ export class SyncClient {
     }
 
     /**
-     * Restore the server's pre-import backup snapshot (D07, U14).
+     * Restore the server's pre-import backup snapshot (D07, U14, DATA-10).
      */
     public async restoreServerBackup(): Promise<boolean> {
         try {
@@ -395,7 +480,6 @@ export class SyncClient {
                 body: JSON.stringify({ expectedRevision: this.revision }),
             });
             if (res.status === 409) {
-                // Another device restored concurrently: reconcile with authoritative state.
                 this.sendDirect({ type: "init", force: true });
                 return false;
             }
@@ -404,6 +488,7 @@ export class SyncClient {
             if (data.collection) {
                 this.revision = data.revision || this.revision + 1;
                 this.initialized = true;
+                this.serverBaseCol = cloneCollection(data.collection);
                 this.saveLocalCollection(data.collection, true);
             }
             return true;
@@ -412,15 +497,33 @@ export class SyncClient {
         }
     }
 
-    public async clearOfflineStorage(): Promise<void> {
+    /**
+     * Clear offline storage on this device. Refuses by default when unsynced outbox operations
+     * are pending unless `forceDiscardPending: true` is explicitly passed (DATA-05).
+     */
+    public async clearOfflineStorage(options?: { forceDiscardPending?: boolean }): Promise<void> {
+        if (!options?.forceDiscardPending) {
+            const ops = await getOutboxOps(this.userId);
+            const pendingCount = ops.filter(isPendingOutboxEntry).length;
+            if (pendingCount > 0) {
+                throw new Error(
+                    `Cannot clear offline cache while ${pendingCount} unsynced ${
+                        pendingCount === 1 ? "change is" : "changes are"
+                    } pending without confirmation.`,
+                );
+            }
+        }
         await clearUserOfflineData(this.userId);
         this.pendingOutboxCount = 0;
     }
 
     public disconnect() {
         this.disposed = true;
-        // Let anyone still awaiting hydration observe disposal instead of hanging.
         this.hydrated = true;
+        if (this.onlineHandler && typeof window !== "undefined" && typeof window.removeEventListener === "function") {
+            window.removeEventListener("online", this.onlineHandler);
+            this.onlineHandler = null;
+        }
         if (this.reconnectTimer) {
             clearTimeout(this.reconnectTimer);
             this.reconnectTimer = null;
@@ -449,17 +552,16 @@ export class SyncClient {
     private scheduleReconnect() {
         if (this.disposed) { return; }
         if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); }
+        const delayMs = computeReconnectDelayMs(this.reconnectAttempts++);
         this.reconnectTimer = setTimeout(() => {
             this.connect();
-        }, 3000);
+        }, delayMs);
     }
 
     private sendDirect(msg: ClientMessage) {
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
             const serialized = JSON.stringify(msg);
             if (msg.type === "import_collection" && new TextEncoder().encode(serialized).length > 512_000) {
-                // Durable Object WebSocket messages have a size limit. Keep a large import
-                // atomic (including its media) by using the same CAS/idempotency contract over HTTP.
                 void this.sendLargeImport(msg);
             } else {
                 this.ws.send(serialized);
@@ -479,6 +581,7 @@ export class SyncClient {
                 body: JSON.stringify({
                     ...msg.collection,
                     expectedRevision: msg.expectedRevision,
+                    forceOverwrite: msg.forceOverwrite,
                     opId: msg.opId,
                     generation: msg.generation,
                     seedOnUninitialized: msg.seedOnUninitialized,
@@ -506,36 +609,16 @@ export class SyncClient {
         }
     }
 
-    /**
-     * Shallow per-map copy of the collection for optimistic-update rollback (D01/D14).
-     * Works because applyClientMutationLocally is replace-only: entity objects are swapped
-     * wholesale, and `mod`-stamp maps now hold pre-mutation references.
-     */
     private snapshotCollectionForRollback(): Collection {
-        return {
-            ...this.col,
-            decks: { ...this.col.decks },
-            dconf: { ...this.col.dconf },
-            models: { ...this.col.models },
-            notes: { ...this.col.notes },
-            cards: { ...this.col.cards },
-            revlog: [...(this.col.revlog || [])],
-            media: { ...this.col.media },
-        };
+        return cloneCollection(this.col);
     }
 
     private rollbackToSnapshot(snapshot: Collection): void {
         this.saveLocalCollection(snapshot);
     }
 
-    /**
-     * Apply a mutation locally (optimistic) and enqueue it durably. If even the in-memory
-     * fallback queue cannot hold the operation, the optimistic edit is rolled back so it is
-     * never silently lost (D01/D14).
-     */
     private applyAndQueue(msg: ClientMessage & { opId: string }) {
         if (!this.hydrated) {
-            // Order matters: never mutate a collection whose offline state is still loading.
             void this.hydration.then(() => {
                 if (!this.disposed) { this.applyAndQueue(msg); }
             });
@@ -547,11 +630,6 @@ export class SyncClient {
         void this.queueAndSend(msg, snapshot);
     }
 
-    /**
-     * Persist mutation to the IndexedDB outbox first, then transmit if the WebSocket is open (D01).
-     * Persistence failure is surfaced explicitly; the pending count is only incremented once the
-     * write committed, so we never claim durable offline saving prematurely (D14).
-     */
     private async queueAndSend(msg: ClientMessage & { opId: string }, snapshot?: Collection) {
         msg = structuredClone(msg);
         await this.ensureHydrated();
@@ -568,7 +646,6 @@ export class SyncClient {
 
         if (this.disposed) {
             if (!res.ok && snapshot) {
-                // Nothing could persist locally and the socket is gone: roll the optimistic edit back.
                 this.rollbackToSnapshot(snapshot);
             }
             return;
@@ -585,8 +662,6 @@ export class SyncClient {
         }
 
         if (!res.durable) {
-            // The op is alive in session memory but NOT durably persisted. Make that explicit
-            // instead of claiming durable offline saving (D01/D14).
             this.onError?.(
                 `Offline persistence unavailable (${res.error}). The change is queued for this session only and may be lost if the app closes; reconnect and sync to flush it.`,
             );
@@ -612,6 +687,11 @@ export class SyncClient {
         if (msg.type === "ack") {
             this.revision = Math.max(this.revision, msg.revision);
             this.initialized = true;
+            const allOps = await getOutboxOps(this.userId);
+            const ackedOp = allOps.find(o => o.opId === msg.opId);
+            if (ackedOp) {
+                applyClientMutationLocally(this.serverBaseCol, ackedOp.msg);
+            }
             await removeOutboxOp(this.userId, msg.opId);
             await this.refreshPendingOutboxCount();
             return;
@@ -625,39 +705,29 @@ export class SyncClient {
         if (msg.type === "full_state") {
             const serverGeneration = msg.generation ?? "0";
             if (serverGeneration !== this.generation) {
-                await this.clearOfflineStorage();
-                this.col = createDefaultCollection();
+                await this.clearOfflineStorage({ forceDiscardPending: true });
+                const fresh = createDefaultCollection();
+                this.col = fresh;
+                this.serverBaseCol = cloneCollection(fresh);
                 this.generation = serverGeneration;
                 this.autoSeedBlocked = Boolean(msg.deleted);
             }
             this.hasBackup = Boolean(msg.hasBackup);
 
-            // S10: the account's data was deleted on some device and a tombstone is active.
-            // Drop the offline copy and block automatic re-seeding so deleted data cannot be
-            // resurrected by this device.
             if (msg.deleted && !msg.initialized) {
                 await this.handleDeletedCollection(msg.revision ?? 0);
                 return;
             }
 
-            // Use explicit server `initialized` flag, never a card/deck count heuristic (D02)
             if (msg.initialized) {
                 this.revision = msg.revision || 0;
                 this.initialized = true;
+                this.serverBaseCol = cloneCollection(msg.collection);
 
-                // Re-apply any unacknowledged PENDING offline outbox operations on top of the
-                // server base state (D01, D08). Conflicted ops are excluded until resolved.
+                // Re-apply only unacknowledged PENDING offline outbox operations on top of the
+                // authoritative server base state (DATA-06). Conflicted ops are excluded.
                 const pendingOps = (await getOutboxOps(this.userId)).filter(isPendingOutboxEntry);
-                const mergedCol: Collection = {
-                    ...msg.collection,
-                    decks: { ...(msg.collection.decks || {}) },
-                    dconf: { ...(msg.collection.dconf || {}) },
-                    models: { ...(msg.collection.models || {}) },
-                    notes: { ...(msg.collection.notes || {}) },
-                    cards: { ...(msg.collection.cards || {}) },
-                    revlog: [...(msg.collection.revlog || [])],
-                    media: { ...this.col.media, ...(msg.collection.media || {}) },
-                };
+                const mergedCol = cloneCollection(msg.collection);
                 for (const op of pendingOps) {
                     applyClientMutationLocally(mergedCol, op.msg);
                 }
@@ -665,14 +735,19 @@ export class SyncClient {
                 await this.drainOutbox();
             } else {
                 if (msg.deleted || this.autoSeedBlocked) {
-                    // Tombstone active: refuse to seed the freed server from local data (S10).
                     await this.handleDeletedCollection(msg.revision ?? 0);
                     return;
                 }
 
-                // Server Durable Object is genuinely brand-new and uninitialized: seed it once,
-                // version-anchored to an empty server revision (D02) and flagged as an automatic
-                // seed so the server can refuse it if the collection was deleted meanwhile (S10).
+                // DATA-06: Before auto-seeding an uninitialized server, rebuild from
+                // `serverBaseCol` + pending (non-conflicted) ops so any rejected op is excluded.
+                const allOps = await getOutboxOps(this.userId);
+                const hasConflicts = allOps.some(op => (op.status ?? "pending") === "conflict");
+                if (hasConflicts) {
+                    await this.reconcileLocalFromBase();
+                    return;
+                }
+
                 this.initialized = true;
                 await this.queueAndSend({
                     type: "import_collection",
@@ -690,61 +765,79 @@ export class SyncClient {
         }
 
         if (msg.type === "answer_card") {
-            const card = this.col.cards[msg.cardId];
-            if (card) {
-                this.col.cards[msg.cardId] = {
-                    ...card,
-                    ...msg.nextState,
-                    mod: Math.floor(Date.now() / 1000),
-                };
-            }
-            if (!this.col.revlog.some(r => r.id === msg.revlogEntry.id)) {
-                this.col.revlog.push(msg.revlogEntry);
-            }
+            const applyAnswer = (target: Collection) => {
+                const card = target.cards[msg.cardId];
+                if (card) {
+                    target.cards[msg.cardId] = {
+                        ...card,
+                        ...msg.nextState,
+                        mod: Math.floor(Date.now() / 1000),
+                    };
+                }
+                if (!target.revlog.some(r => r.id === msg.revlogEntry.id)) {
+                    target.revlog.push(msg.revlogEntry);
+                }
+            };
+            applyAnswer(this.serverBaseCol);
+            applyAnswer(this.col);
             this.saveLocalCollection({ ...this.col });
             return;
         }
 
         if (msg.type === "upsert_deck") {
+            this.serverBaseCol.decks[msg.deck.id] = msg.deck;
             this.col.decks[msg.deck.id] = msg.deck;
+            if (msg.renamedSubdecks) {
+                for (const sub of msg.renamedSubdecks) {
+                    this.serverBaseCol.decks[sub.id] = sub;
+                    this.col.decks[sub.id] = sub;
+                }
+            }
             this.saveLocalCollection({ ...this.col });
             return;
         }
 
         if (msg.type === "delete_deck") {
-            const deckIds = msg.deletedDeckIds || [msg.deckId];
-            for (const did of deckIds) {
-                if (did !== 1) { delete this.col.decks[did]; }
-            }
-            if (msg.deletedCardIds) {
-                for (const cid of msg.deletedCardIds) {
-                    delete this.col.cards[cid];
+            const applyDeleteDeck = (target: Collection) => {
+                const deckIds = msg.deletedDeckIds || [msg.deckId];
+                for (const did of deckIds) {
+                    if (did !== 1) { delete target.decks[did]; }
                 }
-            } else {
-                for (const card of Object.values(this.col.cards)) {
-                    if (deckIds.includes(card.did)) {
-                        delete this.col.cards[card.id];
+                if (msg.deletedCardIds) {
+                    for (const cid of msg.deletedCardIds) {
+                        delete target.cards[cid];
+                    }
+                } else {
+                    for (const card of Object.values(target.cards)) {
+                        if (deckIds.includes(card.did)) {
+                            delete target.cards[card.id];
+                        }
                     }
                 }
-            }
-            if (msg.deletedNoteIds) {
-                for (const nid of msg.deletedNoteIds) {
-                    delete this.col.notes[nid];
+                if (msg.deletedNoteIds) {
+                    for (const nid of msg.deletedNoteIds) {
+                        delete target.notes[nid];
+                    }
                 }
-            }
+            };
+            applyDeleteDeck(this.serverBaseCol);
+            applyDeleteDeck(this.col);
             this.saveLocalCollection({ ...this.col });
             return;
         }
 
         if (msg.type === "upsert_deck_config") {
+            this.serverBaseCol.dconf[msg.dconf.id] = msg.dconf;
             this.col.dconf[msg.dconf.id] = msg.dconf;
             this.saveLocalCollection({ ...this.col });
             return;
         }
 
         if (msg.type === "upsert_note") {
+            this.serverBaseCol.notes[msg.note.id] = msg.note;
             this.col.notes[msg.note.id] = msg.note;
             for (const card of msg.cards) {
+                this.serverBaseCol.cards[card.id] = card;
                 this.col.cards[card.id] = card;
             }
             this.saveLocalCollection({ ...this.col });
@@ -752,26 +845,32 @@ export class SyncClient {
         }
 
         if (msg.type === "delete_note") {
-            delete this.col.notes[msg.noteId];
-            for (const cid of msg.cardIds || []) {
-                delete this.col.cards[cid];
-            }
-            for (const c of Object.values(this.col.cards)) {
-                if (c.nid === msg.noteId) {
-                    delete this.col.cards[c.id];
+            const applyDeleteNote = (target: Collection) => {
+                delete target.notes[msg.noteId];
+                for (const cid of msg.cardIds || []) {
+                    delete target.cards[cid];
                 }
-            }
+                for (const c of Object.values(target.cards)) {
+                    if (c.nid === msg.noteId) {
+                        delete target.cards[c.id];
+                    }
+                }
+            };
+            applyDeleteNote(this.serverBaseCol);
+            applyDeleteNote(this.col);
             this.saveLocalCollection({ ...this.col });
             return;
         }
 
         if (msg.type === "update_card") {
+            this.serverBaseCol.cards[msg.card.id] = msg.card;
             this.col.cards[msg.card.id] = msg.card;
             this.saveLocalCollection({ ...this.col });
             return;
         }
 
         if (msg.type === "save_media") {
+            this.serverBaseCol.media[msg.filename] = msg.dataUrl;
             this.col.media[msg.filename] = msg.dataUrl;
             saveMediaItemToIdb(this.userId, msg.filename, msg.dataUrl);
             this.onCollectionUpdated({ ...this.col });
@@ -780,14 +879,17 @@ export class SyncClient {
 
         if (msg.type === "import_collection") {
             this.hasBackup = true;
+            this.serverBaseCol = cloneCollection(msg.collection);
             this.saveLocalCollection(msg.collection, true);
             return;
         }
     }
 
     private async handleDeletedCollection(revision: number): Promise<void> {
-        await this.clearOfflineStorage();
-        this.col = createDefaultCollection();
+        await this.clearOfflineStorage({ forceDiscardPending: true });
+        const fresh = createDefaultCollection();
+        this.col = fresh;
+        this.serverBaseCol = cloneCollection(fresh);
         this.revision = revision;
         this.initialized = false;
         this.autoSeedBlocked = true;
@@ -796,8 +898,9 @@ export class SyncClient {
     }
 
     /**
-     * Server rejected a queued operation (D13). Park it in the persistent conflict queue
-     * (retry/discard from Settings) and reconcile local state with the authoritative server.
+     * Server rejected a queued operation (DATA-06, D13). Park it in the persistent conflict queue,
+     * immediately roll back optimistic state to `serverBaseCol` + remaining pending ops, and
+     * request an authoritative `init` snapshot from the server.
      */
     private async handleOpError(msg: Extract<ServerMessage, { type: "op_error" }>) {
         const kind = msg.kind || "internal";
@@ -812,6 +915,7 @@ export class SyncClient {
         try {
             if (msg.opId) {
                 await updateOutboxOpStatus(this.userId, msg.opId, "conflict", rawError);
+                await this.reconcileLocalFromBase();
                 await this.refreshPendingOutboxCount();
             }
             this.onError?.(userMessageForOpError(kind, rawError));
@@ -822,6 +926,14 @@ export class SyncClient {
 
     // Client mutation actions (optimistic local update + persistent IndexedDB outbox)
     public answerCard(cardId: number, nextState: Partial<Card>, revlogEntry: RevlogEntry) {
+        // UX-09: Guard against rapid duplicate answers for the exact same card turn
+        const now = Date.now();
+        const guardKey = `${cardId}:${revlogEntry.lastIvl}:${nextState.reps ?? ""}`;
+        if (this.lastAnswerGuard && this.lastAnswerGuard.key === guardKey && now - this.lastAnswerGuard.at < 400) {
+            return;
+        }
+        this.lastAnswerGuard = { key: guardKey, at: now };
+
         const opId = makeOpId();
         const msg: ClientMessage & { opId: string } = {
             type: "answer_card",
@@ -879,7 +991,7 @@ export class SyncClient {
         this.applyAndQueue({ type: "save_media", opId: makeOpId(), filename, dataUrl });
     }
 
-    public importCollection(col: Collection) {
+    public importCollection(col: Collection, forceOverwrite?: boolean) {
         const imported = structuredClone(col);
         void this.hydration.then(() => {
             if (this.disposed) { return; }
@@ -889,6 +1001,7 @@ export class SyncClient {
                 type: "import_collection",
                 opId: makeOpId(),
                 expectedRevision: this.revision,
+                forceOverwrite,
                 collection: imported,
             });
         });

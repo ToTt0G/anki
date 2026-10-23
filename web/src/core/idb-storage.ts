@@ -170,9 +170,23 @@ export async function saveCollectionToIdb(
             const tx = db.transaction(stores, "readwrite");
             tx.objectStore(STORE_COLLECTIONS).put(record);
 
-            if (includeMedia && media) {
+            if (includeMedia) {
                 const mediaStore = tx.objectStore(STORE_MEDIA);
-                for (const [filename, dataUrl] of Object.entries(media)) {
+                const currentMedia = media || {};
+                const validIds = new Set(Object.keys(currentMedia).map(fn => `${userId}:${fn}`));
+                const mediaIdx = mediaStore.index("by_user");
+                const cursorReq = mediaIdx.openKeyCursor(IDBKeyRange.only(userId));
+                cursorReq.onsuccess = () => {
+                    const cursor = cursorReq.result;
+                    if (cursor) {
+                        const pk = String(cursor.primaryKey);
+                        if (!validIds.has(pk)) {
+                            mediaStore.delete(cursor.primaryKey);
+                        }
+                        cursor.continue();
+                    }
+                };
+                for (const [filename, dataUrl] of Object.entries(currentMedia)) {
                     mediaStore.put({
                         id: `${userId}:${filename}`,
                         userId,
@@ -346,8 +360,37 @@ export async function getOutboxOps(userId: string): Promise<OutboxEntry[]> {
     }
 }
 
+const SIGN_OUT_CLEANUP_PREF_KEY = "klanki_clear_data_on_signout";
+let memorySignOutCleanupPref = true;
+
 /**
- * Clear all offline data (collection, media, and outbox) for a specific user or all users (S07).
+ * Shared-device privacy policy (SEC-04): defaults to `true` so signing out removes
+ * downloaded study collections, media, and offline outbox records from browser storage.
+ */
+export function getClearDataOnSignOutPreference(): boolean {
+    try {
+        if (typeof localStorage === "undefined") { return memorySignOutCleanupPref; }
+        const val = localStorage.getItem(SIGN_OUT_CLEANUP_PREF_KEY);
+        if (val === null) { return memorySignOutCleanupPref; }
+        return val !== "false";
+    } catch {
+        return memorySignOutCleanupPref;
+    }
+}
+
+export function setClearDataOnSignOutPreference(enabled: boolean): void {
+    memorySignOutCleanupPref = enabled;
+    try {
+        if (typeof localStorage !== "undefined") {
+            localStorage.setItem(SIGN_OUT_CLEANUP_PREF_KEY, enabled ? "true" : "false");
+        }
+    } catch {
+        // ignore
+    }
+}
+
+/**
+ * Clear all offline data (collection, media, and outbox) for a specific user or all users (S07, SEC-04).
  */
 export async function clearUserOfflineData(userId?: string): Promise<void> {
     try {

@@ -6,7 +6,7 @@ import { Card, Collection, Deck, DeckConfig, Note, RevlogEntry } from "../src/co
 export type ClientMessage =
     & { generation?: string }
     & (
-        | { type: "init"; lastMod?: number; lastRevision?: number; force?: boolean }
+        | { type: "init"; lastMod?: number; lastRevision?: number; force?: boolean; knownMedia?: string[] }
         | {
             type: "answer_card";
             opId?: string;
@@ -74,7 +74,7 @@ export type ServerMessage =
         revlogEntry: RevlogEntry;
         revision?: number;
     }
-    | { type: "upsert_deck"; opId?: string; deck: Deck; revision?: number }
+    | { type: "upsert_deck"; opId?: string; deck: Deck; renamedSubdecks?: Deck[]; revision?: number }
     | {
         type: "delete_deck";
         opId?: string;

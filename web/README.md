@@ -40,4 +40,4 @@ just web-deploy
 
 ## License & Attribution
 
-This project is a fork of [Anki](https://github.com/ankitects/anki) and is distributed under the **GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later)** (see root [`LICENSE`](../LICENSE) and [`SECURITY.md`](../SECURITY.md)). Complete source code is publicly available at [https://github.com/ToTt0G/anki](https://github.com/ToTt0G/anki).
+This project is a fork of [Anki](https://github.com/ankitects/anki) and is distributed under the **GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later)** (see root [`LICENSE`](../LICENSE), [`SECURITY.md`](../SECURITY.md), and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for bundled vendor assets, dependencies, and EP1100 study deck attribution). Complete source code is publicly available at [https://github.com/ToTt0G/anki](https://github.com/ToTt0G/anki).

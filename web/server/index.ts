@@ -5,6 +5,7 @@ import {
     AuthEnv,
     isAllowedRequestOrigin,
     issueSignedWsTicket,
+    resolveWsTicketSigningKey,
     verifyClerkRequest,
     verifySignedWsTicket,
     withSecurityHeaders,
@@ -21,9 +22,62 @@ export interface Env extends AuthEnv {
     VAPID_SUBJECT?: string;
 }
 
+const MAX_HTTP_API_BYTES = 64 * 1024; // 64 KB for standard API requests (SEC-09)
+const MAX_HTTP_IMPORT_BYTES = 25 * 1024 * 1024; // 25 MB for full collection import (SEC-09)
+
 function getUserStub(env: Env, userId: string): DurableObjectStub {
     const doId = env.ANKI_SYNC.idFromName(`user:${userId}`);
     return env.ANKI_SYNC.get(doId);
+}
+
+async function readBoundedBodyText(
+    request: Request,
+    maxBytes: number,
+): Promise<{ ok: true; text: string } | { ok: false; status: number; error: string }> {
+    const contentLengthHeader = request.headers.get("content-length") || request.headers.get("Content-Length");
+    if (contentLengthHeader) {
+        const declared = Number(contentLengthHeader);
+        if (Number.isFinite(declared) && declared > maxBytes) {
+            return {
+                ok: false,
+                status: 413,
+                error: `Request payload exceeds maximum allowed size (${maxBytes} bytes)`,
+            };
+        }
+    }
+    if (!request.body) {
+        return { ok: true, text: "" };
+    }
+    const reader = request.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) { break; }
+            if (value) {
+                total += value.byteLength;
+                if (total > maxBytes) {
+                    await reader.cancel().catch(() => {});
+                    return {
+                        ok: false,
+                        status: 413,
+                        error: `Request payload exceeds maximum allowed size (${maxBytes} bytes)`,
+                    };
+                }
+                chunks.push(value);
+            }
+        }
+    } finally {
+        reader.releaseLock();
+    }
+    const combined = new Uint8Array(total);
+    let offset = 0;
+    for (const c of chunks) {
+        combined.set(c, offset);
+        offset += c.byteLength;
+    }
+    return { ok: true, text: new TextDecoder().decode(combined) };
 }
 
 export default {
@@ -31,7 +85,7 @@ export default {
         const url = new URL(request.url);
 
         if (url.pathname.startsWith("/api/")) {
-            // Enforce Origin/CSRF protection on all state-changing API requests (S02)
+            // Enforce Origin/CSRF protection on all state-changing API requests (S02, SEC-11)
             if (!isAllowedRequestOrigin(request, env)) {
                 return withSecurityHeaders(
                     Response.json({ error: "Cross-origin request forbidden" }, { status: 403 }),
@@ -46,15 +100,16 @@ export default {
                         Response.json({ error: "Authentication required" }, { status: 401 }),
                     );
                 }
-                if (!env.CLERK_SECRET_KEY) {
+                const signingKey = await resolveWsTicketSigningKey(env);
+                if (!signingKey) {
                     return withSecurityHeaders(
-                        Response.json({ error: "Server auth secret not configured" }, { status: 500 }),
+                        Response.json({ error: "Server ticket signing secret not configured" }, { status: 500 }),
                     );
                 }
 
                 const { ticket, nonce, exp } = await issueSignedWsTicket(
                     session.userId,
-                    env.CLERK_SECRET_KEY,
+                    signingKey,
                 );
 
                 const stub = getUserStub(env, session.userId);
@@ -64,8 +119,9 @@ export default {
                     body: JSON.stringify({ nonce, exp }),
                 });
                 if (!regRes.ok) {
+                    const status = regRes.status === 429 ? 429 : 500;
                     return withSecurityHeaders(
-                        Response.json({ error: "Failed to register WebSocket ticket" }, { status: 500 }),
+                        Response.json({ error: "Failed to register WebSocket ticket" }, { status }),
                     );
                 }
 
@@ -81,13 +137,14 @@ export default {
             // 2. Authenticate WebSocket connections using the short-lived connection ticket
             if (url.pathname === "/api/ws" || request.headers.get("Upgrade") === "websocket") {
                 const ticket = url.searchParams.get("ticket") || "";
-                if (!env.CLERK_SECRET_KEY) {
+                const signingKey = await resolveWsTicketSigningKey(env);
+                if (!signingKey) {
                     return withSecurityHeaders(
-                        Response.json({ error: "Server auth secret not configured" }, { status: 500 }),
+                        Response.json({ error: "Server ticket signing secret not configured" }, { status: 500 }),
                     );
                 }
 
-                const verifiedTicket = await verifySignedWsTicket(ticket, env.CLERK_SECRET_KEY);
+                const verifiedTicket = await verifySignedWsTicket(ticket, signingKey);
                 if (!verifiedTicket) {
                     return withSecurityHeaders(
                         Response.json(
@@ -118,11 +175,10 @@ export default {
                 return withSecurityHeaders(Response.json({ error: "Not Found" }, { status: 404 }));
             }
 
-            // 4. Detach a push endpoint from a previous user's Durable Object during account switch (S03)
-            // Authorization model (S13): the caller must be authenticated, AND the previous user's
-            // DO only executes the delete when the request proves possession of the per-subscription
-            // unsubscribe secret that was issued to this device at subscription time. Caller-supplied
-            // identifiers alone never authorize a mutation against another user's Durable Object.
+            // 4. Detach a push endpoint from a previous user's Durable Object during account switch (SEC-01)
+            // Authorization model: caller must be authenticated AND must present the server-issued
+            // per-subscription `unsubSecret` bound to that exact `(previousUserId, endpoint)`.
+            // Requests without a valid secret are explicitly rejected with 403 Forbidden.
             if (url.pathname === "/api/push/detach-previous" && request.method === "POST") {
                 const session = await verifyClerkRequest(request, env);
                 if (!session) {
@@ -130,12 +186,18 @@ export default {
                         Response.json({ error: "Authentication required" }, { status: 401 }),
                     );
                 }
+                const bounded = await readBoundedBodyText(request, MAX_HTTP_API_BYTES);
+                if (!bounded.ok) {
+                    return withSecurityHeaders(
+                        Response.json({ error: bounded.error }, { status: bounded.status }),
+                    );
+                }
                 try {
                     const body: {
                         previousUserId?: string;
                         endpoint?: string;
                         unsubSecret?: string;
-                    } = await request.json();
+                    } = JSON.parse(bounded.text || "{}");
                     const previousUserId = typeof body.previousUserId === "string"
                         ? body.previousUserId.slice(0, 191)
                         : "";
@@ -148,12 +210,12 @@ export default {
                         );
                     }
 
-                    // Never route a user's own ID through this path: a caller deleting the subscription
-                    // bound to their CURRENT user does it via /push/unsubscribe, which is scoped to the
-                    // verified session user only.
                     if (previousUserId === session.userId) {
                         return withSecurityHeaders(
-                            Response.json({ success: true }),
+                            Response.json(
+                                { error: "Use /api/push/unsubscribe for the active user" },
+                                { status: 400 },
+                            ),
                         );
                     }
 
@@ -165,10 +227,12 @@ export default {
                     });
                     if (!detachRes.ok) {
                         return withSecurityHeaders(
-                            Response.json({ error: "Invalid detach request" }, { status: 400 }),
+                            Response.json(
+                                { error: "Unauthorized push detachment" },
+                                { status: detachRes.status === 403 ? 403 : 400 },
+                            ),
                         );
                     }
-                    // Do not disclose whether the subscription existed (no oracle).
                     return withSecurityHeaders(Response.json({ success: true }));
                 } catch {
                     return withSecurityHeaders(
@@ -185,6 +249,21 @@ export default {
                 );
             }
 
+            // Enforce request body size limits before forwarding to Durable Object (SEC-09)
+            let forwardBody: string | null = null;
+            if (request.method !== "GET" && request.method !== "HEAD") {
+                const maxBytes = url.pathname === "/api/collection"
+                    ? MAX_HTTP_IMPORT_BYTES
+                    : MAX_HTTP_API_BYTES;
+                const bounded = await readBoundedBodyText(request, maxBytes);
+                if (!bounded.ok) {
+                    return withSecurityHeaders(
+                        Response.json({ error: bounded.error }, { status: bounded.status }),
+                    );
+                }
+                forwardBody = bounded.text;
+            }
+
             const stub = getUserStub(env, session.userId);
             const doUrl = new URL(request.url);
             doUrl.pathname = url.pathname.replace(/^\/api/, "");
@@ -197,7 +276,7 @@ export default {
                 new Request(doUrl.toString(), {
                     method: request.method,
                     headers,
-                    body: request.body,
+                    body: forwardBody && forwardBody.length > 0 ? forwardBody : undefined,
                 }),
             );
             return withSecurityHeaders(res);

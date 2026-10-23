@@ -228,19 +228,24 @@ export const StatsView: React.FC<Props> = ({ collection }) => {
                         {activeDays30} / 30 days studied · {totalReviews30} reviews
                     </span>
                 </div>
-                <div
-                    role="grid"
+                <ul
                     aria-label="30-day review history"
-                    style={{ display: "grid", gridTemplateColumns: "repeat(10, 1fr)", gap: 6, maxWidth: "100%" }}
+                    style={{
+                        display: "grid",
+                        gridTemplateColumns: "repeat(10, 1fr)",
+                        gap: 6,
+                        maxWidth: "100%",
+                        listStyle: "none",
+                        padding: 0,
+                        margin: 0,
+                    }}
                 >
                     {history.map(day => {
                         const opacity = day.count === 0 ? 0.12 : Math.min(1, 0.28 + day.count * 0.12);
                         const label = `${day.dateStr}: ${day.count} reviews (${formatMinutes(day.timeSec)})`;
                         return (
-                            <div
+                            <li
                                 key={day.dateStr}
-                                role="gridcell"
-                                tabIndex={0}
                                 aria-label={label}
                                 title={label}
                                 style={{
@@ -259,10 +264,10 @@ export const StatsView: React.FC<Props> = ({ collection }) => {
                                 }}
                             >
                                 {day.count > 0 ? day.count : ""}
-                            </div>
+                            </li>
                         );
                     })}
-                </div>
+                </ul>
             </section>
         </div>
     );

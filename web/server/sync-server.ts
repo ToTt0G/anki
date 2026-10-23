@@ -2,6 +2,14 @@
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 import { DurableObject } from "cloudflare:workers";
+import {
+    addCalendarDays,
+    getZonedDayInfo,
+    isCardDueForReview,
+    isCardDueInLearnQueue,
+    isValidTimeZone,
+    zonedTimeToUtcMs,
+} from "../src/core/scheduler";
 import { Card, Collection, Deck, DeckConfig, Note, NoteType, RevlogEntry } from "../src/core/types";
 import {
     DEFAULT_VAPID_PUBLIC_KEY,
@@ -12,7 +20,12 @@ import {
     VapidConfig,
 } from "./push-service";
 import { ClientMessage, OpErrorKind, ServerMessage } from "./types";
-import { validateClientMessage, validateCollectionPayload, validatePushSubscriptionInput } from "./validation";
+import { validateClientMessage, validatePushSubscriptionInput } from "./validation";
+
+const MAX_WS_MESSAGE_BYTES = 16 * 1024 * 1024; // 16 MB max WebSocket message (SEC-09)
+const MAX_WS_STANDARD_BYTES = 1 * 1024 * 1024; // 1 MB max for non-import/non-media messages (SEC-09)
+const MAX_CONCURRENT_SOCKETS = 10; // Max concurrent WebSockets per user DO (SEC-09)
+const MAX_INIT_PER_MINUTE = 30;
 
 /**
  * Typed error carrying a machine-readable kind so clients can offer retry/conflict UX (D13).
@@ -34,6 +47,8 @@ export interface PushPreferences {
     tzOffsetMinutes: number;
     timeZone?: string; // IANA timezone, e.g. "Europe/Stockholm" (N05, N06)
     learningAlerts: boolean;
+    /** Privacy setting (SEC-10): only include deck names in push notifications when explicitly enabled. */
+    includeDeckName?: boolean;
 }
 
 const DEFAULT_PUSH_PREFS: PushPreferences = {
@@ -42,6 +57,7 @@ const DEFAULT_PUSH_PREFS: PushPreferences = {
     tzOffsetMinutes: 0,
     timeZone: "UTC",
     learningAlerts: true,
+    includeDeckName: false,
 };
 
 export interface DueSummary {
@@ -55,76 +71,11 @@ export interface DueSummary {
     adaptiveHour: number;
 }
 
-function isValidTimeZone(tz?: string): tz is string {
-    if (!tz || typeof tz !== "string" || tz.length > 64) { return false; }
-    try {
-        Intl.DateTimeFormat(undefined, { timeZone: tz });
-        return true;
-    } catch {
-        return false;
-    }
-}
-
-/**
- * Get YYYY-MM-DD and hour (0..23) and minute (0..59) in the user's IANA timeZone (N05).
- */
-function getLocalTimeParts(
-    epochMs: number,
-    prefs: PushPreferences,
-): { dateStr: string; hour: number; minute: number; midnightUtcMs: number } {
-    const tz = isValidTimeZone(prefs.timeZone) ? prefs.timeZone : null;
-    if (tz) {
-        try {
-            const parts = new Intl.DateTimeFormat("en-CA", {
-                timeZone: tz,
-                year: "numeric",
-                month: "2-digit",
-                day: "2-digit",
-                hour: "2-digit",
-                minute: "2-digit",
-                second: "2-digit",
-                hourCycle: "h23",
-            }).formatToParts(new Date(epochMs));
-
-            const map: Record<string, string> = {};
-            for (const p of parts) {
-                map[p.type] = p.value;
-            }
-            const dateStr = `${map.year}-${map.month}-${map.day}`;
-            const hour = Number(map.hour) || 0;
-            const minute = Number(map.minute) || 0;
-            const sec = Number(map.second) || 0;
-            const elapsedTodayMs = ((hour * 60 + minute) * 60 + sec) * 1000;
-            return {
-                dateStr,
-                hour,
-                minute,
-                midnightUtcMs: epochMs - elapsedTodayMs,
-            };
-        } catch {
-            // Fall through to tzOffsetMinutes
-        }
-    }
-
-    const offsetMs = (prefs.tzOffsetMinutes || 0) * 60_000;
-    const localNow = new Date(epochMs - offsetMs);
-    const dateStr = localNow.toISOString().slice(0, 10);
-    const hour = localNow.getUTCHours();
-    const minute = localNow.getUTCMinutes();
-    const midnightUtcMs = Date.UTC(
-        localNow.getUTCFullYear(),
-        localNow.getUTCMonth(),
-        localNow.getUTCDate(),
-        0,
-        0,
-        0,
-    ) + offsetMs;
-
-    return { dateStr, hour, minute, midnightUtcMs };
-}
-
 export class AnkiSyncServer extends DurableObject {
     private sql: any;
+    private dueSummaryCache: { key: string; summary: DueSummary } | null = null;
+    private initRateWindowStartMs: number = 0;
+    private initRateCount: number = 0;
 
     constructor(ctx: DurableObjectState, env: any) {
         super(ctx, env);
@@ -166,6 +117,10 @@ export class AnkiSyncServer extends DurableObject {
         name TEXT PRIMARY KEY,
         data TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS backup_media (
+        name TEXT PRIMARY KEY,
+        data TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS push_subscriptions (
         endpoint TEXT PRIMARY KEY,
         p256dh TEXT NOT NULL,
@@ -185,7 +140,6 @@ export class AnkiSyncServer extends DurableObject {
       );
     `);
 
-        // Migration for databases created before per-subscription unsubscribe secrets (S03).
         try {
             this.sql.exec(
                 "ALTER TABLE push_subscriptions ADD COLUMN unsub_secret TEXT NOT NULL DEFAULT ''",
@@ -209,9 +163,8 @@ export class AnkiSyncServer extends DurableObject {
     }
 
     /**
-     * Account-deletion tombstone (S10): written when the user deletes their cloud data. A stale
-     * device that later comes online must not be able to silently re-seed the deleted collection
-     * from its local copy; automatic seeding is refused until a deliberate full import clears it.
+     * Account-deletion tombstone (S10, DATA-03): written when the user deletes their cloud data.
+     * Prevents stale offline devices from silently re-seeding a deleted collection.
      */
     private getDeletionTombstone(): { deletedAt: number } | null {
         const raw = this.getMeta("deletion_tombstone");
@@ -237,11 +190,16 @@ export class AnkiSyncServer extends DurableObject {
     }
 
     /**
-     * Compare-and-swap check for whole-collection overwrites (D02, S13). A stale client must not
-     * be able to blindly replace newer data. Callers that omit `expectedRevision` are only
-     * allowed on a still-uninitialized (revision 0) server.
+     * Compare-and-swap check for whole-collection overwrites (DATA-01).
+     * Supports explicit `forceOverwrite: true` when the user confirms replacing newer server data.
      */
-    private checkExpectedRevision(expectedRevision: unknown): { ok: boolean; error?: string } {
+    private checkExpectedRevision(
+        expectedRevision: unknown,
+        forceOverwrite?: boolean,
+    ): { ok: boolean; error?: string } {
+        if (forceOverwrite === true) {
+            return { ok: true };
+        }
         const current = this.getRevision();
         if (!Number.isSafeInteger(expectedRevision) || (expectedRevision as number) < 0) {
             return { ok: false, error: "Full collection replacement requires an explicit expectedRevision." };
@@ -269,10 +227,9 @@ export class AnkiSyncServer extends DurableObject {
         const next = this.getRevision() + 1;
         this.setMeta("col_revision", String(next));
         this.setMeta("col_initialized", "1");
+        this.dueSummaryCache = null;
         if (opId) {
             const now = Date.now();
-            // Clients may retry indefinitely after losing an acknowledgement. Retain every
-            // operation ID for the lifetime of this collection generation.
             this.sql.exec(
                 "INSERT OR REPLACE INTO applied_ops (op_id, revision, applied_at) VALUES (?, ?, ?)",
                 opId,
@@ -304,6 +261,7 @@ export class AnkiSyncServer extends DurableObject {
                 tzOffsetMinutes: typeof parsed.tzOffsetMinutes === "number" ? parsed.tzOffsetMinutes : 0,
                 timeZone: isValidTimeZone(parsed.timeZone) ? parsed.timeZone : undefined,
                 learningAlerts: parsed.learningAlerts !== false,
+                includeDeckName: parsed.includeDeckName === true,
             };
         } catch {
             return { ...DEFAULT_PUSH_PREFS };
@@ -312,6 +270,7 @@ export class AnkiSyncServer extends DurableObject {
 
     private savePushPreferences(prefs: PushPreferences) {
         this.setMeta("push_preferences", JSON.stringify(prefs));
+        this.dueSummaryCache = null;
     }
 
     private getVapidConfig(): VapidConfig {
@@ -327,7 +286,10 @@ export class AnkiSyncServer extends DurableObject {
         return Boolean(cfg.publicKey && cfg.privateKey && cfg.subject);
     }
 
-    private getFullCollection(includeMedia: boolean = true): Collection {
+    private getFullCollection(
+        includeMedia: boolean = true,
+        excludeMediaNames?: Set<string>,
+    ): Collection {
         const decks: Record<number, Deck> = {};
         const dconf: Record<number, DeckConfig> = {};
         const models: Record<number, NoteType> = {};
@@ -362,6 +324,9 @@ export class AnkiSyncServer extends DurableObject {
         }
         if (includeMedia) {
             for (const row of this.sql.exec("SELECT name, data FROM media").toArray()) {
+                if (excludeMediaNames && excludeMediaNames.has(row.name)) {
+                    continue;
+                }
                 media[row.name] = row.data;
             }
         }
@@ -383,24 +348,25 @@ export class AnkiSyncServer extends DurableObject {
     }
 
     /**
-     * Save a recoverable backup snapshot of core tables before a full collection overwrite (D07).
+     * Save a recoverable backup snapshot of core tables AND media before a full collection
+     * overwrite (DATA-08, DATA-09, DATA-10).
      */
-    private saveBackupSnapshot() {
-        if (!this.isInitialized()) { return; }
-        try {
-            const current = this.getFullCollection(false);
-            if (Object.keys(current.cards).length > 0 || Object.keys(current.notes).length > 0) {
-                this.setMeta("backup_snapshot", JSON.stringify(current));
-            }
-        } catch (e) {
-            console.warn("Could not save pre-import backup snapshot:", e);
-        }
-    }
-
-    private saveFullCollection(col: Collection, opId?: string): number {
-        this.saveBackupSnapshot();
+    private saveFullCollection(col: Collection, opId?: string, saveBackup: boolean = true): number {
         let nextRev = 0;
         this.ctx.storage.transactionSync(() => {
+            if (saveBackup && this.isInitialized()) {
+                try {
+                    const current = this.getFullCollection(false);
+                    if (Object.keys(current.cards).length > 0 || Object.keys(current.notes).length > 0) {
+                        this.setMeta("backup_snapshot", JSON.stringify(current));
+                        this.sql.exec("DELETE FROM backup_media");
+                        this.sql.exec("INSERT INTO backup_media (name, data) SELECT name, data FROM media");
+                    }
+                } catch (e) {
+                    console.warn("Could not save pre-import backup snapshot:", e);
+                }
+            }
+
             if (col.crt) {
                 this.setMeta("col_crt", String(col.crt));
             }
@@ -410,6 +376,8 @@ export class AnkiSyncServer extends DurableObject {
             this.sql.exec("DELETE FROM notes");
             this.sql.exec("DELETE FROM cards");
             this.sql.exec("DELETE FROM revlog");
+            // DATA-09: Delete obsolete media during a full collection replacement
+            this.sql.exec("DELETE FROM media");
 
             for (const d of Object.values(col.decks || {})) {
                 this.sql.exec("INSERT INTO decks (id, json) VALUES (?, ?)", d.id, JSON.stringify(d));
@@ -429,7 +397,7 @@ export class AnkiSyncServer extends DurableObject {
             for (const r of col.revlog || []) {
                 this.sql.exec("INSERT OR REPLACE INTO revlog (id, json) VALUES (?, ?)", r.id, JSON.stringify(r));
             }
-            if (col.media && Object.keys(col.media).length > 0) {
+            if (col.media) {
                 for (const [name, data] of Object.entries(col.media)) {
                     this.sql.exec("INSERT OR REPLACE INTO media (name, data) VALUES (?, ?)", name, data);
                 }
@@ -440,19 +408,22 @@ export class AnkiSyncServer extends DurableObject {
     }
 
     /**
-     * Lightweight due summary calculation that reads only decks, cards, and revlog (never media) (P01, C05, N05).
+     * Lightweight due summary calculation using shared card-state & timezone domain helpers
+     * and memoized per revision + time bucket (SCHED-01, SCHED-02, SCHED-05, PERF-06).
      */
-    private computeDueSummary(prefs: PushPreferences): DueSummary {
-        const nowMs = Date.now();
+    private computeDueSummary(prefs: PushPreferences, nowOverrideMs?: number): DueSummary {
+        const nowMs = typeof nowOverrideMs === "number" ? nowOverrideMs : Date.now();
         const nowSec = Math.floor(nowMs / 1000);
-        // Day boundary must match the client's local calendar day, not raw UTC days (C11/N05).
-        // Clients scheduleReview due dates as local-midnight epoch days (scheduler.getTodayDay);
-        // deriving todayEpochDay from the same local midnight keeps due counts consistent
-        // across devices around midnight in non-UTC timezones.
-        const localNowParts = getLocalTimeParts(nowMs, prefs);
-        const todayEpochDay = Math.floor(Date.parse(`${localNowParts.dateStr}T00:00:00Z`) / 86_400_000);
+        const localNowParts = getZonedDayInfo(nowMs, prefs);
+        const todayEpochDay = localNowParts.todayEpochDay;
         const crtSec = Number(this.getMeta("col_crt")) || nowSec;
-        const crtDay = Math.floor(crtSec / 86400);
+
+        const cacheKey = `${this.getRevision()}:${
+            prefs.timeZone || ""
+        }:${prefs.tzOffsetMinutes}:${localNowParts.dateStr}:${localNowParts.hour}:${Math.floor(nowSec / 60)}`;
+        if (nowOverrideMs === undefined && this.dueSummaryCache && this.dueSummaryCache.key === cacheKey) {
+            return this.dueSummaryCache.summary;
+        }
 
         const decks: Record<number, Deck> = {};
         for (const row of this.sql.exec("SELECT json FROM decks").toArray()) {
@@ -471,26 +442,20 @@ export class AnkiSyncServer extends DurableObject {
             if (card.queue < 0) { continue; }
 
             if (card.queue === 1) {
-                // Intraday learning (Unix seconds)
                 if (earliestLearnDueSec === null || card.due < earliestLearnDueSec) {
                     earliestLearnDueSec = card.due;
                 }
-                if (card.due <= nowSec + 60) {
+                if (isCardDueInLearnQueue(card, nowSec, todayEpochDay, crtSec, 60)) {
                     learnDueCount++;
                     duePerDeck[card.did] = (duePerDeck[card.did] || 0) + 1;
                 }
             } else if (card.queue === 3) {
-                // Day-learning queue (C05): due is in days (or Unix sec if legacy klanki card)
-                const isDayDue = card.due > 1_000_000_000
-                    ? card.due <= nowSec + 60
-                    : (card.due < 10000 ? crtDay + card.due : card.due) <= todayEpochDay;
-                if (isDayDue) {
+                if (isCardDueInLearnQueue(card, nowSec, todayEpochDay, crtSec, 60)) {
                     learnDueCount++;
                     duePerDeck[card.did] = (duePerDeck[card.did] || 0) + 1;
                 }
             } else if (card.queue === 2) {
-                const effectiveDueDay = card.due < 10000 ? crtDay + card.due : card.due;
-                if (effectiveDueDay <= todayEpochDay) {
+                if (isCardDueForReview(card, todayEpochDay, crtSec)) {
                     reviewDueCount++;
                     duePerDeck[card.did] = (duePerDeck[card.did] || 0) + 1;
                 }
@@ -521,17 +486,18 @@ export class AnkiSyncServer extends DurableObject {
             if (ts >= localNowParts.midnightUtcMs) {
                 studiedToday = true;
             }
-            const entryParts = getLocalTimeParts(ts, prefs);
+            const entryParts = getZonedDayInfo(ts, prefs);
             studiedDaySet.add(entryParts.dateStr);
             if (entryParts.hour >= 0 && entryParts.hour < 24) {
                 hourBuckets[entryParts.hour]++;
             }
         }
 
+        // SCHED-02: Use calendar-day subtraction rather than 86,400,000 ms steps
         let streakDays = 0;
         for (let d = 0; d < 365; d++) {
-            const checkParts = getLocalTimeParts(nowMs - d * 86_400_000, prefs);
-            if (studiedDaySet.has(checkParts.dateStr)) {
+            const checkDateStr = addCalendarDays(localNowParts.dateStr, -d);
+            if (studiedDaySet.has(checkDateStr)) {
                 streakDays++;
             } else if (d === 0) {
                 continue;
@@ -551,7 +517,7 @@ export class AnkiSyncServer extends DurableObject {
             }
         }
 
-        return {
+        const summary: DueSummary = {
             learnDueCount,
             reviewDueCount,
             newCount,
@@ -561,6 +527,54 @@ export class AnkiSyncServer extends DurableObject {
             streakDays,
             adaptiveHour,
         };
+
+        if (nowOverrideMs === undefined) {
+            this.dueSummaryCache = { key: cacheKey, summary };
+        }
+        return summary;
+    }
+
+    /**
+     * Compute the next daily push alarm UTC timestamp in the user's IANA timezone,
+     * preserving exact local wall-clock time across DST transitions (SCHED-02).
+     */
+    public computeNextDailyTargetUtcMs(nowMs: number, prefs: PushPreferences, summary: DueSummary): number {
+        const localParts = getZonedDayInfo(nowMs, prefs);
+        let targetHour = summary.adaptiveHour;
+        let targetMinute = 0;
+        if (prefs.dailyMode === "fixed") {
+            const [hStr, mStr] = prefs.dailyTime.split(":");
+            targetHour = Math.min(23, Math.max(0, Number(hStr) || 9));
+            targetMinute = Math.min(59, Math.max(0, Number(mStr) || 0));
+        }
+
+        const todayTargetUtcMs = zonedTimeToUtcMs(
+            localParts.dateStr,
+            targetHour,
+            targetMinute,
+            0,
+            prefs.timeZone,
+            prefs.tzOffsetMinutes,
+        );
+        const lastDailySentDate = this.getMeta("last_daily_push_date") || "";
+
+        if (
+            !summary.studiedToday
+            && lastDailySentDate !== localParts.dateStr
+            && todayTargetUtcMs > nowMs + 15_000
+        ) {
+            return todayTargetUtcMs;
+        }
+
+        const tomorrowDateStr = addCalendarDays(localParts.dateStr, 1);
+        return zonedTimeToUtcMs(
+            tomorrowDateStr,
+            targetHour,
+            targetMinute,
+            0,
+            prefs.timeZone,
+            prefs.tzOffsetMinutes,
+        );
     }
 
     private async recomputeAndScheduleAlarm(): Promise<number | null> {
@@ -577,9 +591,7 @@ export class AnkiSyncServer extends DurableObject {
 
         const prefs = this.getPushPreferences();
         const summary = this.computeDueSummary(prefs);
-
         const nowMs = Date.now();
-        const localParts = getLocalTimeParts(nowMs, prefs);
 
         let learnCandidateMs: number | null = null;
         const lastActivityMs = Number(this.getMeta("last_activity_ms") || 0);
@@ -603,28 +615,7 @@ export class AnkiSyncServer extends DurableObject {
             );
         }
 
-        let targetHour = summary.adaptiveHour;
-        let targetMinute = 0;
-        if (prefs.dailyMode === "fixed") {
-            const [hStr, mStr] = prefs.dailyTime.split(":");
-            targetHour = Math.min(23, Math.max(0, Number(hStr) || 9));
-            targetMinute = Math.min(59, Math.max(0, Number(mStr) || 0));
-        }
-
-        const todayTargetUtcMs = localParts.midnightUtcMs + (targetHour * 60 + targetMinute) * 60_000;
-        const lastDailySentDate = this.getMeta("last_daily_push_date") || "";
-
-        let dailyCandidateMs: number;
-        if (
-            !summary.studiedToday
-            && lastDailySentDate !== localParts.dateStr
-            && todayTargetUtcMs > nowMs + 15_000
-        ) {
-            dailyCandidateMs = todayTargetUtcMs;
-        } else {
-            dailyCandidateMs = todayTargetUtcMs + 86_400_000;
-        }
-
+        const dailyCandidateMs = this.computeNextDailyTargetUtcMs(nowMs, prefs, summary);
         const nextAlarmMs = learnCandidateMs !== null
             ? Math.min(learnCandidateMs, dailyCandidateMs)
             : dailyCandidateMs;
@@ -658,7 +649,7 @@ export class AnkiSyncServer extends DurableObject {
             return;
         }
 
-        const localParts = getLocalTimeParts(nowMs, prefs);
+        const localParts = getZonedDayInfo(nowMs, prefs);
         let targetHour = summary.adaptiveHour;
         let targetMinute = 0;
         if (prefs.dailyMode === "fixed") {
@@ -666,10 +657,18 @@ export class AnkiSyncServer extends DurableObject {
             targetHour = Math.min(23, Math.max(0, Number(hStr) || 9));
             targetMinute = Math.min(59, Math.max(0, Number(mStr) || 0));
         }
-        const todayTargetUtcMs = localParts.midnightUtcMs + (targetHour * 60 + targetMinute) * 60_000;
+        const todayTargetUtcMs = zonedTimeToUtcMs(
+            localParts.dateStr,
+            targetHour,
+            targetMinute,
+            0,
+            prefs.timeZone,
+            prefs.tzOffsetMinutes,
+        );
         const lastDailySentDate = this.getMeta("last_daily_push_date") || "";
 
         let transientFailure = false;
+        const deckLocationText = prefs.includeDeckName ? ` in ${summary.topDeckName}` : "";
 
         if (
             prefs.learningAlerts
@@ -679,12 +678,11 @@ export class AnkiSyncServer extends DurableObject {
             const count = summary.learnDueCount;
             const payload: PushPayload = {
                 title: `klanki: ${count} Learning ${count === 1 ? "Card" : "Cards"} Due`,
-                body: `Your learning step in ${summary.topDeckName} is ready to review.`,
+                body: `Your learning step${deckLocationText} is ready to review.`,
                 url: "/",
                 tag: "klanki-learn-due",
             };
             const results = await this.broadcastPushNotification(payload, config);
-            // Only mark delivered if at least one subscription succeeded (N08)
             if (results.sent > 0) {
                 this.setMeta("last_learn_push_ms", String(nowMs));
             } else if (results.failed > 0) {
@@ -702,7 +700,7 @@ export class AnkiSyncServer extends DurableObject {
                 const payload: PushPayload = dueTotal > 0
                     ? {
                         title: `klanki: ${dueTotal} ${dueTotal === 1 ? "Card" : "Cards"} Due Today`,
-                        body: `Ready in ${summary.topDeckName}${
+                        body: `Ready for review${deckLocationText}${
                             summary.newCount > 0 ? ` + ${Math.min(20, summary.newCount)} new` : ""
                         }${streakSuffix}.`,
                         url: "/",
@@ -710,9 +708,7 @@ export class AnkiSyncServer extends DurableObject {
                     }
                     : {
                         title: "klanki: Daily Study Reminder",
-                        body: `${
-                            Math.min(20, summary.newCount)
-                        } new cards waiting in ${summary.topDeckName}${streakSuffix}.`,
+                        body: `${Math.min(20, summary.newCount)} new cards waiting${deckLocationText}${streakSuffix}.`,
                         url: "/",
                         tag: "klanki-daily-due",
                     };
@@ -727,7 +723,6 @@ export class AnkiSyncServer extends DurableObject {
         }
 
         if (transientFailure) {
-            // Retry in 15 minutes on transient push delivery failure (N08)
             const retryAt = Date.now() + 15 * 60_000;
             await this.ctx.storage.setAlarm(retryAt);
             this.setMeta("next_alarm_ms", String(retryAt));
@@ -753,6 +748,16 @@ export class AnkiSyncServer extends DurableObject {
         return { allowed: true };
     }
 
+    private checkInitRateLimit(): boolean {
+        const now = Date.now();
+        if (now - this.initRateWindowStartMs > 60_000) {
+            this.initRateWindowStartMs = now;
+            this.initRateCount = 0;
+        }
+        this.initRateCount++;
+        return this.initRateCount <= MAX_INIT_PER_MINUTE;
+    }
+
     async fetch(request: Request): Promise<Response> {
         const url = new URL(request.url);
 
@@ -761,6 +766,10 @@ export class AnkiSyncServer extends DurableObject {
             const body: { nonce: string; exp: number } = await request.json();
             const now = Date.now();
             this.sql.exec("DELETE FROM ws_tickets WHERE exp < ?", now);
+            const pendingTickets = this.sql.exec("SELECT COUNT(*) as c FROM ws_tickets").toArray();
+            if (Number(pendingTickets[0]?.c || 0) >= 30) {
+                return Response.json({ error: "Too many pending tickets" }, { status: 429 });
+            }
             this.sql.exec(
                 "INSERT OR REPLACE INTO ws_tickets (nonce, exp) VALUES (?, ?)",
                 body.nonce,
@@ -769,7 +778,7 @@ export class AnkiSyncServer extends DurableObject {
             return Response.json({ ok: true });
         }
 
-        // 1. WebSocket Upgrade (requires valid single-use ticket nonce)
+        // 1. WebSocket Upgrade (requires valid single-use ticket nonce & concurrent socket cap SEC-09)
         if (request.headers.get("Upgrade") === "websocket") {
             const nonce = request.headers.get("X-Ticket-Nonce");
             if (!nonce) {
@@ -785,13 +794,23 @@ export class AnkiSyncServer extends DurableObject {
             }
             this.sql.exec("DELETE FROM ws_tickets WHERE nonce = ?", nonce);
 
+            const activeSockets = this.ctx
+                .getWebSockets()
+                .filter(ws => ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING);
+            if (activeSockets.length >= MAX_CONCURRENT_SOCKETS) {
+                return Response.json(
+                    { error: "Maximum concurrent connections exceeded" },
+                    { status: 429 },
+                );
+            }
+
             const pair = new WebSocketPair();
             const [client, server] = Object.values(pair);
             this.ctx.acceptWebSocket(server);
             return new Response(null, { status: 101, webSocket: client });
         }
 
-        // 2. Complete Account Data Deletion Lifecycle (S10)
+        // 2. Complete Account Data Deletion Lifecycle (S10, DATA-03)
         if (url.pathname === "/account-data" && request.method === "DELETE") {
             await this.ctx.storage.deleteAlarm();
             const deletedRevision = this.getRevision() + 1;
@@ -804,12 +823,14 @@ export class AnkiSyncServer extends DurableObject {
                 this.sql.exec("DELETE FROM cards");
                 this.sql.exec("DELETE FROM revlog");
                 this.sql.exec("DELETE FROM media");
+                this.sql.exec("DELETE FROM backup_media");
                 this.sql.exec("DELETE FROM push_subscriptions");
                 this.sql.exec("DELETE FROM ws_tickets");
                 this.sql.exec("DELETE FROM applied_ops");
                 this.setMeta("col_revision", String(deletedRevision));
                 this.setMeta("col_generation", crypto.randomUUID());
                 this.setDeletionTombstone();
+                this.dueSummaryCache = null;
             });
             for (const ws of this.ctx.getWebSockets()) {
                 try {
@@ -821,7 +842,19 @@ export class AnkiSyncServer extends DurableObject {
             return Response.json({ success: true });
         }
 
-        // 3. HTTP Collection & Backup Restore Endpoints (D07)
+        // 3. HTTP Collection, Media & Backup Restore Endpoints (DATA-01, DATA-08, DATA-09, DATA-10, PERF-02)
+        if (url.pathname === "/media" && request.method === "GET") {
+            const name = url.searchParams.get("name") || "";
+            if (!name) {
+                return Response.json({ error: "Missing media name" }, { status: 400 });
+            }
+            const rows = this.sql.exec("SELECT data FROM media WHERE name = ?", name).toArray();
+            if (!rows.length) {
+                return Response.json({ error: "Media not found" }, { status: 404 });
+            }
+            return Response.json({ filename: name, dataUrl: rows[0].data });
+        }
+
         if (url.pathname === "/collection") {
             if (request.method === "GET") {
                 const col = this.getFullCollection();
@@ -836,6 +869,7 @@ export class AnkiSyncServer extends DurableObject {
             if (request.method === "POST") {
                 const body: Collection & {
                     expectedRevision?: unknown;
+                    forceOverwrite?: boolean;
                     opId?: string;
                     generation?: string;
                     seedOnUninitialized?: boolean;
@@ -843,11 +877,19 @@ export class AnkiSyncServer extends DurableObject {
                 if (!body || typeof body !== "object" || Array.isArray(body)) {
                     return Response.json({ error: "Collection must be an object" }, { status: 400 });
                 }
-                const { expectedRevision, opId, generation, seedOnUninitialized, ...collection } = body;
+                const {
+                    expectedRevision,
+                    forceOverwrite,
+                    opId,
+                    generation,
+                    seedOnUninitialized,
+                    ...collection
+                } = body;
                 const validation = validateClientMessage({
                     type: "import_collection",
                     collection,
                     expectedRevision,
+                    forceOverwrite,
                     opId,
                     generation,
                     seedOnUninitialized,
@@ -866,8 +908,8 @@ export class AnkiSyncServer extends DurableObject {
                 }
                 const applied = this.getAlreadyAppliedRevision(body.opId);
                 if (applied !== null) { return Response.json({ success: true, revision: applied }); }
-                // Compare-and-swap guard: never let a stale client blindly replace newer data (D02).
-                const cas = this.checkExpectedRevision(body.expectedRevision);
+
+                const cas = this.checkExpectedRevision(body.expectedRevision, body.forceOverwrite);
                 if (!cas.ok) {
                     return Response.json(
                         { error: cas.error, currentRevision: this.getRevision() },
@@ -875,7 +917,6 @@ export class AnkiSyncServer extends DurableObject {
                     );
                 }
                 const revision = this.saveFullCollection(collection, body.opId);
-                // A deliberate full replacement through this endpoint clears the deletion tombstone.
                 this.clearDeletionTombstone();
                 this.setMeta("last_activity_ms", String(Date.now()));
                 await this.recomputeAndScheduleAlarm();
@@ -893,9 +934,9 @@ export class AnkiSyncServer extends DurableObject {
 
         if (url.pathname === "/collection/restore-backup" && request.method === "POST") {
             const body = (await request.json().catch(() => null)) as
-                | { expectedRevision?: unknown }
+                | { expectedRevision?: unknown; forceOverwrite?: boolean }
                 | null;
-            const cas = this.checkExpectedRevision(body?.expectedRevision);
+            const cas = this.checkExpectedRevision(body?.expectedRevision, body?.forceOverwrite);
             if (!cas.ok) {
                 return Response.json({ error: cas.error, currentRevision: this.getRevision() }, { status: 409 });
             }
@@ -904,9 +945,14 @@ export class AnkiSyncServer extends DurableObject {
                 return Response.json({ error: "No backup snapshot available" }, { status: 404 });
             }
             const backupCol: Collection = JSON.parse(backupRaw);
-            const currentMedia = this.getFullCollection(true).media;
-            backupCol.media = { ...currentMedia, ...(backupCol.media || {}) };
-            const revision = this.saveFullCollection(backupCol);
+            // DATA-10: Restore the exact pre-import media from `backup_media`, removing any media
+            // introduced by the rolled-back import.
+            const backupMedia: Record<string, string> = {};
+            for (const row of this.sql.exec("SELECT name, data FROM backup_media").toArray()) {
+                backupMedia[row.name] = row.data;
+            }
+            backupCol.media = { ...(backupCol.media || {}), ...backupMedia };
+            const revision = this.saveFullCollection(backupCol, undefined, false);
             this.clearDeletionTombstone();
             await this.recomputeAndScheduleAlarm();
             this.broadcast({
@@ -939,9 +985,6 @@ export class AnkiSyncServer extends DurableObject {
                 }
 
                 const now = Date.now();
-                // Per-subscription secret: issued to the subscribing device and required later to
-                // detach this endpoint from a *different* user's DO (S03). Caller-supplied user IDs
-                // alone are never sufficient authorization for cross-account mutations.
                 const secretBytes = new Uint8Array(32);
                 crypto.getRandomValues(secretBytes);
                 const unsubSecret = Array.from(secretBytes)
@@ -966,7 +1009,6 @@ export class AnkiSyncServer extends DurableObject {
           )
         `);
 
-                // Only initialize timezone if not already explicitly configured (N05, N06)
                 const prefs = this.getPushPreferences();
                 let prefsChanged = false;
                 if (!prefs.timeZone || prefs.timeZone === "UTC") {
@@ -990,26 +1032,35 @@ export class AnkiSyncServer extends DurableObject {
             }
         }
 
-        // Internal route used during account switching (S03): an authenticated caller may forward
-        // a detach for the PREVIOUS user's subscription, but the previous user's DO only honours
-        // it when the caller proves possession of the per-subscription unsubscribe secret.
+        // SEC-01: Cross-user detachment requires proving possession of the server-issued `unsub_secret`
+        // for that exact endpoint. Unauthorized attempts are rejected with 403 Forbidden.
         if (url.pathname === "/push/detach" && request.method === "POST") {
             try {
                 const body: { endpoint?: string; unsubSecret?: string } = await request.json();
-                if (
-                    body?.endpoint
-                    && typeof body.endpoint === "string"
-                    && body?.unsubSecret
-                    && typeof body.unsubSecret === "string"
-                ) {
-                    this.sql.exec(
-                        "DELETE FROM push_subscriptions WHERE endpoint = ? AND unsub_secret = ?",
-                        body.endpoint,
-                        body.unsubSecret,
-                    );
+                const endpoint = typeof body?.endpoint === "string" ? body.endpoint.trim() : "";
+                const unsubSecret = typeof body?.unsubSecret === "string" ? body.unsubSecret.trim() : "";
+
+                if (!endpoint || !unsubSecret) {
+                    return Response.json({ error: "Unauthorized push detachment" }, { status: 403 });
                 }
+
+                const matched = this.sql
+                    .exec(
+                        "SELECT endpoint FROM push_subscriptions WHERE endpoint = ? AND unsub_secret = ? AND unsub_secret != ''",
+                        endpoint,
+                        unsubSecret,
+                    )
+                    .toArray();
+                if (!matched.length) {
+                    return Response.json({ error: "Unauthorized push detachment" }, { status: 403 });
+                }
+
+                this.sql.exec(
+                    "DELETE FROM push_subscriptions WHERE endpoint = ? AND unsub_secret = ?",
+                    endpoint,
+                    unsubSecret,
+                );
                 await this.recomputeAndScheduleAlarm();
-                // Intentionally identical response whether or not the record existed (no oracle).
                 return Response.json({ success: true });
             } catch (err: any) {
                 return Response.json({ error: err.message }, { status: 500 });
@@ -1049,6 +1100,9 @@ export class AnkiSyncServer extends DurableObject {
                     learningAlerts: typeof incoming.learningAlerts === "boolean"
                         ? incoming.learningAlerts
                         : current.learningAlerts,
+                    includeDeckName: typeof incoming.includeDeckName === "boolean"
+                        ? incoming.includeDeckName
+                        : Boolean(current.includeDeckName),
                 };
                 this.savePushPreferences(updated);
                 const nextAlarmAt = await this.recomputeAndScheduleAlarm();
@@ -1117,6 +1171,7 @@ export class AnkiSyncServer extends DurableObject {
                 const prefs = this.getPushPreferences();
                 const summary = this.computeDueSummary(prefs);
                 const dueTotal = summary.learnDueCount + summary.reviewDueCount;
+                const deckLocationText = prefs.includeDeckName ? ` in ${summary.topDeckName}` : "";
 
                 const payload: PushPayload = {
                     title: String(
@@ -1128,10 +1183,10 @@ export class AnkiSyncServer extends DurableObject {
                     body: String(
                         body.body
                             || (dueTotal > 0
-                                ? `${dueTotal} due in ${summary.topDeckName}${
+                                ? `${dueTotal} due for review${deckLocationText}${
                                     summary.newCount > 0 ? ` + ${Math.min(20, summary.newCount)} new` : ""
                                 }.`
-                                : `${Math.min(20, summary.newCount)} new cards ready in ${summary.topDeckName}.`),
+                                : `${Math.min(20, summary.newCount)} new cards ready${deckLocationText}.`),
                     ).slice(0, 300),
                     url: "/",
                     tag: "klanki-due-review",
@@ -1224,19 +1279,56 @@ export class AnkiSyncServer extends DurableObject {
     }
 
     async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
-        if (typeof message !== "string") { return; }
+        if (typeof message !== "string") {
+            this.sendOpError(ws, undefined, "Binary WebSocket frames are not supported", "validation", false);
+            return;
+        }
+
+        // SEC-09: Enforce message byte-size limits before parsing JSON
+        const byteLength = new TextEncoder().encode(message).byteLength;
+        if (byteLength > MAX_WS_MESSAGE_BYTES) {
+            this.sendOpError(
+                ws,
+                undefined,
+                `WebSocket message exceeds maximum size (${MAX_WS_MESSAGE_BYTES} bytes)`,
+                "validation",
+                false,
+            );
+            return;
+        }
 
         let raw: any;
         try {
             raw = JSON.parse(message);
         } catch {
-            this.sendOpError(ws, undefined, "Invalid JSON payload");
+            this.sendOpError(ws, undefined, "Invalid JSON payload", "validation", false);
+            return;
+        }
+
+        if (
+            raw?.type !== "import_collection"
+            && raw?.type !== "save_media"
+            && byteLength > MAX_WS_STANDARD_BYTES
+        ) {
+            this.sendOpError(
+                ws,
+                typeof raw?.opId === "string" ? raw.opId.slice(0, 191) : undefined,
+                `Message of type '${String(raw?.type)}' exceeds maximum size`,
+                "validation",
+                false,
+            );
             return;
         }
 
         const validation = validateClientMessage(raw);
         if (!validation.ok) {
-            this.sendOpError(ws, raw?.opId, validation.error);
+            this.sendOpError(
+                ws,
+                typeof raw?.opId === "string" ? raw.opId.slice(0, 191) : undefined,
+                validation.error,
+                "validation",
+                false,
+            );
             return;
         }
 
@@ -1249,7 +1341,14 @@ export class AnkiSyncServer extends DurableObject {
             }
 
             if (msg.type === "init") {
-                const col = this.getFullCollection();
+                if (!this.checkInitRateLimit()) {
+                    this.sendOpError(ws, undefined, "Rate limit exceeded for init requests", "validation", true);
+                    return;
+                }
+                const excludeMedia = msg.knownMedia && msg.knownMedia.length > 0
+                    ? new Set<string>(msg.knownMedia)
+                    : undefined;
+                const col = this.getFullCollection(true, excludeMedia);
                 ws.send(
                     JSON.stringify(
                         {
@@ -1266,11 +1365,15 @@ export class AnkiSyncServer extends DurableObject {
                 return;
             }
 
-            // Deduplicate replayed operations by opId (D01, D05, D12)
             const opId = "opId" in msg ? msg.opId : undefined;
+            const currentGeneration = this.getMeta("col_generation") ?? "0";
+            const msgGeneration = msg.generation ?? "0";
+
+            // DATA-03: Reject stale-generation operations and automatic seeding onto a deleted collection
             if (
-                (msg.generation ?? "0") !== (this.getMeta("col_generation") ?? "0")
-                || (this.getDeletionTombstone() && msg.type !== "import_collection")
+                msgGeneration !== currentGeneration
+                || (msg.type === "import_collection" && msg.seedOnUninitialized && this.getDeletionTombstone())
+                || (this.getDeletionTombstone() && msgGeneration === "0" && msg.type !== "import_collection")
             ) {
                 this.sendOpError(
                     ws,
@@ -1294,19 +1397,22 @@ export class AnkiSyncServer extends DurableObject {
 
                 this.ctx.storage.transactionSync(() => {
                     const row = this.sql.exec("SELECT json FROM cards WHERE id = ?", msg.cardId).toArray();
-                    if (row.length > 0) {
-                        const card: Card = JSON.parse(row[0].json);
-                        // Reconcile concurrent reviews (D05): ensure reps never regresses
-                        const nextReps = Math.max((card.reps || 0) + 1, msg.nextState.reps || 0);
-                        Object.assign(card, msg.nextState, {
-                            reps: nextReps,
-                            mod: Math.floor(Date.now() / 1000),
-                        });
-                        finalState = card;
-                        this.sql.exec("UPDATE cards SET json = ? WHERE id = ?", JSON.stringify(card), card.id);
+                    if (row.length === 0) {
+                        throw new OpError(
+                            `Card ${msg.cardId} does not exist on the server.`,
+                            "validation",
+                            false,
+                        );
                     }
+                    const card: Card = JSON.parse(row[0].json);
+                    const nextReps = Math.max((card.reps || 0) + 1, msg.nextState.reps || 0);
+                    Object.assign(card, msg.nextState, {
+                        reps: nextReps,
+                        mod: Math.floor(Date.now() / 1000),
+                    });
+                    finalState = card;
+                    this.sql.exec("UPDATE cards SET json = ? WHERE id = ?", JSON.stringify(card), card.id);
 
-                    // Prevent revlog ID collision from overwriting prior history (D11)
                     while (
                         this.sql
                             .exec("SELECT id FROM revlog WHERE id = ?", revlogEntry.id)
@@ -1342,35 +1448,72 @@ export class AnkiSyncServer extends DurableObject {
 
             if (msg.type === "upsert_deck") {
                 let rev = 0;
+                const renamedSubdecks: Deck[] = [];
+
                 this.ctx.storage.transactionSync(() => {
-                    // Reject conflicting inserts for brand-new decks instead of replacing unrelated
-                    // records that a different device created with the same ID (D06).
-                    if (msg.isNew) {
-                        const existing = this.sql
-                            .exec("SELECT id FROM decks WHERE id = ?", msg.deck.id)
-                            .toArray();
-                        if (existing.length > 0) {
-                            throw new OpError(
-                                `ID collision: deck ${msg.deck.id} already exists on the server.`,
-                                "id_collision",
-                                true,
-                            );
+                    const existingRows = this.sql
+                        .exec("SELECT json FROM decks WHERE id = ?", msg.deck.id)
+                        .toArray();
+                    if (msg.isNew && existingRows.length > 0) {
+                        throw new OpError(
+                            `ID collision: deck ${msg.deck.id} already exists on the server.`,
+                            "id_collision",
+                            true,
+                        );
+                    }
+
+                    // UX-01: When renaming a parent deck, cascade the new prefix to all `Parent::Child` subdecks
+                    if (existingRows.length > 0) {
+                        const prevDeck: Deck = JSON.parse(existingRows[0].json);
+                        if (prevDeck.name && prevDeck.name !== msg.deck.name) {
+                            const oldPrefix = `${prevDeck.name}::`;
+                            const newPrefix = `${msg.deck.name}::`;
+                            const allDeckRows = this.sql.exec("SELECT id, json FROM decks").toArray();
+                            const nowSec = Math.floor(Date.now() / 1000);
+                            for (const r of allDeckRows) {
+                                const sub: Deck = JSON.parse(r.json);
+                                if (sub.id !== msg.deck.id && sub.name.startsWith(oldPrefix)) {
+                                    const updatedSub: Deck = {
+                                        ...sub,
+                                        name: `${newPrefix}${sub.name.slice(oldPrefix.length)}`,
+                                        mod: nowSec,
+                                    };
+                                    this.sql.exec(
+                                        "UPDATE decks SET json = ? WHERE id = ?",
+                                        JSON.stringify(updatedSub),
+                                        updatedSub.id,
+                                    );
+                                    renamedSubdecks.push(updatedSub);
+                                }
+                            }
                         }
                     }
+
                     this.sql.exec(
                         "INSERT OR REPLACE INTO decks (id, json) VALUES (?, ?)",
                         msg.deck.id,
                         JSON.stringify(msg.deck),
                     );
+                    if (this.getDeletionTombstone()) {
+                        this.clearDeletionTombstone();
+                    }
                     rev = this.bumpRevision(opId);
                 });
                 this.sendAck(ws, opId, rev);
-                this.broadcast({ type: "upsert_deck", opId, deck: msg.deck, revision: rev }, ws);
+                this.broadcast(
+                    {
+                        type: "upsert_deck",
+                        opId,
+                        deck: msg.deck,
+                        renamedSubdecks: renamedSubdecks.length > 0 ? renamedSubdecks : undefined,
+                        revision: rev,
+                    },
+                    ws,
+                );
                 return;
             }
 
             if (msg.type === "delete_deck") {
-                // Transactional cascading deletion of deck, subdecks, associated cards, and orphaned notes (D03)
                 let rev = 0;
                 const deletedDeckIds: number[] = [];
                 const deletedCardIds: number[] = [];
@@ -1425,7 +1568,6 @@ export class AnkiSyncServer extends DurableObject {
 
                 this.sendAck(ws, opId, rev);
                 await this.recomputeAndScheduleAlarm();
-                // Broadcast authoritative cascading delete to all clients (including sender so state matches)
                 this.broadcast({
                     type: "delete_deck",
                     opId,
@@ -1456,8 +1598,6 @@ export class AnkiSyncServer extends DurableObject {
             if (msg.type === "upsert_note") {
                 let rev = 0;
                 this.ctx.storage.transactionSync(() => {
-                    // Reject conflicting inserts for brand-new notes/cards instead of replacing
-                    // unrelated records that another device created with the same ID (D06).
                     if (msg.isNew) {
                         const existingNote = this.sql
                             .exec("SELECT id FROM notes WHERE id = ?", msg.note.id)
@@ -1482,6 +1622,42 @@ export class AnkiSyncServer extends DurableObject {
                             }
                         }
                     }
+
+                    // DATA-11: Enforce foreign-key relationship consistency against server decks & models
+                    const modelCount = Number(
+                        this.sql.exec("SELECT COUNT(*) as c FROM models").toArray()[0]?.c || 0,
+                    );
+                    if (modelCount > 0) {
+                        const modelRow = this.sql
+                            .exec("SELECT id FROM models WHERE id = ?", msg.note.mid)
+                            .toArray();
+                        if (modelRow.length === 0) {
+                            throw new OpError(
+                                `Referenced note type ${msg.note.mid} does not exist on the server.`,
+                                "validation",
+                                false,
+                            );
+                        }
+                    }
+
+                    const deckCount = Number(
+                        this.sql.exec("SELECT COUNT(*) as c FROM decks").toArray()[0]?.c || 0,
+                    );
+                    if (deckCount > 0) {
+                        for (const card of msg.cards) {
+                            const deckRow = this.sql
+                                .exec("SELECT id FROM decks WHERE id = ?", card.did)
+                                .toArray();
+                            if (deckRow.length === 0) {
+                                throw new OpError(
+                                    `Card ${card.id} references nonexistent deck ${card.did}.`,
+                                    "validation",
+                                    false,
+                                );
+                            }
+                        }
+                    }
+
                     this.sql.exec(
                         "INSERT OR REPLACE INTO notes (id, json) VALUES (?, ?)",
                         msg.note.id,
@@ -1493,6 +1669,9 @@ export class AnkiSyncServer extends DurableObject {
                             card.id,
                             JSON.stringify(card),
                         );
+                    }
+                    if (this.getDeletionTombstone()) {
+                        this.clearDeletionTombstone();
                     }
                     this.setMeta("last_activity_ms", String(Date.now()));
                     rev = this.bumpRevision(opId);
@@ -1507,9 +1686,10 @@ export class AnkiSyncServer extends DurableObject {
             }
 
             if (msg.type === "delete_note") {
-                // Derive all associated card IDs directly from server storage by nid (D04)
+                // DATA-02: Ignore client-supplied `msg.cardIds`. Derive affected card IDs
+                // strictly from authoritative server-side `c.nid === msg.noteId` relationships.
                 let rev = 0;
-                const removedCardIds = new Set<number>(msg.cardIds || []);
+                const removedCardIds = new Set<number>();
 
                 this.ctx.storage.transactionSync(() => {
                     for (const row of this.sql.exec("SELECT id, json FROM cards").toArray()) {
@@ -1541,6 +1721,28 @@ export class AnkiSyncServer extends DurableObject {
             if (msg.type === "update_card") {
                 let rev = 0;
                 this.ctx.storage.transactionSync(() => {
+                    // DATA-11: Verify referenced note and deck exist on the server
+                    const noteRow = this.sql
+                        .exec("SELECT id FROM notes WHERE id = ?", msg.card.nid)
+                        .toArray();
+                    if (noteRow.length === 0) {
+                        throw new OpError(
+                            `Card ${msg.card.id} references nonexistent note ${msg.card.nid}.`,
+                            "validation",
+                            false,
+                        );
+                    }
+                    const deckRow = this.sql
+                        .exec("SELECT id FROM decks WHERE id = ?", msg.card.did)
+                        .toArray();
+                    if (deckRow.length === 0) {
+                        throw new OpError(
+                            `Card ${msg.card.id} references nonexistent deck ${msg.card.did}.`,
+                            "validation",
+                            false,
+                        );
+                    }
+
                     this.sql.exec(
                         "INSERT OR REPLACE INTO cards (id, json) VALUES (?, ?)",
                         msg.card.id,
@@ -1574,7 +1776,6 @@ export class AnkiSyncServer extends DurableObject {
             }
 
             if (msg.type === "import_collection") {
-                // S10: a stale device must never be able to silently re-seed a deleted collection.
                 if (msg.seedOnUninitialized && this.getDeletionTombstone() && !this.isInitialized()) {
                     this.sendOpError(
                         ws,
@@ -1597,12 +1798,9 @@ export class AnkiSyncServer extends DurableObject {
                     return;
                 }
 
-                // Compare-and-swap: whole-collection overwrites must be anchored to the server
-                // revision the client last saw; stale clients cannot replace newer data (D02).
-                const cas = this.checkExpectedRevision(msg.expectedRevision);
+                const cas = this.checkExpectedRevision(msg.expectedRevision, msg.forceOverwrite);
                 if (!cas.ok) {
                     this.sendOpError(ws, opId, cas.error || "Revision conflict", "conflict_revision", true);
-                    // Give the client a fresh authoritative snapshot so it can reconcile.
                     this.broadcast(
                         {
                             type: "full_state",
@@ -1618,7 +1816,6 @@ export class AnkiSyncServer extends DurableObject {
                 }
 
                 const rev = this.saveFullCollection(msg.collection, opId);
-                // A deliberate, version-checked full import clears the deletion tombstone.
                 this.clearDeletionTombstone();
                 this.setMeta("last_activity_ms", String(Date.now()));
                 this.sendAck(ws, opId, rev);

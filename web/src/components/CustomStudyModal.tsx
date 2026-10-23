@@ -2,7 +2,8 @@
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 import { X } from "lucide-react";
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
+import { useAccessibleModal } from "./useAccessibleModal";
 
 interface Props {
     onApplyExtraLimit: (extraNew: number, extraReview: number) => void;
@@ -18,17 +19,7 @@ export const CustomStudyModal: React.FC<Props> = ({
     const [extraNew, setExtraNew] = useState<number>(10);
     const [extraReview, setExtraReview] = useState<number>(50);
     const [mode, setMode] = useState<"limits" | "forgotten">("limits");
-
-    useEffect(() => {
-        const onKeyDown = (e: KeyboardEvent) => {
-            if (e.key === "Escape") {
-                e.preventDefault();
-                onClose();
-            }
-        };
-        window.addEventListener("keydown", onKeyDown);
-        return () => window.removeEventListener("keydown", onKeyDown);
-    }, [onClose]);
+    const dialogRef = useAccessibleModal<HTMLDivElement>(true, onClose);
 
     const handleApply = () => {
         if (mode === "limits") {
@@ -42,6 +33,7 @@ export const CustomStudyModal: React.FC<Props> = ({
     return (
         <div className="modal-backdrop" onClick={onClose}>
             <div
+                ref={dialogRef}
                 role="dialog"
                 aria-modal="true"
                 aria-labelledby="custom-study-title"
@@ -66,9 +58,11 @@ export const CustomStudyModal: React.FC<Props> = ({
                 <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
                     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                         <label
+                            htmlFor="custom-study-mode-limits"
                             style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 14 }}
                         >
                             <input
+                                id="custom-study-mode-limits"
                                 type="radio"
                                 name="study_mode"
                                 checked={mode === "limits"}
@@ -77,9 +71,11 @@ export const CustomStudyModal: React.FC<Props> = ({
                             <span>Increase today's limits for this deck</span>
                         </label>
                         <label
+                            htmlFor="custom-study-mode-forgotten"
                             style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 14 }}
                         >
                             <input
+                                id="custom-study-mode-forgotten"
                                 type="radio"
                                 name="study_mode"
                                 checked={mode === "forgotten"}
@@ -94,6 +90,7 @@ export const CustomStudyModal: React.FC<Props> = ({
                             <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 8 }}>
                                 <div>
                                     <label
+                                        htmlFor="custom-study-extra-new"
                                         style={{
                                             fontSize: 13,
                                             color: "var(--text-secondary)",
@@ -104,6 +101,7 @@ export const CustomStudyModal: React.FC<Props> = ({
                                         Increase today's new card limit by:
                                     </label>
                                     <input
+                                        id="custom-study-extra-new"
                                         type="number"
                                         min={0}
                                         value={extraNew}
@@ -113,6 +111,7 @@ export const CustomStudyModal: React.FC<Props> = ({
                                 </div>
                                 <div>
                                     <label
+                                        htmlFor="custom-study-extra-rev"
                                         style={{
                                             fontSize: 13,
                                             color: "var(--text-secondary)",
@@ -123,6 +122,7 @@ export const CustomStudyModal: React.FC<Props> = ({
                                         Increase today's review card limit by:
                                     </label>
                                     <input
+                                        id="custom-study-extra-rev"
                                         type="number"
                                         min={0}
                                         value={extraReview}

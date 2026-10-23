@@ -2,12 +2,16 @@
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 import { CheckCircle, RotateCcw, UploadCloud, X } from "lucide-react";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useRef, useState } from "react";
 import { importApkg, importCsv, ImportResult } from "../core/import-export";
+import { SyncStatus } from "../core/sync-client";
 import { Collection } from "../core/types";
+import { useAccessibleModal } from "./useAccessibleModal";
 
 interface Props {
     collection: Collection;
+    syncStatus?: SyncStatus;
+    pendingOutboxCount?: number;
     onImportComplete: (updatedCol: Collection) => void;
     onRestoreBackup?: () => Promise<boolean>;
     hasBackup?: boolean;
@@ -16,32 +20,36 @@ interface Props {
 
 export const ImportModal: React.FC<Props> = ({
     collection,
+    syncStatus = "offline",
+    pendingOutboxCount = 0,
     onImportComplete,
     onRestoreBackup,
     hasBackup,
     onClose,
 }) => {
     const [isProcessing, setIsProcessing] = useState<boolean>(false);
+    const [progressStage, setProgressStage] = useState<string>("Inspecting package...");
     const [stagedCol, setStagedCol] = useState<Collection | null>(null);
     const [previewResult, setPreviewResult] = useState<ImportResult | null>(null);
     const [committedResult, setCommittedResult] = useState<ImportResult | null>(null);
     const [restoredSuccess, setRestoredSuccess] = useState<boolean>(false);
     const [errorMsg, setErrorMsg] = useState<string | null>(null);
     const fileInputRef = useRef<HTMLInputElement | null>(null);
+    const abortControllerRef = useRef<AbortController | null>(null);
 
-    useEffect(() => {
-        const onKeyDown = (e: KeyboardEvent) => {
-            if (e.key === "Escape") {
-                e.preventDefault();
-                onClose();
-            }
-        };
-        window.addEventListener("keydown", onKeyDown);
-        return () => window.removeEventListener("keydown", onKeyDown);
-    }, [onClose]);
+    const handleClose = () => {
+        abortControllerRef.current?.abort();
+        onClose();
+    };
+    const dialogRef = useAccessibleModal<HTMLDivElement>(true, handleClose);
 
     const handleFile = async (file: File) => {
+        abortControllerRef.current?.abort();
+        const controller = new AbortController();
+        abortControllerRef.current = controller;
+
         setIsProcessing(true);
+        setProgressStage("Inspecting package...");
         setErrorMsg(null);
         setPreviewResult(null);
         setCommittedResult(null);
@@ -56,7 +64,10 @@ export const ImportModal: React.FC<Props> = ({
                 || file.name.endsWith(".colpkg")
                 || file.name.endsWith(".zip")
             ) {
-                const res = await importApkg(file, clonedCol);
+                const res = await importApkg(file, clonedCol, {
+                    signal: controller.signal,
+                    onProgress: stage => setProgressStage(stage),
+                });
                 setStagedCol(clonedCol);
                 setPreviewResult(res);
             } else {
@@ -76,6 +87,7 @@ export const ImportModal: React.FC<Props> = ({
             setErrorMsg(err.message || "Failed to parse import file.");
         } finally {
             setIsProcessing(false);
+            abortControllerRef.current = null;
         }
     };
 
@@ -111,9 +123,17 @@ export const ImportModal: React.FC<Props> = ({
         }
     };
 
+    // UX-04: Distinguish local save vs waiting to sync vs backed up to cloud
+    const commitStatusHeading = syncStatus === "connected" && pendingOutboxCount === 0
+        ? "Backed up to cloud"
+        : syncStatus === "connected"
+        ? "Saved locally · Syncing to cloud..."
+        : "Saved locally · Waiting to sync";
+
     return (
-        <div className="modal-backdrop" onClick={onClose}>
+        <div className="modal-backdrop" onClick={handleClose}>
             <div
+                ref={dialogRef}
                 role="dialog"
                 aria-modal="true"
                 aria-labelledby="import-modal-title"
@@ -128,7 +148,7 @@ export const ImportModal: React.FC<Props> = ({
                     <button
                         type="button"
                         aria-label="Close dialog"
-                        onClick={onClose}
+                        onClick={handleClose}
                         style={{ border: "none", padding: 4, background: "transparent" }}
                     >
                         <X size={18} />
@@ -148,7 +168,8 @@ export const ImportModal: React.FC<Props> = ({
                         }}
                     />
 
-                    <div
+                    <button
+                        type="button"
                         onDragOver={e => e.preventDefault()}
                         onDrop={onDrop}
                         onClick={() => fileInputRef.current?.click()}
@@ -163,25 +184,49 @@ export const ImportModal: React.FC<Props> = ({
                             flexDirection: "column",
                             alignItems: "center",
                             gap: 8,
+                            width: "100%",
                         }}
                     >
                         <UploadCloud size={32} color="var(--text-secondary)" />
-                        <div style={{ fontSize: 14, fontWeight: 500 }}>
+                        <div style={{ fontSize: 14, fontWeight: 500, color: "var(--text-primary)" }}>
                             Choose or drop .apkg or CSV/TSV file
                         </div>
                         <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
                             Previews decks, notes, cards, and duplicates before committing
                         </div>
-                    </div>
+                    </button>
 
                     {isProcessing && (
-                        <div style={{ textAlign: "center", fontSize: 14, color: "var(--color-new)" }}>
-                            Inspecting package...
+                        <div
+                            role="status"
+                            aria-live="polite"
+                            style={{
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "space-between",
+                                gap: 8,
+                                fontSize: 13.5,
+                                color: "var(--color-new)",
+                            }}
+                        >
+                            <span>{progressStage}</span>
+                            {abortControllerRef.current && (
+                                <button
+                                    type="button"
+                                    onClick={() => abortControllerRef.current?.abort()}
+                                    style={{ fontSize: 12, padding: "3px 8px" }}
+                                >
+                                    Cancel
+                                </button>
+                            )}
                         </div>
                     )}
 
                     {errorMsg && (
-                        <div style={{ color: "var(--color-again)", fontSize: 13, textAlign: "center" }}>
+                        <div
+                            role="alert"
+                            style={{ color: "var(--color-again)", fontSize: 13, textAlign: "center" }}
+                        >
                             {errorMsg}
                         </div>
                     )}
@@ -245,6 +290,8 @@ export const ImportModal: React.FC<Props> = ({
 
                     {committedResult && (
                         <div
+                            role="status"
+                            aria-live="polite"
                             style={{
                                 display: "flex",
                                 flexDirection: "column",
@@ -258,7 +305,7 @@ export const ImportModal: React.FC<Props> = ({
                         >
                             <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 600 }}>
                                 <CheckCircle size={18} />
-                                <span>Import committed</span>
+                                <span>{commitStatusHeading}</span>
                             </div>
                             <div style={{ fontSize: 12, opacity: 0.9 }}>
                                 {committedResult.cardCount} cards ({committedResult.noteCount} notes,{" "}
@@ -269,6 +316,8 @@ export const ImportModal: React.FC<Props> = ({
 
                     {restoredSuccess && (
                         <div
+                            role="status"
+                            aria-live="polite"
                             style={{
                                 padding: "10px 14px",
                                 background: "rgba(2, 132, 199, 0.1)",
@@ -297,7 +346,7 @@ export const ImportModal: React.FC<Props> = ({
                             </button>
                         )
                         : <span />}
-                    <button type="button" onClick={onClose}>
+                    <button type="button" onClick={handleClose}>
                         {committedResult || restoredSuccess ? "Done" : "Cancel"}
                     </button>
                 </div>

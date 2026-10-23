@@ -287,10 +287,42 @@ input:focus, select:focus, textarea:focus {
   gap: 6px;
   word-break: break-word;
   overflow-wrap: anywhere;
+  width: 100%;
+  border: none;
+  background: transparent;
+  padding: 2px 0;
+  text-align: left;
+  color: inherit;
+  font-size: inherit;
 }
 
 .deck-name-cell:hover {
   text-decoration: underline;
+  background: transparent;
+}
+
+.deck-name-cell:focus-visible,
+.browser-row-btn:focus-visible {
+  outline: 2px solid var(--color-new);
+  outline-offset: 2px;
+}
+
+.browser-row-btn {
+  width: 100%;
+  border: none;
+  background: transparent;
+  padding: 0;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block;
+}
+
+.browser-row-btn:hover {
+  background: transparent;
 }
 
 .count-badge {

@@ -22,7 +22,7 @@ import {
     XCircle,
 } from "lucide-react";
 import React, { useEffect, useState } from "react";
-import { OutboxEntry } from "../core/idb-storage";
+import { getClearDataOnSignOutPreference, OutboxEntry, setClearDataOnSignOutPreference } from "../core/idb-storage";
 import {
     ClientPushPreferences,
     getCurrentPushSubscription,
@@ -39,6 +39,7 @@ import {
 import { canInstallPrompt, isIosDevice, isStandalone, promptPwaInstall } from "../core/pwa";
 import { SyncStatus } from "../core/sync-client";
 import { getStoredTheme, setStoredTheme, ThemeMode } from "../core/theme";
+import { useAccessibleModal } from "./useAccessibleModal";
 
 interface Props {
     syncStatus: SyncStatus;
@@ -48,7 +49,7 @@ interface Props {
     onRetryConflict?: (opId: string) => Promise<void>;
     onDiscardConflict?: (opId: string) => Promise<void>;
     onForceSync: () => void;
-    onClearOfflineData?: () => Promise<void>;
+    onClearOfflineData?: (options?: { forceDiscardPending?: boolean }) => Promise<void>;
     onDeleteAccountData?: () => Promise<void>;
     onClose: () => void;
     onShowInstallGuide?: () => void;
@@ -73,7 +74,7 @@ function describeConflictedOp(entry: OutboxEntry): string {
         case "save_media":
             return "Media upload";
         case "import_collection":
-            return "Collection import";
+            return "Collection import (overwrites cloud snapshot)";
         default:
             return entry.msg.type;
     }
@@ -92,6 +93,7 @@ export const SyncModal: React.FC<Props> = ({
     onShowInstallGuide,
 }) => {
     const { userId, getToken } = useAuth();
+    const dialogRef = useAccessibleModal<HTMLDivElement>(true, onClose);
     const [busyConflict, setBusyConflict] = useState<string | null>(null);
     const [conflictError, setConflictError] = useState<string | null>(null);
     const resolveConflict = async (opId: string, action?: (id: string) => Promise<void>) => {
@@ -108,6 +110,7 @@ export const SyncModal: React.FC<Props> = ({
         }
     };
     const [themeMode, setThemeMode] = useState<ThemeMode>(getStoredTheme());
+    const [clearOnSignOut, setClearOnSignOut] = useState<boolean>(() => getClearDataOnSignOutPreference());
     const [pushSupported, setPushSupported] = useState(false);
     const [permission, setPermission] = useState<NotificationPermission>("default");
     const [hasSubscription, setHasSubscription] = useState(false);
@@ -122,6 +125,8 @@ export const SyncModal: React.FC<Props> = ({
     const [canPrompt, setCanPrompt] = useState(false);
     const [pushStatus, setPushStatus] = useState<PushStatusResponse | null>(null);
     const [confirmWipe, setConfirmWipe] = useState<boolean>(false);
+    const [isDeletingCloud, setIsDeletingCloud] = useState<boolean>(false);
+    const [confirmClearCache, setConfirmClearCache] = useState<boolean>(false);
 
     const refreshServerPushStatus = async () => {
         const status = await getPushStatus(getToken);
@@ -136,6 +141,7 @@ export const SyncModal: React.FC<Props> = ({
         setStandalone(isStandalone());
         setCanPrompt(canInstallPrompt());
         setThemeMode(getStoredTheme());
+        setClearOnSignOut(getClearDataOnSignOutPreference());
 
         if (supported) {
             setPermission(getNotificationPermission());
@@ -145,17 +151,6 @@ export const SyncModal: React.FC<Props> = ({
             refreshServerPushStatus();
         }
     }, [userId]);
-
-    useEffect(() => {
-        const onKeyDown = (e: KeyboardEvent) => {
-            if (e.key === "Escape") {
-                e.preventDefault();
-                onClose();
-            }
-        };
-        window.addEventListener("keydown", onKeyDown);
-        return () => window.removeEventListener("keydown", onKeyDown);
-    }, [onClose]);
 
     const handleThemeChange = (newTheme: ThemeMode) => {
         setThemeMode(newTheme);
@@ -263,10 +258,12 @@ export const SyncModal: React.FC<Props> = ({
 
     const isIos = isIosDevice();
     const iosNeedsInstall = isIos && !standalone;
+    const totalUnsynced = pendingOutboxCount + conflictedOps.length;
 
     return (
         <div className="modal-backdrop" onClick={onClose}>
             <div
+                ref={dialogRef}
                 role="dialog"
                 aria-modal="true"
                 aria-labelledby="sync-modal-title"
@@ -370,7 +367,7 @@ export const SyncModal: React.FC<Props> = ({
                         >
                             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                                 <span className={`sync-status ${syncStatus}`} />
-                                <div>
+                                <div role="status" aria-live="polite">
                                     <div style={{ fontSize: 14, fontWeight: 500, textTransform: "capitalize" }}>
                                         {syncStatus === "connected" ? "Real-time Connected" : syncStatus}
                                     </div>
@@ -453,7 +450,8 @@ export const SyncModal: React.FC<Props> = ({
                                                 style={{ fontSize: 12, padding: "4px 8px" }}
                                                 title="Send this change to the server again"
                                             >
-                                                <Undo2 size={11} className="inline" /> Retry
+                                                <Undo2 size={11} className="inline" />{" "}
+                                                {entry.msg.type === "import_collection" ? "Force Overwrite" : "Retry"}
                                             </button>
                                             <button
                                                 type="button"
@@ -629,11 +627,15 @@ export const SyncModal: React.FC<Props> = ({
                                             flexWrap: "wrap",
                                         }}
                                     >
-                                        <span style={{ fontSize: 12.5, color: "var(--text-secondary)" }}>
+                                        <label
+                                            htmlFor="push-pref-daily-mode"
+                                            style={{ fontSize: 12.5, color: "var(--text-secondary)" }}
+                                        >
                                             Reminder Schedule
-                                        </span>
+                                        </label>
                                         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                                             <select
+                                                id="push-pref-daily-mode"
                                                 value={pushStatus?.preferences?.dailyMode || "adaptive"}
                                                 onChange={e =>
                                                     handlePrefChange({
@@ -652,6 +654,8 @@ export const SyncModal: React.FC<Props> = ({
 
                                             {pushStatus?.preferences?.dailyMode === "fixed" && (
                                                 <input
+                                                    id="push-pref-daily-time"
+                                                    aria-label="Daily reminder time"
                                                     type="time"
                                                     value={pushStatus?.preferences?.dailyTime || "09:00"}
                                                     onChange={e => handlePrefChange({ dailyTime: e.target.value })}
@@ -662,6 +666,7 @@ export const SyncModal: React.FC<Props> = ({
                                     </div>
 
                                     <label
+                                        htmlFor="push-pref-learning-alerts"
                                         style={{
                                             display: "flex",
                                             justifyContent: "space-between",
@@ -673,9 +678,33 @@ export const SyncModal: React.FC<Props> = ({
                                     >
                                         <span>Notify when short-term learning steps finish</span>
                                         <input
+                                            id="push-pref-learning-alerts"
                                             type="checkbox"
                                             checked={pushStatus?.preferences?.learningAlerts !== false}
                                             onChange={e => handlePrefChange({ learningAlerts: e.target.checked })}
+                                        />
+                                    </label>
+
+                                    {/* SEC-10: Lock-screen notification privacy preference (default off) */}
+                                    <label
+                                        htmlFor="push-pref-include-deck-name"
+                                        style={{
+                                            display: "flex",
+                                            justifyContent: "space-between",
+                                            alignItems: "center",
+                                            fontSize: 12.5,
+                                            color: "var(--text-secondary)",
+                                            cursor: "pointer",
+                                        }}
+                                    >
+                                        <span>
+                                            Include deck names in notifications (disable for lock-screen privacy)
+                                        </span>
+                                        <input
+                                            id="push-pref-include-deck-name"
+                                            type="checkbox"
+                                            checked={Boolean(pushStatus?.preferences?.includeDeckName)}
+                                            onChange={e => handlePrefChange({ includeDeckName: e.target.checked })}
                                         />
                                     </label>
 
@@ -711,6 +740,8 @@ export const SyncModal: React.FC<Props> = ({
 
                         {pushFeedback && (
                             <div
+                                role={pushFeedback.type === "error" ? "alert" : "status"}
+                                aria-live="polite"
                                 style={{
                                     fontSize: 12.5,
                                     padding: "8px 12px",
@@ -741,7 +772,7 @@ export const SyncModal: React.FC<Props> = ({
 
                     <hr style={{ border: "none", borderTop: "1px solid var(--border-color)", margin: "2px 0" }} />
 
-                    {/* Progressive Web App & Storage Management (S07, S10, U07) */}
+                    {/* Progressive Web App & Storage Management (SEC-04, DATA-04, DATA-05) */}
                     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                         <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)" }}>
                             App & Data Management
@@ -780,21 +811,137 @@ export const SyncModal: React.FC<Props> = ({
                             )}
                         </div>
 
+                        {/* SEC-04: Shared-device sign-out data cleanup preference */}
+                        <label
+                            htmlFor="pref-clear-on-signout"
+                            style={{
+                                display: "flex",
+                                justifyContent: "space-between",
+                                alignItems: "center",
+                                padding: "8px 12px",
+                                background: "var(--bg-secondary)",
+                                borderRadius: 8,
+                                border: "1px solid var(--border-color)",
+                                fontSize: 12.5,
+                                color: "var(--text-secondary)",
+                                cursor: "pointer",
+                            }}
+                        >
+                            <span>Remove downloaded study data when signing out</span>
+                            <input
+                                id="pref-clear-on-signout"
+                                type="checkbox"
+                                checked={clearOnSignOut}
+                                onChange={e => {
+                                    setClearOnSignOut(e.target.checked);
+                                    setClearDataOnSignOutPreference(e.target.checked);
+                                }}
+                            />
+                        </label>
+
                         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", paddingTop: 4 }}>
-                            {onClearOfflineData && (
+                            {onClearOfflineData && !confirmClearCache && (
                                 <button
                                     type="button"
                                     onClick={async () => {
-                                        await onClearOfflineData();
-                                        setPushFeedback({
-                                            type: "info",
-                                            msg: "Local offline cache cleared on this device.",
-                                        });
+                                        // DATA-05: Require explicit confirmation if unsynced outbox ops exist
+                                        if (totalUnsynced > 0) {
+                                            setConfirmClearCache(true);
+                                            return;
+                                        }
+                                        try {
+                                            await onClearOfflineData({ forceDiscardPending: false });
+                                            setPushFeedback({
+                                                type: "info",
+                                                msg: "Local offline cache cleared on this device.",
+                                            });
+                                        } catch (err: any) {
+                                            setPushFeedback({
+                                                type: "error",
+                                                msg: err?.message || "Failed to clear offline cache.",
+                                            });
+                                        }
                                     }}
                                     style={{ fontSize: 12, padding: "5px 10px" }}
                                 >
                                     Clear Offline Cache
                                 </button>
+                            )}
+
+                            {confirmClearCache && onClearOfflineData && (
+                                <div
+                                    role="alert"
+                                    style={{
+                                        display: "flex",
+                                        flexDirection: "column",
+                                        gap: 8,
+                                        width: "100%",
+                                        padding: "10px 12px",
+                                        borderRadius: 8,
+                                        background: "rgba(217, 119, 6, 0.1)",
+                                        border: "1px solid rgba(217, 119, 6, 0.4)",
+                                        fontSize: 12.5,
+                                    }}
+                                >
+                                    <div style={{ color: "var(--color-again)", fontWeight: 500 }}>
+                                        Warning: You have {totalUnsynced} unsynced offline{" "}
+                                        {totalUnsynced === 1 ? "change" : "changes"}. Clearing the offline cache now
+                                        will permanently discard those unsynced changes.
+                                    </div>
+                                    <div
+                                        style={{
+                                            display: "flex",
+                                            gap: 6,
+                                            justifyContent: "flex-end",
+                                            flexWrap: "wrap",
+                                        }}
+                                    >
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setConfirmClearCache(false);
+                                                onForceSync();
+                                            }}
+                                            style={{ fontSize: 12, padding: "4px 8px" }}
+                                        >
+                                            Sync First
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setConfirmClearCache(false)}
+                                            style={{ fontSize: 12, padding: "4px 8px" }}
+                                        >
+                                            Cancel
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={async () => {
+                                                try {
+                                                    await onClearOfflineData({ forceDiscardPending: true });
+                                                    setConfirmClearCache(false);
+                                                    setPushFeedback({
+                                                        type: "info",
+                                                        msg: "Offline cache and unsynced changes discarded.",
+                                                    });
+                                                } catch (err: any) {
+                                                    setPushFeedback({
+                                                        type: "error",
+                                                        msg: err?.message || "Failed to clear offline cache.",
+                                                    });
+                                                }
+                                            }}
+                                            style={{
+                                                fontSize: 12,
+                                                padding: "4px 8px",
+                                                background: "var(--color-again)",
+                                                borderColor: "var(--color-again)",
+                                                color: "#fff",
+                                            }}
+                                        >
+                                            Discard Unsynced & Clear
+                                        </button>
+                                    </div>
+                                </div>
                             )}
 
                             {onDeleteAccountData && !confirmWipe && (
@@ -823,6 +970,7 @@ export const SyncModal: React.FC<Props> = ({
                                     </span>
                                     <button
                                         type="button"
+                                        disabled={isDeletingCloud}
                                         onClick={() => setConfirmWipe(false)}
                                         style={{ fontSize: 12, padding: "4px 8px" }}
                                     >
@@ -830,9 +978,22 @@ export const SyncModal: React.FC<Props> = ({
                                     </button>
                                     <button
                                         type="button"
+                                        disabled={isDeletingCloud}
                                         onClick={async () => {
-                                            await onDeleteAccountData();
-                                            setConfirmWipe(false);
+                                            setIsDeletingCloud(true);
+                                            setPushFeedback(null);
+                                            try {
+                                                // DATA-04: Do not claim success or wipe local state if server deletion fails
+                                                await onDeleteAccountData();
+                                                setConfirmWipe(false);
+                                            } catch (err: any) {
+                                                setPushFeedback({
+                                                    type: "error",
+                                                    msg: err?.message || "Failed to delete cloud account data.",
+                                                });
+                                            } finally {
+                                                setIsDeletingCloud(false);
+                                            }
                                         }}
                                         style={{
                                             fontSize: 12,
@@ -842,7 +1003,7 @@ export const SyncModal: React.FC<Props> = ({
                                             color: "#fff",
                                         }}
                                     >
-                                        Confirm Wipe
+                                        {isDeletingCloud ? "Deleting..." : "Confirm Wipe"}
                                     </button>
                                 </div>
                             )}

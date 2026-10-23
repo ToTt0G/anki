@@ -28,6 +28,13 @@ export const CyborgDuckLoader: React.FC<{ children?: React.ReactNode }> = ({ chi
         const ctx = canvas.getContext("2d");
         if (!ctx) { return; }
 
+        const reducedMotionQuery = typeof window !== "undefined" && typeof window.matchMedia === "function"
+            ? window.matchMedia("(prefers-reduced-motion: reduce)")
+            : null;
+        if (reducedMotionQuery?.matches) {
+            return;
+        }
+
         const particles: Particle[] = [];
         let gridOffset = 0;
         let rafId = 0;

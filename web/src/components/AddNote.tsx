@@ -5,6 +5,7 @@ import { Image as ImageIcon, Plus } from "lucide-react";
 import React, { useRef, useState } from "react";
 import { findClozeNumbers, wrapInCloze } from "../core/cloze";
 import { generateUniqueId } from "../core/ids";
+import { inspectMediaBytes, MAX_SINGLE_MEDIA_BYTES, normalizeMediaFilename } from "../core/media-validation";
 import { sanitizeCardHtml } from "../core/sanitize";
 import { Card, Collection, Note } from "../core/types";
 
@@ -64,15 +65,39 @@ export const AddNote: React.FC<Props> = ({
         fileInputRef.current?.click();
     };
 
-    const handleImageFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const handleImageFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
+        e.target.value = "";
         if (!file) { return; }
 
-        const reader = new FileReader();
-        reader.onload = () => {
-            const dataUrl = reader.result as string;
-            const cleanName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-            const filename = `paste_${generateUniqueId()}_${cleanName}`;
+        // UX-10 & SEC-13: Validate size, extension, magic bytes, and dimensions before optimistic state
+        setErrorMsg(null);
+        if (file.size > MAX_SINGLE_MEDIA_BYTES) {
+            setErrorMsg(
+                `Image exceeds maximum allowed size (${Math.round(MAX_SINGLE_MEDIA_BYTES / 1024 / 1024)} MB).`,
+            );
+            return;
+        }
+        const safeBase = normalizeMediaFilename(file.name);
+        if (!safeBase || !file.type.startsWith("image/")) {
+            setErrorMsg("Unsupported image format. Please choose a PNG, JPEG, GIF, WebP, or AVIF image.");
+            return;
+        }
+
+        try {
+            const bytes = new Uint8Array(await file.arrayBuffer());
+            const inspected = inspectMediaBytes(bytes);
+            if (!inspected.ok || !inspected.mime.startsWith("image/")) {
+                setErrorMsg(inspected.ok ? "File is not a supported image." : inspected.error);
+                return;
+            }
+
+            let binary = "";
+            for (let i = 0; i < bytes.length; i += 0x8000) {
+                binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + 0x8000)));
+            }
+            const dataUrl = `data:${inspected.mime};base64,${btoa(binary)}`;
+            const filename = `paste_${generateUniqueId()}_${safeBase}`;
 
             if (onSaveMedia) {
                 onSaveMedia(filename, dataUrl);
@@ -96,9 +121,9 @@ export const AddNote: React.FC<Props> = ({
                     [targetIdx]: currentVal ? `${currentVal}\n${imgTag}` : imgTag,
                 }));
             }
-        };
-        reader.readAsDataURL(file);
-        e.target.value = "";
+        } catch {
+            setErrorMsg("Could not read image file.");
+        }
     };
 
     const handleAdd = () => {
@@ -226,8 +251,11 @@ export const AddNote: React.FC<Props> = ({
 
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
                 <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                    <label style={{ fontSize: 13, color: "var(--text-secondary)" }}>Type</label>
+                    <label htmlFor="add-note-type-select" style={{ fontSize: 13, color: "var(--text-secondary)" }}>
+                        Type
+                    </label>
                     <select
+                        id="add-note-type-select"
                         value={selectedMid}
                         onChange={e => setSelectedMid(Number(e.target.value))}
                     >
@@ -240,8 +268,11 @@ export const AddNote: React.FC<Props> = ({
                 </div>
 
                 <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                    <label style={{ fontSize: 13, color: "var(--text-secondary)" }}>Deck</label>
+                    <label htmlFor="add-note-deck-select" style={{ fontSize: 13, color: "var(--text-secondary)" }}>
+                        Deck
+                    </label>
                     <select
+                        id="add-note-deck-select"
                         value={selectedDid}
                         onChange={e => setSelectedDid(Number(e.target.value))}
                     >
@@ -255,58 +286,65 @@ export const AddNote: React.FC<Props> = ({
             </div>
 
             {/* Note Fields */}
-            {activeModel.flds.map((fld, idx) => (
-                <div key={fld.name} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                        <label style={{ fontSize: 13, fontWeight: 500 }}>{fld.name}</label>
-                        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                            <button
-                                type="button"
-                                onClick={() =>
-                                    triggerImageUpload(idx)}
-                                style={{
-                                    padding: "3px 8px",
-                                    fontSize: 12,
-                                    display: "inline-flex",
-                                    alignItems: "center",
-                                    gap: 4,
-                                }}
-                                title="Insert Image"
-                            >
-                                <ImageIcon size={13} />
-                                <span>Image</span>
-                            </button>
-                            {activeModel.type === 1 && idx === 0 && (
+            {activeModel.flds.map((fld, idx) => {
+                const fieldId = `add-note-field-${idx}`;
+                return (
+                    <div key={fld.name} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                            <label htmlFor={fieldId} style={{ fontSize: 13, fontWeight: 500 }}>
+                                {fld.name}
+                            </label>
+                            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                                 <button
                                     type="button"
-                                    onClick={() => handleInsertCloze(idx)}
-                                    style={{ padding: "3px 8px", fontSize: 12 }}
-                                    title="Cloze deletion ([...])"
+                                    onClick={() => triggerImageUpload(idx)}
+                                    style={{
+                                        padding: "3px 8px",
+                                        fontSize: 12,
+                                        display: "inline-flex",
+                                        alignItems: "center",
+                                        gap: 4,
+                                    }}
+                                    title="Insert Image"
                                 >
-                                    [...]
+                                    <ImageIcon size={13} />
+                                    <span>Image</span>
                                 </button>
-                            )}
+                                {activeModel.type === 1 && idx === 0 && (
+                                    <button
+                                        type="button"
+                                        onClick={() => handleInsertCloze(idx)}
+                                        style={{ padding: "3px 8px", fontSize: 12 }}
+                                        title="Cloze deletion ([...])"
+                                    >
+                                        [...]
+                                    </button>
+                                )}
+                            </div>
                         </div>
+                        <textarea
+                            id={fieldId}
+                            ref={el => {
+                                fieldRefs.current[idx] = el;
+                            }}
+                            rows={fld.name.toLowerCase().includes("back")
+                                    || fld.name.toLowerCase().includes("text")
+                                ? 4
+                                : 2}
+                            value={fieldValues[idx] || ""}
+                            onChange={e => handleFieldChange(idx, e.target.value)}
+                        />
                     </div>
-                    <textarea
-                        ref={el => {
-                            fieldRefs.current[idx] = el;
-                        }}
-                        rows={fld.name.toLowerCase().includes("back")
-                                || fld.name.toLowerCase().includes("text")
-                            ? 4
-                            : 2}
-                        value={fieldValues[idx] || ""}
-                        onChange={e =>
-                            handleFieldChange(idx, e.target.value)}
-                    />
-                </div>
-            ))}
+                );
+            })}
 
             {/* Tags */}
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                <label style={{ fontSize: 13, color: "var(--text-secondary)" }}>Tags</label>
+                <label htmlFor="add-note-tags-input" style={{ fontSize: 13, color: "var(--text-secondary)" }}>
+                    Tags
+                </label>
                 <input
+                    id="add-note-tags-input"
                     type="text"
                     value={tagsStr}
                     placeholder="tag1 tag2"
@@ -315,8 +353,16 @@ export const AddNote: React.FC<Props> = ({
             </div>
 
             <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 12, marginTop: 8 }}>
-                {errorMsg && <span style={{ fontSize: 13, color: "var(--color-again)" }}>{errorMsg}</span>}
-                {addedStatus && <span style={{ fontSize: 13, color: "var(--color-due)" }}>Added</span>}
+                {errorMsg && (
+                    <span role="alert" style={{ fontSize: 13, color: "var(--color-again)" }}>
+                        {errorMsg}
+                    </span>
+                )}
+                {addedStatus && (
+                    <span role="status" aria-live="polite" style={{ fontSize: 13, color: "var(--color-due)" }}>
+                        Added
+                    </span>
+                )}
                 <button type="button" className="primary" onClick={handleAdd} style={{ padding: "8px 24px" }}>
                     <Plus size={16} />
                     <span>Add</span>

@@ -2,7 +2,7 @@
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 import { renderClozeBack, renderClozeFront } from "./cloze";
-import { sanitizeCardCss, sanitizeCardHtml } from "./sanitize";
+import { extractTextFromHtml, sanitizeCardCss, sanitizeCardHtml } from "./sanitize";
 import { Card, Note, NoteType } from "./types";
 
 export interface RenderedCard {
@@ -11,10 +11,31 @@ export interface RenderedCard {
     css: string;
 }
 
+/**
+ * Safely decode a percent-encoded URI component without throwing on malformed `%` sequences (UX-12).
+ */
+export function safeDecodeURIComponent(raw: string): string {
+    try {
+        return decodeURIComponent(raw);
+    } catch {
+        return raw;
+    }
+}
+
+function escapeHtmlText(text: string): string {
+    return text
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+}
+
+/**
+ * Extract plain text from HTML without ever assigning untrusted content to `innerHTML`
+ * in the active parent application document (SEC-05).
+ */
 export function stripHtml(html: string): string {
-    const tmp = document.createElement("div");
-    tmp.innerHTML = html;
-    return tmp.textContent || tmp.innerText || "";
+    return extractTextFromHtml(html);
 }
 
 export function renderCardTemplate(
@@ -69,7 +90,9 @@ export function renderCardTemplate(
         out = out.replace(/\{\{type:([^}]+)\}\}/g, (_m, fieldName) => {
             const val = fieldsMap[fieldName.trim()] || "";
             if (isBack) {
-                return `<div class="type-answer-result"><span class="type-good">${stripHtml(val)}</span></div>`;
+                return `<div class="type-answer-result"><span class="type-good">${
+                    escapeHtmlText(stripHtml(val))
+                }</span></div>`;
             } else {
                 return `<div class="type-answer-box"><input type="text" class="type-input" placeholder="" /></div>`;
             }
@@ -95,24 +118,25 @@ export function renderCardTemplate(
             return full;
         });
 
-        // 8. Replace [sound:filename.mp3] with audio tags
+        // 8. Replace [sound:filename.mp3] with audio tags (using safeDecodeURIComponent UX-12)
         out = out.replace(/\[sound:([^\]]+)\]/g, (_m, filename) => {
-            const decodedFilename = decodeURIComponent(filename.trim());
-            const src = mediaMap && (mediaMap[filename.trim()] || mediaMap[decodedFilename])
-                ? (mediaMap[filename.trim()] || mediaMap[decodedFilename])
-                : `/media/${filename.trim()}`;
+            const rawTrimmed = filename.trim();
+            const decodedFilename = safeDecodeURIComponent(rawTrimmed);
+            const src = mediaMap && (mediaMap[rawTrimmed] || mediaMap[decodedFilename])
+                ? (mediaMap[rawTrimmed] || mediaMap[decodedFilename])
+                : `/media/${rawTrimmed}`;
             return `<audio controls class="anki-audio" src="${src}"></audio>`;
         });
 
-        // 9. Resolve images: handles relative src, encoded filenames, and ensures responsive bounds
-        out = out.replace(/<img\b([^>]*)src=["']([^"']+)["']([^>]*)>/gi, (full, beforeAttrs, src, afterAttrs) => {
+        // 9. Resolve images: handles relative src, encoded filenames, and ensures responsive bounds (UX-12)
+        out = out.replace(/<img\b([^>]*)src=["']([^"']+)["']([^>]*)>/gi, (_full, beforeAttrs, src, afterAttrs) => {
             const trimmedSrc = src.trim();
             let resolvedSrc = trimmedSrc;
 
             if (mediaMap) {
-                const decodedSrc = decodeURIComponent(trimmedSrc);
+                const decodedSrc = safeDecodeURIComponent(trimmedSrc);
                 const baseName = trimmedSrc.split("/").pop() || trimmedSrc;
-                const decodedBaseName = decodeURIComponent(baseName);
+                const decodedBaseName = safeDecodeURIComponent(baseName);
 
                 if (mediaMap[trimmedSrc]) {
                     resolvedSrc = mediaMap[trimmedSrc];

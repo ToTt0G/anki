@@ -18,7 +18,7 @@ import { Navbar, NavView } from "./components/Navbar";
 import { Reviewer } from "./components/Reviewer";
 import { StatsView } from "./components/StatsView";
 import { SyncModal } from "./components/SyncModal";
-import { OutboxEntry } from "./core/idb-storage";
+import { clearUserOfflineData, getClearDataOnSignOutPreference, OutboxEntry } from "./core/idb-storage";
 import { generateUniqueId } from "./core/ids";
 import { exportApkg, exportDeckCsv, importEp1100Decks } from "./core/import-export";
 import { syncPushSubscriptionForUser } from "./core/push-manager";
@@ -28,26 +28,70 @@ import { SyncClient, SyncStatus } from "./core/sync-client";
 import { setStoredTheme } from "./core/theme";
 import { Card, Collection, Deck, DeckConfig, Note, RevlogEntry } from "./core/types";
 
-function readViewFromUrl(): NavView {
-    if (typeof window === "undefined") { return "decks"; }
-    const view = new URLSearchParams(window.location.search).get("view");
-    if (view === "add" || view === "browse" || view === "stats" || view === "decks") {
-        return view;
+interface UrlNavState {
+    view: NavView;
+    deckId: number | null;
+    studying: boolean;
+}
+
+function readNavStateFromUrl(): UrlNavState {
+    if (typeof window === "undefined") {
+        return { view: "decks", deckId: null, studying: false };
     }
-    return "decks";
+    const params = new URLSearchParams(window.location.search);
+    const rawView = params.get("view");
+    const view: NavView = rawView === "add" || rawView === "browse" || rawView === "stats" || rawView === "decks"
+        ? rawView
+        : "decks";
+    const rawDeck = params.get("deck");
+    const deckId = rawDeck && Number.isFinite(Number(rawDeck)) && Number(rawDeck) > 0
+        ? Number(rawDeck)
+        : null;
+    const studying = params.get("study") === "1" && deckId !== null;
+    return { view, deckId, studying };
+}
+
+function writeNavStateToUrl(next: UrlNavState, mode: "push" | "replace" = "push"): void {
+    if (typeof window === "undefined") { return; }
+    try {
+        const url = new URL(window.location.href);
+        if (next.view === "decks") {
+            url.searchParams.delete("view");
+        } else {
+            url.searchParams.set("view", next.view);
+        }
+        if (next.view === "decks" && next.deckId !== null) {
+            url.searchParams.set("deck", String(next.deckId));
+        } else {
+            url.searchParams.delete("deck");
+        }
+        if (next.view === "decks" && next.studying && next.deckId !== null) {
+            url.searchParams.set("study", "1");
+        } else {
+            url.searchParams.delete("study");
+        }
+        if (url.toString() === window.location.href) { return; }
+        if (mode === "push") {
+            window.history.pushState(next, "", url.toString());
+        } else {
+            window.history.replaceState(next, "", url.toString());
+        }
+    } catch {
+        // ignore
+    }
 }
 
 export const App: React.FC = () => {
     const { isLoaded, isSignedIn, userId, getToken } = useAuth();
     const clerk = useClerk();
+    const initialNav = readNavStateFromUrl();
     const [collection, setCollection] = useState<Collection | null>(null);
-    const [currentView, setCurrentView] = useState<NavView>(() => readViewFromUrl());
-    const [selectedDeckId, setSelectedDeckId] = useState<number | null>(null);
+    const [currentView, setCurrentView] = useState<NavView>(initialNav.view);
+    const [selectedDeckId, setSelectedDeckId] = useState<number | null>(initialNav.deckId);
     const [editingNoteId, setEditingNoteId] = useState<number | null>(null);
-    const [isStudying, setIsStudying] = useState<boolean>(false);
+    const [isStudying, setIsStudying] = useState<boolean>(initialNav.studying);
     const [syncStatus, setSyncStatus] = useState<SyncStatus>("offline");
     const [syncBannerError, setSyncBannerError] = useState<string | null>(null);
-    // Temporary Custom Study session: a read-only filtered card queue, not a schedule mutation (C10).
     const [customStudySession, setCustomStudySession] = useState<
         {
             deckId: number;
@@ -64,6 +108,7 @@ export const App: React.FC = () => {
     const [showManualInstallGuide, setShowManualInstallGuide] = useState<boolean>(false);
 
     const syncClientRef = useRef<SyncClient | null>(null);
+    const previousUserIdRef = useRef<string | null>(null);
     const getTokenRef = useRef(getToken);
     getTokenRef.current = getToken;
 
@@ -72,9 +117,12 @@ export const App: React.FC = () => {
             console.warn("Service Worker initialization error:", err);
         });
 
-        // Synchronize view state with URL query string for PWA shortcuts & browser back/forward (U04)
-        const onPopState = () => {
-            setCurrentView(readViewFromUrl());
+        // UX-14: Synchronize view, selected deck, and study state with browser Back/Forward history
+        const onPopState = (event: PopStateEvent) => {
+            const state = (event.state as UrlNavState | null) || readNavStateFromUrl();
+            setCurrentView(state.view);
+            setSelectedDeckId(state.deckId);
+            setIsStudying(state.studying);
         };
         window.addEventListener("popstate", onPopState);
         return () => window.removeEventListener("popstate", onPopState);
@@ -87,26 +135,28 @@ export const App: React.FC = () => {
         if (view !== "browse") {
             setEditingNoteId(null);
         }
-        try {
-            const url = new URL(window.location.href);
-            if (view === "decks") {
-                url.searchParams.delete("view");
-            } else {
-                url.searchParams.set("view", view);
-            }
-            window.history.replaceState({}, "", url.toString());
-        } catch {
-            // ignore
-        }
+        writeNavStateToUrl({ view, deckId: null, studying: false }, "push");
+    };
+
+    const handleSelectDeck = (did: number | null) => {
+        setSelectedDeckId(did);
+        setIsStudying(false);
+        writeNavStateToUrl({ view: "decks", deckId: did, studying: false }, "push");
     };
 
     useEffect(() => {
         if (!isLoaded) { return; }
 
         if (!isSignedIn || !userId) {
+            const prevUserId = previousUserIdRef.current;
+            previousUserIdRef.current = null;
             if (syncClientRef.current) {
                 syncClientRef.current.disconnect();
                 syncClientRef.current = null;
+            }
+            // SEC-04: Remove previous user's local study data on sign-out when enabled (default: true)
+            if (prevUserId && getClearDataOnSignOutPreference()) {
+                clearUserOfflineData(prevUserId).catch(() => {});
             }
             setCollection(null);
             setSyncStatus("offline");
@@ -116,6 +166,14 @@ export const App: React.FC = () => {
             syncPushSubscriptionForUser(null).catch(() => {});
             return;
         }
+
+        // SEC-04: If switching directly between two accounts on a shared device,
+        // always purge the previous account's offline storage.
+        const prevUserId = previousUserIdRef.current;
+        if (prevUserId && prevUserId !== userId) {
+            clearUserOfflineData(prevUserId).catch(() => {});
+        }
+        previousUserIdRef.current = userId;
 
         const tokenGetter = () => getTokenRef.current();
         const client = new SyncClient(
@@ -139,7 +197,6 @@ export const App: React.FC = () => {
         setCustomStudySession(null);
         setConflictedOps([]);
         client.connect();
-        // Refresh the conflict queue whenever a fresh client is created (D13 UI).
         client.getConflictedOps().then(setConflictedOps);
 
         syncPushSubscriptionForUser(userId, tokenGetter).catch(() => {});
@@ -253,6 +310,7 @@ export const App: React.FC = () => {
     }
 
     const activeDeck = selectedDeckId ? collection.decks[selectedDeckId] || null : null;
+    const pendingOutboxCount = syncClientRef.current?.getPendingOutboxCount() || 0;
 
     // Deck mutations using collision-resistant IDs (D06)
     const handleCreateDeck = (name: string) => {
@@ -267,8 +325,6 @@ export const App: React.FC = () => {
             mod: Math.floor(Date.now() / 1000),
             usn: 0,
         };
-        // isNew: the server must reject (not replace) the insert if another device created a
-        // different deck with this very ID, then reconcile (D06).
         syncClientRef.current?.upsertDeck(newDeck, true);
     };
 
@@ -284,6 +340,7 @@ export const App: React.FC = () => {
         if (selectedDeckId === did) {
             setSelectedDeckId(null);
             setIsStudying(false);
+            writeNavStateToUrl({ view: "decks", deckId: null, studying: false }, "replace");
         }
     };
 
@@ -339,8 +396,6 @@ export const App: React.FC = () => {
     };
 
     const handleAddNote = (note: Note, cards: Card[]) => {
-        // isNew: newly created notes/cards go through the server-side id-collision check
-        // instead of blindly INSERT OR REPLACE-ing a record another device may own (D06).
         syncClientRef.current?.upsertNote(note, cards, true);
     };
 
@@ -357,7 +412,24 @@ export const App: React.FC = () => {
         syncClientRef.current?.deleteNote(noteId);
     };
 
-    const handleSaveDeckConfig = (config: DeckConfig) => {
+    // UX-05: Support isolating a deck config preset to a single deck when shared
+    const handleSaveDeckConfig = (config: DeckConfig, createSeparateForDeckId?: number) => {
+        if (createSeparateForDeckId !== undefined && collection.decks[createSeparateForDeckId]) {
+            const targetDeck = collection.decks[createSeparateForDeckId];
+            const newConfId = generateUniqueId(collection.dconf);
+            const dedicatedConfig: DeckConfig = {
+                ...config,
+                id: newConfId,
+                name: `${targetDeck.name} Preset`,
+            };
+            syncClientRef.current?.upsertDeckConfig(dedicatedConfig);
+            syncClientRef.current?.upsertDeck({
+                ...targetDeck,
+                conf: newConfId,
+                mod: Math.floor(Date.now() / 1000),
+            });
+            return;
+        }
         syncClientRef.current?.upsertDeckConfig(config);
     };
 
@@ -381,8 +453,6 @@ export const App: React.FC = () => {
         syncClientRef.current?.upsertDeck(updatedDeck);
     };
 
-    // Non-destructive review of cards forgotten today (C10): build a temporary filtered study
-    // queue instead of touching card queues/due dates. Unanswered cards keep their schedule.
     const handleResetForgotten = () => {
         if (!activeDeck) { return; }
         const cardIds = getCustomStudyCardIds(collection, activeDeck.id);
@@ -394,13 +464,24 @@ export const App: React.FC = () => {
         setSelectedDeckId(activeDeck.id);
         setCustomStudySession({ deckId: activeDeck.id, cardIds });
         setIsStudying(true);
+        writeNavStateToUrl({ view: "decks", deckId: activeDeck.id, studying: true }, "push");
     };
 
     const handleStartStudy = () => {
-        // Starting a normal study session ends any Custom Study session.
         setCustomStudySession(null);
         setIsStudying(true);
+        writeNavStateToUrl({ view: "decks", deckId: selectedDeckId, studying: true }, "push");
     };
+
+    const optionsDeck = optionsDeckId !== null ? collection.decks[optionsDeckId] : undefined;
+    const optionsConfig = optionsDeckId !== null
+        ? (collection.dconf[optionsDeck?.conf ?? 1]
+            || collection.dconf[1]
+            || Object.values(collection.dconf)[0])
+        : undefined;
+    const sharedDeckCount = optionsConfig
+        ? Object.values(collection.decks).filter(d => (d.conf || 1) === optionsConfig.id).length
+        : 1;
 
     return (
         <div className="app-container">
@@ -446,6 +527,10 @@ export const App: React.FC = () => {
                                         if (customStudySession) {
                                             setCustomStudySession(null);
                                         }
+                                        writeNavStateToUrl(
+                                            { view: "decks", deckId: activeDeck.id, studying: false },
+                                            "push",
+                                        );
                                     }}
                                     onAnswerCard={handleAnswerCard}
                                     onEditNote={nid => {
@@ -470,7 +555,7 @@ export const App: React.FC = () => {
                                 <DeckOverview
                                     collection={collection}
                                     deck={activeDeck}
-                                    onBack={() => setSelectedDeckId(null)}
+                                    onBack={() => handleSelectDeck(null)}
                                     onStartStudy={handleStartStudy}
                                     onOptions={() => setOptionsDeckId(activeDeck.id)}
                                     onCustomStudy={() => setIsCustomStudyOpen(true)}
@@ -479,7 +564,7 @@ export const App: React.FC = () => {
                             : (
                                 <DeckList
                                     collection={collection}
-                                    onSelectDeck={did => setSelectedDeckId(did)}
+                                    onSelectDeck={did => handleSelectDeck(did)}
                                     onCreateDeck={handleCreateDeck}
                                     onRenameDeck={handleRenameDeck}
                                     onDeleteDeck={handleDeleteDeck}
@@ -510,6 +595,8 @@ export const App: React.FC = () => {
                     <CardBrowser
                         collection={collection}
                         initialNoteId={editingNoteId}
+                        syncStatus={syncStatus}
+                        pendingOutboxCount={pendingOutboxCount}
                         onUpdateNote={handleUpdateNote}
                         onUpdateCard={handleUpdateCard}
                         onDeleteNote={handleDeleteNote}
@@ -526,11 +613,11 @@ export const App: React.FC = () => {
             />
 
             {/* Modals */}
-            {optionsDeckId !== null && (
+            {optionsDeckId !== null && optionsConfig && (
                 <DeckOptionsModal
-                    config={collection.dconf[collection.decks[optionsDeckId]?.conf]
-                        || collection.dconf[1]
-                        || Object.values(collection.dconf)[0]}
+                    config={optionsConfig}
+                    deck={optionsDeck}
+                    sharedDeckCount={sharedDeckCount}
                     onSave={handleSaveDeckConfig}
                     onClose={() => setOptionsDeckId(null)}
                 />
@@ -547,6 +634,8 @@ export const App: React.FC = () => {
             {isImportOpen && (
                 <ImportModal
                     collection={collection}
+                    syncStatus={syncStatus}
+                    pendingOutboxCount={pendingOutboxCount}
                     hasBackup={syncClientRef.current?.getHasServerBackup()}
                     onImportComplete={updated => {
                         syncClientRef.current?.importCollection(updated);
@@ -561,10 +650,10 @@ export const App: React.FC = () => {
             {isSyncModalOpen && (
                 <SyncModal
                     syncStatus={syncStatus}
-                    pendingOutboxCount={syncClientRef.current?.getPendingOutboxCount() || 0}
+                    pendingOutboxCount={pendingOutboxCount}
                     conflictedOps={conflictedOps}
                     onRetryConflict={async opId => {
-                        await syncClientRef.current?.retryConflictedOp(opId);
+                        await syncClientRef.current?.retryConflictedOp(opId, true);
                         setConflictedOps((await syncClientRef.current?.getConflictedOps()) || []);
                     }}
                     onDiscardConflict={async opId => {
@@ -575,18 +664,27 @@ export const App: React.FC = () => {
                         syncClientRef.current?.syncNow();
                         setConflictedOps((await syncClientRef.current?.getConflictedOps()) || []);
                     }}
-                    onClearOfflineData={async () => {
-                        await syncClientRef.current?.clearOfflineStorage();
+                    onClearOfflineData={async options => {
+                        await syncClientRef.current?.clearOfflineStorage(options);
                     }}
                     onDeleteAccountData={async () => {
+                        // DATA-04: Verify HTTP success before clearing local storage or reloading
                         const token = await getToken();
-                        if (token) {
-                            await fetch("/api/account-data", {
-                                method: "DELETE",
-                                headers: { Authorization: `Bearer ${token}` },
-                            });
+                        if (!token) {
+                            throw new Error("Authentication required to delete cloud data.");
                         }
-                        await syncClientRef.current?.clearOfflineStorage();
+                        const res = await fetch("/api/account-data", {
+                            method: "DELETE",
+                            headers: { Authorization: `Bearer ${token}` },
+                        });
+                        if (!res.ok) {
+                            const errBody = await res.json().catch(() => ({}));
+                            const errMsg = errBody?.error
+                                || `Server failed to delete cloud data (HTTP ${res.status}).`;
+                            setSyncBannerError(errMsg);
+                            throw new Error(errMsg);
+                        }
+                        await syncClientRef.current?.clearOfflineStorage({ forceDiscardPending: true });
                         window.location.reload();
                     }}
                     onClose={() => setIsSyncModalOpen(false)}

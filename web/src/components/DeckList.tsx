@@ -2,9 +2,10 @@
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 import { BookOpen, Download, FolderPlus, Settings, Upload, X } from "lucide-react";
-import React, { useEffect, useRef, useState } from "react";
-import { getDeckCounts } from "../core/scheduler";
+import React, { useMemo, useRef, useState } from "react";
+import { getAllDeckCounts } from "../core/scheduler";
 import { Collection } from "../core/types";
+import { useAccessibleModal } from "./useAccessibleModal";
 
 interface Props {
     collection: Collection;
@@ -49,26 +50,22 @@ export const DeckList: React.FC<Props> = ({
     const [dialog, setDialog] = useState<DeckDialogState>(null);
     const [isImportingEp1100, setIsImportingEp1100] = useState(false);
     const inputRef = useRef<HTMLInputElement | null>(null);
+    const dialogRef = useAccessibleModal<HTMLFormElement>(
+        Boolean(dialog),
+        () => setDialog(null),
+        dialog?.mode === "delete" ? undefined : inputRef,
+    );
 
-    useEffect(() => {
-        if (dialog && (dialog.mode === "create" || dialog.mode === "rename")) {
-            window.setTimeout(() => {
-                inputRef.current?.focus();
-                inputRef.current?.select();
-            }, 10);
-        }
-        if (!dialog) { return; }
-        const onKeyDown = (e: KeyboardEvent) => {
-            if (e.key === "Escape") {
-                e.preventDefault();
-                setDialog(null);
-            }
-        };
-        window.addEventListener("keydown", onKeyDown);
-        return () => window.removeEventListener("keydown", onKeyDown);
-    }, [dialog?.mode]);
+    const decks = useMemo(
+        () => Object.values(collection.decks).sort((a, b) => a.name.localeCompare(b.name)),
+        [collection.decks],
+    );
 
-    const decks = Object.values(collection.decks).sort((a, b) => a.name.localeCompare(b.name));
+    // PERF-01: Compute counts for all decks in one single pass and memoize results
+    const allDeckCounts = useMemo(
+        () => getAllDeckCounts(collection),
+        [collection],
+    );
 
     const hasEp1100 = decks.some(
         d => d.name === "EP1100" || d.name.startsWith("EP1100::"),
@@ -121,20 +118,25 @@ export const DeckList: React.FC<Props> = ({
                     </thead>
                     <tbody>
                         {decks.map(deck => {
-                            const counts = getDeckCounts(collection, deck.id);
+                            const counts = allDeckCounts[deck.id] || {
+                                newCount: 0,
+                                learnCount: 0,
+                                reviewCount: 0,
+                            };
                             const indentLevel = (deck.name.match(/::/g) || []).length;
                             const displayName = deck.name.split("::").pop() || deck.name;
 
                             return (
                                 <tr key={deck.id} className="deck-row">
                                     <td>
-                                        <div
+                                        <button
+                                            type="button"
                                             className="deck-name-cell"
                                             style={{ paddingLeft: indentLevel * 18 }}
                                             onClick={() => onSelectDeck(deck.id)}
                                         >
                                             <span>{displayName}</span>
-                                        </div>
+                                        </button>
                                     </td>
                                     <td className="count-badge count-new">
                                         {counts.newCount > 0 ? counts.newCount : ""}
@@ -188,6 +190,7 @@ export const DeckList: React.FC<Props> = ({
                         }}
                     />
                     <div
+                        role="menu"
                         style={{
                             position: "fixed",
                             top: activeMenu.top,
@@ -204,6 +207,8 @@ export const DeckList: React.FC<Props> = ({
                         }}
                     >
                         <button
+                            type="button"
+                            role="menuitem"
                             style={{ border: "none", justifyContent: "flex-start", borderRadius: 0 }}
                             onClick={() => {
                                 const did = activeDeck.id;
@@ -214,6 +219,8 @@ export const DeckList: React.FC<Props> = ({
                             Options
                         </button>
                         <button
+                            type="button"
+                            role="menuitem"
                             style={{ border: "none", justifyContent: "flex-start", borderRadius: 0 }}
                             onClick={() => {
                                 setDialog({
@@ -228,6 +235,8 @@ export const DeckList: React.FC<Props> = ({
                             Rename
                         </button>
                         <button
+                            type="button"
+                            role="menuitem"
                             style={{ border: "none", justifyContent: "flex-start", borderRadius: 0 }}
                             onClick={() => {
                                 const did = activeDeck.id;
@@ -238,6 +247,8 @@ export const DeckList: React.FC<Props> = ({
                             Export (.apkg)
                         </button>
                         <button
+                            type="button"
+                            role="menuitem"
                             style={{ border: "none", justifyContent: "flex-start", borderRadius: 0 }}
                             onClick={() => {
                                 const did = activeDeck.id;
@@ -249,6 +260,8 @@ export const DeckList: React.FC<Props> = ({
                         </button>
                         {activeDeck.id !== 1 && (
                             <button
+                                type="button"
+                                role="menuitem"
                                 style={{
                                     border: "none",
                                     justifyContent: "flex-start",
@@ -283,16 +296,17 @@ export const DeckList: React.FC<Props> = ({
                     boxSizing: "border-box",
                 }}
             >
-                <button onClick={() => setDialog({ mode: "create", name: "" })}>
+                <button type="button" onClick={() => setDialog({ mode: "create", name: "" })}>
                     <FolderPlus size={16} />
                     <span>Create Deck</span>
                 </button>
-                <button onClick={onImportClick}>
+                <button type="button" onClick={onImportClick}>
                     <Upload size={16} />
                     <span>Import (.apkg)</span>
                 </button>
                 {!hasEp1100 && onImportEp1100 && (
                     <button
+                        type="button"
                         className="primary"
                         disabled={isImportingEp1100}
                         onClick={async () => {
@@ -308,7 +322,7 @@ export const DeckList: React.FC<Props> = ({
                         <span>{isImportingEp1100 ? "Importing EP1100..." : "Import EP1100"}</span>
                     </button>
                 )}
-                <button onClick={onExportCollectionApkg}>
+                <button type="button" onClick={onExportCollectionApkg}>
                     <Download size={16} />
                     <span>Export Collection (.apkg)</span>
                 </button>
@@ -318,6 +332,7 @@ export const DeckList: React.FC<Props> = ({
             {dialog && (
                 <div className="modal-backdrop" onClick={() => setDialog(null)}>
                     <form
+                        ref={dialogRef}
                         role="dialog"
                         aria-modal="true"
                         aria-labelledby="deck-dialog-title"
@@ -353,10 +368,14 @@ export const DeckList: React.FC<Props> = ({
                             )
                             : (
                                 <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                                    <label style={{ fontSize: 12.5, color: "var(--text-secondary)", fontWeight: 500 }}>
+                                    <label
+                                        htmlFor="deck-dialog-name-input"
+                                        style={{ fontSize: 12.5, color: "var(--text-secondary)", fontWeight: 500 }}
+                                    >
                                         Deck Name
                                     </label>
                                     <input
+                                        id="deck-dialog-name-input"
                                         ref={inputRef}
                                         type="text"
                                         placeholder="e.g. Biology or Languages::Spanish"

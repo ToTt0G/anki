@@ -1,11 +1,12 @@
 // klanki Service Worker (PWA & Web Push) (N01, N02, N07)
 const CACHE_PREFIX = "klanki-web-";
-const CACHE_NAME = "klanki-web-v24";
+const CACHE_NAME = "klanki-web-v25";
 const MAX_RUNTIME_CACHE_ENTRIES = 60;
 
 const PRECACHE_URLS = [
     "/",
     "/index.html",
+    "/theme-init.js",
     "/manifest.webmanifest",
     "/favicon.png",
     "/favicon.ico",
@@ -26,6 +27,7 @@ function isCacheableStaticPath(pathname) {
         pathname.startsWith("/assets/")
         || pathname.startsWith("/icons/")
         || pathname.startsWith("/vendor/")
+        || pathname === "/theme-init.js"
         || pathname === "/manifest.webmanifest"
         || pathname.startsWith("/favicon")
     );
@@ -108,10 +110,11 @@ self.addEventListener("fetch", (event) => {
                 .then((networkResponse) => {
                     if (networkResponse && networkResponse.status === 200 && event.request.method === "GET") {
                         const responseToCache = networkResponse.clone();
-                        caches.open(CACHE_NAME).then(async (cache) => {
+                        const cacheUpdatePromise = caches.open(CACHE_NAME).then(async (cache) => {
                             await cache.put(event.request, responseToCache);
                             await trimCache(cache, MAX_RUNTIME_CACHE_ENTRIES);
                         });
+                        event.waitUntil(cacheUpdatePromise);
                     }
                     return networkResponse;
                 })

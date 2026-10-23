@@ -1,7 +1,7 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-import { getTodayDay } from "./scheduler";
+import { getTodayDay, isCardDue } from "./scheduler";
 import { Card, Collection, Note } from "./types";
 
 export interface SearchFilterResult {
@@ -11,12 +11,20 @@ export interface SearchFilterResult {
     modelName: string;
 }
 
+function stripQuotes(val: string): string {
+    return val
+        .trim()
+        .replace(/^"(.*)"$/, "$1")
+        .replace(/^'(.*)'$/, "$1")
+        .trim();
+}
+
 export function searchCards(col: Collection, query: string): SearchFilterResult[] {
     const q = query.trim().toLowerCase();
     const today = getTodayDay();
     const nowSec = Math.floor(Date.now() / 1000);
 
-    // Parse query tokens
+    // Parse query tokens, preserving quoted filter values such as deck:"My Deck" (UX-07)
     const tokens = q.match(/(?:[^\s"]+|"[^"]*")+/g) || [];
 
     return Object.values(col.cards).map(card => {
@@ -36,20 +44,28 @@ export function searchCards(col: Collection, query: string): SearchFilterResult[
         if (tokens.length === 0) { return true; }
 
         for (const rawToken of tokens) {
-            const token = rawToken.replace(/^"|"$/g, "");
+            const token = stripQuotes(rawToken);
+            if (!token) { continue; }
 
-            // 1. Deck filter: deck:name
+            // 1. Deck filter: deck:name or deck:"My Deck" (UX-07)
             if (token.startsWith("deck:")) {
-                const targetDeck = token.slice(5).trim();
-                if (!deckName.toLowerCase().includes(targetDeck)) {
+                const rawDeckArg = token.slice(5).trim();
+                const isQuotedDeck = rawDeckArg.startsWith("\"") && rawDeckArg.endsWith("\"");
+                const targetDeck = stripQuotes(rawDeckArg);
+                if (!targetDeck) { continue; }
+                const deckLower = deckName.toLowerCase();
+                const matches = isQuotedDeck
+                    ? deckLower === targetDeck || deckLower.startsWith(`${targetDeck}::`)
+                    : deckLower.includes(targetDeck);
+                if (!matches) {
                     return false;
                 }
                 continue;
             }
 
-            // 2. Tag filter: tag:name
+            // 2. Tag filter: tag:name or tag:"my tag"
             if (token.startsWith("tag:")) {
-                const targetTag = token.slice(4).trim();
+                const targetTag = stripQuotes(token.slice(4));
                 if (targetTag === "none") {
                     if (note.tags.length > 0) { return false; }
                 } else {
@@ -61,28 +77,25 @@ export function searchCards(col: Collection, query: string): SearchFilterResult[
                 continue;
             }
 
-            // 3. Card state filter: is:new, is:due, is:learn, is:review, is:suspended, is:buried
+            // 3. Card state filter: is:new, is:due, is:learn, is:review, is:suspended, is:buried (UX-08, SCHED-05)
             if (token.startsWith("is:")) {
-                const state = token.slice(3).trim();
+                const state = stripQuotes(token.slice(3));
                 if (state === "new" && card.queue !== 0) { return false; }
                 if (state === "learn" && (card.queue !== 1 && card.queue !== 3)) { return false; }
                 if (state === "review" && card.queue !== 2) { return false; }
                 if (state === "suspended" && card.queue !== -1) { return false; }
                 if (state === "buried" && (card.queue !== -2 && card.queue !== -3)) { return false; }
                 if (state === "due") {
-                    const isDue = (card.queue === 1 || card.queue === 3)
-                        ? card.due <= nowSec
-                        : card.queue === 2
-                        ? card.due <= today
-                        : card.queue === 0;
-                    if (!isDue) { return false; }
+                    if (!isCardDue(card, nowSec, today, col.crt)) {
+                        return false;
+                    }
                 }
                 continue;
             }
 
-            // 4. Note type filter: note:name
+            // 4. Note type filter: note:name or note:"Basic (and reversed)"
             if (token.startsWith("note:")) {
-                const targetModel = token.slice(5).trim();
+                const targetModel = stripQuotes(token.slice(5));
                 if (!modelName.toLowerCase().includes(targetModel)) {
                     return false;
                 }
@@ -91,7 +104,7 @@ export function searchCards(col: Collection, query: string): SearchFilterResult[
 
             // 5. Flag filter: flag:1..7
             if (token.startsWith("flag:")) {
-                const targetFlag = parseInt(token.slice(5).trim(), 10);
+                const targetFlag = parseInt(stripQuotes(token.slice(5)), 10);
                 if (card.flags !== targetFlag) { return false; }
                 continue;
             }

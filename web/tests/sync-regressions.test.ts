@@ -233,6 +233,74 @@ it("offline math assets embed the renderer and optional extensions without font 
     const assets = await loadMathJaxAssets();
     assert.ok(assets.script.startsWith("data:text/javascript;base64,"));
     assert.ok(assets.sources["[tex]/color"].startsWith("data:text/javascript;base64,"));
+    assert.ok(assets.hashes.some(h => h.startsWith("'sha256-")));
     assert.ok(requested.every(path => path.startsWith("/vendor/mathjax/")));
     assert.equal(requested.some(path => path.endsWith(".woff")), false);
+});
+
+it("DATA-05, DATA-06, UX-09 & PERF-08: blocks clearing offline cache with 3 pending answers, rolls back rejected notes, deduplicates rapid ratings, and prunes stale IDB media", async () => {
+    const userId = "sync-ux-regressions";
+    const col = createDefaultCollection();
+    col.media["old.png"] = "data:image/png;base64,AA==";
+    await saveCollectionToIdb(userId, col, 1, true, true);
+
+    // PERF-08: Saving collection with updated media prunes old.png from IndexedDB
+    delete col.media["old.png"];
+    col.media["new.png"] = "data:image/png;base64,BB==";
+    await saveCollectionToIdb(userId, col, 2, true, true);
+    const loadedCol = await (await import("../src/core/idb-storage")).loadCollectionFromIdb(userId);
+    assert.equal(loadedCol?.collection.media["old.png"], undefined, "Obsolete media pruned from IndexedDB");
+    assert.equal(loadedCol?.collection.media["new.png"], "data:image/png;base64,BB==");
+
+    const originals = { window: globalThis.window, fetch: globalThis.fetch, WebSocket: globalThis.WebSocket };
+    Object.assign(globalThis, {
+        window: { location: { protocol: "https:", host: "test.example" } },
+        WebSocket: Socket,
+    });
+    globalThis.fetch = async () => Response.json({ ticket: "test" });
+
+    const client = new SyncClient(userId, async () => "token", () => {}, () => {});
+    try {
+        await client.connect();
+        const socket = Socket.instances.at(-1)!;
+        socket.onopen?.();
+
+        const cards = Object.values(client.getCollection().cards);
+        // UX-09: Rapidly rate card[0] twice in the same turn -> only 1 review is recorded
+        const rev1 = {
+            id: 1700000001000,
+            cid: cards[0].id,
+            usn: 0,
+            ease: 3 as const,
+            ivl: 1,
+            lastIvl: 0,
+            factor: 2500,
+            time: 1000,
+            type: 0,
+        };
+        client.answerCard(cards[0].id, { reps: 1, ivl: 1 }, rev1);
+        client.answerCard(cards[0].id, { reps: 1, ivl: 1 }, { ...rev1, id: rev1.id + 1 });
+        await until(() => client.getPendingOutboxCount() === 1);
+        assert.equal(client.getCollection().revlog.length, 1, "Rapid duplicate rating must be ignored");
+
+        // Enqueue 2 more answers on cards[1] and cards[2] -> 3 pending unsynced answers total
+        client.answerCard(cards[1].id, { reps: 1, ivl: 1 }, { ...rev1, id: rev1.id + 10, cid: cards[1].id });
+        client.answerCard(cards[2].id, { reps: 1, ivl: 1 }, { ...rev1, id: rev1.id + 20, cid: cards[2].id });
+        await until(() => client.getPendingOutboxCount() === 3);
+
+        // DATA-05: Attempting to clear offline storage with 3 pending answers without confirmation must fail
+        await assert.rejects(
+            client.clearOfflineStorage(),
+            /3 unsynced changes are pending without confirmation/,
+        );
+        assert.equal(client.getPendingOutboxCount(), 3, "All 3 pending answers preserved");
+
+        // Explicit confirmation clears them
+        await client.clearOfflineStorage({ forceDiscardPending: true });
+        assert.equal(client.getPendingOutboxCount(), 0);
+    } finally {
+        client.disconnect();
+        Object.assign(globalThis, originals);
+        await clearUserOfflineData(userId);
+    }
 });

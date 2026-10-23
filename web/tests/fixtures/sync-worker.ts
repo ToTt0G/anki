@@ -15,10 +15,16 @@ export class TestSyncServer extends AnkiSyncServer {
             const original = Date.now;
             Date.now = () => now;
             try {
-                return Response.json((this as any).computeDueSummary(prefs));
+                return Response.json((this as any).computeDueSummary(prefs, now));
             } finally {
                 Date.now = original;
             }
+        }
+        if (url.pathname === "/test/next-daily-alarm") {
+            const { now, prefs } = await request.json() as any;
+            const summary = (this as any).computeDueSummary(prefs, now);
+            const targetUtcMs = this.computeNextDailyTargetUtcMs(now, prefs, summary);
+            return Response.json({ targetUtcMs, summary });
         }
         return super.fetch(request);
     }

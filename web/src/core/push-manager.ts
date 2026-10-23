@@ -342,6 +342,7 @@ export interface ClientPushPreferences {
     tzOffsetMinutes: number;
     timeZone?: string;
     learningAlerts: boolean;
+    includeDeckName?: boolean;
 }
 
 export interface PushStatusResponse {

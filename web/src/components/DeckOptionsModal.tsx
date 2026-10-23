@@ -2,16 +2,25 @@
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 import { X } from "lucide-react";
-import React, { useEffect, useState } from "react";
-import { DeckConfig } from "../core/types";
+import React, { useState } from "react";
+import { Deck, DeckConfig } from "../core/types";
+import { useAccessibleModal } from "./useAccessibleModal";
 
 interface Props {
     config: DeckConfig;
-    onSave: (config: DeckConfig) => void;
+    deck?: Deck;
+    sharedDeckCount?: number;
+    onSave: (config: DeckConfig, createSeparateForDeckId?: number) => void;
     onClose: () => void;
 }
 
-export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) => {
+export const DeckOptionsModal: React.FC<Props> = ({
+    config,
+    deck,
+    sharedDeckCount = 1,
+    onSave,
+    onClose,
+}) => {
     const [newPerDay, setNewPerDay] = useState<number>(config.new.perDay);
     const [revPerDay, setRevPerDay] = useState<number>(config.rev.perDay);
     const [learningSteps, setLearningSteps] = useState<string>(config.new.delays.join(" "));
@@ -23,17 +32,11 @@ export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) =
     const [leechAction, setLeechAction] = useState<number>(config.lapse.leechAction);
     const [fsrsEnabled, setFsrsEnabled] = useState<boolean>(!!config.fsrsEnabled);
     const [retention, setRetention] = useState<number>(config.desiredRetention || 0.9);
-
-    useEffect(() => {
-        const onKeyDown = (e: KeyboardEvent) => {
-            if (e.key === "Escape") {
-                e.preventDefault();
-                onClose();
-            }
-        };
-        window.addEventListener("keydown", onKeyDown);
-        return () => window.removeEventListener("keydown", onKeyDown);
-    }, [onClose]);
+    // UX-05: When multiple decks share the same preset, allow isolating changes to this deck only
+    const [isolatePreset, setIsolatePreset] = useState<boolean>(
+        Boolean(deck && deck.id !== 1 && sharedDeckCount > 1),
+    );
+    const dialogRef = useAccessibleModal<HTMLDivElement>(true, onClose);
 
     const handleSave = () => {
         const delays = learningSteps
@@ -68,13 +71,14 @@ export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) =
             desiredRetention: Math.min(0.97, Math.max(0.7, retention)),
         };
 
-        onSave(updated);
+        onSave(updated, isolatePreset && deck ? deck.id : undefined);
         onClose();
     };
 
     return (
         <div className="modal-backdrop" onClick={onClose}>
             <div
+                ref={dialogRef}
                 role="dialog"
                 aria-modal="true"
                 aria-labelledby="deck-options-title"
@@ -83,7 +87,7 @@ export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) =
             >
                 <div className="modal-header">
                     <h3 id="deck-options-title" style={{ fontSize: 16, fontWeight: 600 }}>
-                        Deck Options
+                        Deck Options{deck ? ` — ${deck.name}` : ""}
                     </h3>
                     <button
                         type="button"
@@ -96,6 +100,47 @@ export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) =
                 </div>
 
                 <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                    {/* UX-05: Shared preset explanation & per-deck isolation toggle */}
+                    {deck && sharedDeckCount > 1 && (
+                        <div
+                            style={{
+                                padding: "10px 12px",
+                                borderRadius: 8,
+                                background: "var(--bg-secondary)",
+                                border: "1px solid var(--border-color)",
+                                fontSize: 12.5,
+                                display: "flex",
+                                flexDirection: "column",
+                                gap: 6,
+                            }}
+                        >
+                            <div style={{ color: "var(--text-secondary)" }}>
+                                Preset <strong>{config.name}</strong> is currently shared by{" "}
+                                <strong>{sharedDeckCount}</strong> decks.
+                            </div>
+                            <label
+                                htmlFor="deck-opt-isolate-preset"
+                                style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    justifyContent: "space-between",
+                                    gap: 8,
+                                    cursor: "pointer",
+                                    color: "var(--text-primary)",
+                                    fontWeight: 500,
+                                }}
+                            >
+                                <span>Apply changes only to “{deck.name}” (create separate preset)</span>
+                                <input
+                                    id="deck-opt-isolate-preset"
+                                    type="checkbox"
+                                    checked={isolatePreset}
+                                    onChange={e => setIsolatePreset(e.target.checked)}
+                                />
+                            </label>
+                        </div>
+                    )}
+
                     {/* Daily Limits */}
                     <div>
                         <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text-secondary)", marginBottom: 6 }}>
@@ -104,6 +149,7 @@ export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) =
                         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                             <div>
                                 <label
+                                    htmlFor="deck-opt-new-per-day"
                                     style={{
                                         fontSize: 13,
                                         color: "var(--text-secondary)",
@@ -114,6 +160,7 @@ export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) =
                                     New / day
                                 </label>
                                 <input
+                                    id="deck-opt-new-per-day"
                                     type="number"
                                     min={0}
                                     value={newPerDay}
@@ -123,6 +170,7 @@ export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) =
                             </div>
                             <div>
                                 <label
+                                    htmlFor="deck-opt-rev-per-day"
                                     style={{
                                         fontSize: 13,
                                         color: "var(--text-secondary)",
@@ -133,6 +181,7 @@ export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) =
                                     Maximum reviews / day
                                 </label>
                                 <input
+                                    id="deck-opt-rev-per-day"
                                     type="number"
                                     min={0}
                                     value={revPerDay}
@@ -150,6 +199,7 @@ export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) =
                         </div>
                         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                             <label
+                                htmlFor="deck-opt-fsrs-enabled"
                                 style={{
                                     display: "flex",
                                     alignItems: "center",
@@ -160,6 +210,7 @@ export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) =
                             >
                                 <span>Enable FSRS (Free Spaced Repetition Scheduler)</span>
                                 <input
+                                    id="deck-opt-fsrs-enabled"
                                     type="checkbox"
                                     checked={fsrsEnabled}
                                     onChange={e => setFsrsEnabled(e.target.checked)}
@@ -168,6 +219,7 @@ export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) =
                             {fsrsEnabled && (
                                 <div>
                                     <label
+                                        htmlFor="deck-opt-retention"
                                         style={{
                                             fontSize: 13,
                                             color: "var(--text-secondary)",
@@ -178,6 +230,7 @@ export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) =
                                         Desired retention (0.70 – 0.97)
                                     </label>
                                     <input
+                                        id="deck-opt-retention"
                                         type="number"
                                         step="0.01"
                                         min="0.70"
@@ -199,6 +252,7 @@ export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) =
                         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                             <div>
                                 <label
+                                    htmlFor="deck-opt-learn-steps"
                                     style={{
                                         fontSize: 13,
                                         color: "var(--text-secondary)",
@@ -209,6 +263,7 @@ export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) =
                                     Learning steps (m)
                                 </label>
                                 <input
+                                    id="deck-opt-learn-steps"
                                     type="text"
                                     value={learningSteps}
                                     onChange={e => setLearningSteps(e.target.value)}
@@ -218,6 +273,7 @@ export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) =
                             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                                 <div>
                                     <label
+                                        htmlFor="deck-opt-graduating"
                                         style={{
                                             fontSize: 13,
                                             color: "var(--text-secondary)",
@@ -228,6 +284,7 @@ export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) =
                                         Graduating (d)
                                     </label>
                                     <input
+                                        id="deck-opt-graduating"
                                         type="number"
                                         value={graduatingInt}
                                         onChange={e => setGraduatingInt(Number(e.target.value))}
@@ -236,6 +293,7 @@ export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) =
                                 </div>
                                 <div>
                                     <label
+                                        htmlFor="deck-opt-easy-int"
                                         style={{
                                             fontSize: 13,
                                             color: "var(--text-secondary)",
@@ -246,6 +304,7 @@ export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) =
                                         Easy (d)
                                     </label>
                                     <input
+                                        id="deck-opt-easy-int"
                                         type="number"
                                         value={easyInt}
                                         onChange={e => setEasyInt(Number(e.target.value))}
@@ -255,6 +314,7 @@ export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) =
                             </div>
                             <div>
                                 <label
+                                    htmlFor="deck-opt-starting-ease"
                                     style={{
                                         fontSize: 13,
                                         color: "var(--text-secondary)",
@@ -265,6 +325,7 @@ export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) =
                                     Starting ease (%)
                                 </label>
                                 <input
+                                    id="deck-opt-starting-ease"
                                     type="number"
                                     value={startingEase}
                                     onChange={e => setStartingEase(Number(e.target.value))}
@@ -282,6 +343,7 @@ export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) =
                         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                             <div>
                                 <label
+                                    htmlFor="deck-opt-relearn-steps"
                                     style={{
                                         fontSize: 13,
                                         color: "var(--text-secondary)",
@@ -292,6 +354,7 @@ export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) =
                                     Relearning steps (m)
                                 </label>
                                 <input
+                                    id="deck-opt-relearn-steps"
                                     type="text"
                                     value={relearnSteps}
                                     onChange={e => setRelearnSteps(e.target.value)}
@@ -301,6 +364,7 @@ export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) =
                             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                                 <div>
                                     <label
+                                        htmlFor="deck-opt-leech-threshold"
                                         style={{
                                             fontSize: 13,
                                             color: "var(--text-secondary)",
@@ -311,6 +375,7 @@ export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) =
                                         Leech threshold
                                     </label>
                                     <input
+                                        id="deck-opt-leech-threshold"
                                         type="number"
                                         value={leechThreshold}
                                         onChange={e => setLeechThreshold(Number(e.target.value))}
@@ -319,6 +384,7 @@ export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) =
                                 </div>
                                 <div>
                                     <label
+                                        htmlFor="deck-opt-leech-action"
                                         style={{
                                             fontSize: 13,
                                             color: "var(--text-secondary)",
@@ -329,6 +395,7 @@ export const DeckOptionsModal: React.FC<Props> = ({ config, onSave, onClose }) =
                                         Leech action
                                     </label>
                                     <select
+                                        id="deck-opt-leech-action"
                                         value={leechAction}
                                         onChange={e => setLeechAction(Number(e.target.value))}
                                         style={{ width: "100%" }}

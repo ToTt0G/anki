@@ -8,6 +8,7 @@ import { calculateScheduling, getDeckCounts, getNextStudyCard } from "../core/sc
 import { renderCardTemplate } from "../core/template";
 import { Card, Collection, Deck, Rating, RevlogEntry } from "../core/types";
 import { SandboxedCardFrame } from "./SandboxedCardFrame";
+import { useAccessibleModal } from "./useAccessibleModal";
 
 interface Props {
     collection: Collection;
@@ -46,8 +47,13 @@ export const Reviewer: React.FC<Props> = ({
     const [showMoreMenu, setShowMoreMenu] = useState<boolean>(false);
     const [confirmDeleteNote, setConfirmDeleteNote] = useState<boolean>(false);
     const cardStartTimeRef = useRef<number>(Date.now());
+    // UX-09: Synchronous lock preventing duplicate rating submissions before React re-renders
+    const ratingLockRef = useRef<string | null>(null);
+    const deleteDialogRef = useAccessibleModal<HTMLDivElement>(
+        confirmDeleteNote,
+        () => setConfirmDeleteNote(false),
+    );
 
-    // Custom Study session bookkeeping (C10): remaining card IDs and per-session answered set.
     const [customRemainingIds, setCustomRemainingIds] = useState<number[] | null>(
         customCardIds ? [...customCardIds] : null,
     );
@@ -76,6 +82,7 @@ export const Reviewer: React.FC<Props> = ({
         setCurrentCard(next);
         setIsAnswerShown(false);
         setConfirmDeleteNote(false);
+        ratingLockRef.current = null;
         cardStartTimeRef.current = Date.now();
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [collection, deck.id, customRemainingIds]);
@@ -89,9 +96,12 @@ export const Reviewer: React.FC<Props> = ({
 
     const handleRate = (rating: Rating) => {
         if (!currentCard) { return; }
+        const lockKey = `${currentCard.id}:${currentCard.reps}:${currentCard.due}`;
+        if (ratingLockRef.current === lockKey) {
+            return;
+        }
+        ratingLockRef.current = lockKey;
 
-        // In a Custom Study session, mark this card as handled so the filtered queue advances
-        // without ever mutating the underlying scheduling records of the remaining cards (C10).
         if (customRemainingIds) {
             answeredCustomIdsRef.current.add(currentCard.id);
             setCustomRemainingIds(ids => ids?.filter(id => id !== currentCard.id) ?? null);
@@ -99,7 +109,10 @@ export const Reviewer: React.FC<Props> = ({
 
         const options = calculateScheduling(currentCard, config);
         const chosen = options.find(o => o.rating === rating);
-        if (!chosen) { return; }
+        if (!chosen) {
+            ratingLockRef.current = null;
+            return;
+        }
 
         const timeSpentMs = Math.max(500, Date.now() - cardStartTimeRef.current);
         const existingRevIds = new Set((collection.revlog || []).map(r => r.id));
@@ -124,10 +137,6 @@ export const Reviewer: React.FC<Props> = ({
             if (e.ctrlKey || e.altKey || e.metaKey) { return; }
 
             if (confirmDeleteNote) {
-                if (e.key === "Escape") {
-                    e.preventDefault();
-                    setConfirmDeleteNote(false);
-                }
                 return;
             }
 
@@ -415,6 +424,7 @@ export const Reviewer: React.FC<Props> = ({
                     onClick={() => setConfirmDeleteNote(false)}
                 >
                     <div
+                        ref={deleteDialogRef}
                         role="dialog"
                         aria-modal="true"
                         aria-labelledby="reviewer-delete-note-title"
