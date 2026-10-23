@@ -201,7 +201,8 @@ export class AnkiSyncServer extends DurableObject {
             while (end < payload.length && (payload[end] & 0xc0) === 0x80) { end--; }
             this.sql.exec(
                 "INSERT INTO backup_snapshot_parts (part, data) VALUES (?, ?)",
-                part, decoder.decode(payload.subarray(start, end)),
+                part,
+                decoder.decode(payload.subarray(start, end)),
             );
             start = end;
         }
@@ -511,10 +512,15 @@ export class AnkiSyncServer extends DurableObject {
             for (const filename of stagedNames) {
                 const row = this.sql.exec(
                     "SELECT LENGTH(data) AS size FROM staged_import_media WHERE import_op_id = ? AND name = ?",
-                    opId, filename,
+                    opId,
+                    filename,
                 ).toArray()[0];
                 if (!row) {
-                    throw new OpError(`Import staging is missing ${filename}; retry the media upload`, "validation", true);
+                    throw new OpError(
+                        `Import staging is missing ${filename}; retry the media upload`,
+                        "validation",
+                        true,
+                    );
                 }
                 if (!(filename in (col.media || {}))) {
                     combinedCount++;
@@ -553,7 +559,8 @@ export class AnkiSyncServer extends DurableObject {
             for (const filename of stagedNames) {
                 this.sql.exec(
                     "INSERT OR REPLACE INTO media (name, data) SELECT name, data FROM staged_import_media WHERE import_op_id = ? AND name = ?",
-                    opId, filename,
+                    opId,
+                    filename,
                 );
             }
             if (stagedNames.size > 0) {
@@ -1025,7 +1032,9 @@ export class AnkiSyncServer extends DurableObject {
                     const msg = validation.msg as Extract<ClientMessage, { type: "save_media" }>;
                     const currentGeneration = this.getMeta("col_generation") ?? "0";
                     if ((msg.generation ?? "0") !== currentGeneration || this.getDeletionTombstone()) {
-                        return Response.json({ error: "Collection was deleted; reload before uploading media." }, { status: 410 });
+                        return Response.json({ error: "Collection was deleted; reload before uploading media." }, {
+                            status: 410,
+                        });
                     }
                     const importOpId = body.importOpId;
                     if (importOpId !== undefined) {
@@ -1033,17 +1042,24 @@ export class AnkiSyncServer extends DurableObject {
                             return Response.json({ error: "Invalid import operation ID" }, { status: 400 });
                         }
                         this.ctx.storage.transactionSync(() => {
-                            this.sql.exec("DELETE FROM staged_import_media WHERE created_at < ?", Date.now() - 86400000);
+                            this.sql.exec(
+                                "DELETE FROM staged_import_media WHERE created_at < ?",
+                                Date.now() - 86400000,
+                            );
                             const prior = this.sql.exec(
                                 "SELECT COALESCE(SUM(LENGTH(data)), 0) AS n FROM staged_import_media WHERE NOT (import_op_id = ? AND name = ?)",
-                                importOpId, msg.filename,
+                                importOpId,
+                                msg.filename,
                             ).toArray();
                             if (Number(prior[0]?.n || 0) + msg.dataUrl.length > MAX_ACCOUNT_MEDIA_DATA_CHARS) {
                                 throw new OpError("Staged import media exceeds account quota", "validation");
                             }
                             this.sql.exec(
                                 "INSERT OR REPLACE INTO staged_import_media (import_op_id, name, data, created_at) VALUES (?, ?, ?, ?)",
-                                importOpId, msg.filename, msg.dataUrl, Date.now(),
+                                importOpId,
+                                msg.filename,
+                                msg.dataUrl,
+                                Date.now(),
                             );
                         });
                         return Response.json({ success: true, staged: true, filename: msg.filename });

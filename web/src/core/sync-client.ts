@@ -867,7 +867,13 @@ export class SyncClient {
                 const op = ackedOp.msg;
                 if (typeof msg.updatedMod === "number") {
                     const map = op.type === "upsert_deck" ? "decks" : op.type === "upsert_note" ? "notes" : "cards";
-                    const id = op.type === "upsert_deck" ? op.deck.id : op.type === "upsert_note" ? op.note.id : op.type === "update_card" ? op.card.id : -1;
+                    const id = op.type === "upsert_deck"
+                        ? op.deck.id
+                        : op.type === "upsert_note"
+                        ? op.note.id
+                        : op.type === "update_card"
+                        ? op.card.id
+                        : -1;
                     const localRecord = (this.col[map] as Record<number, { mod: number }>)[id];
                     const baseRecord = (this.serverBaseCol[map] as Record<number, { mod: number }>)[id];
                     if (localRecord) { localRecord.mod = msg.updatedMod; }
@@ -1171,13 +1177,23 @@ export class SyncClient {
 
     public deleteDeck(deckId: number) {
         const opId = makeOpId();
-        const msg: ClientMessage & { opId: string } = { type: "delete_deck", opId, deckId, expectedRevision: this.revision };
+        const msg: ClientMessage & { opId: string } = {
+            type: "delete_deck",
+            opId,
+            deckId,
+            expectedRevision: this.revision,
+        };
         void this.applyAndQueue(msg);
     }
 
     public upsertDeckConfig(dconf: DeckConfig) {
         const opId = makeOpId();
-        const msg: ClientMessage & { opId: string } = { type: "upsert_deck_config", opId, dconf, expectedRevision: this.revision };
+        const msg: ClientMessage & { opId: string } = {
+            type: "upsert_deck_config",
+            opId,
+            dconf,
+            expectedRevision: this.revision,
+        };
         void this.applyAndQueue(msg);
     }
 
@@ -1203,7 +1219,13 @@ export class SyncClient {
             }
         }
         const opId = makeOpId();
-        const msg: ClientMessage & { opId: string } = { type: "delete_note", opId, noteId, cardIds, expectedRevision: this.revision };
+        const msg: ClientMessage & { opId: string } = {
+            type: "delete_note",
+            opId,
+            noteId,
+            cardIds,
+            expectedRevision: this.revision,
+        };
         void this.applyAndQueue(msg);
     }
 
