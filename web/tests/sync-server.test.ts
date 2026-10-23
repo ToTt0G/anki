@@ -660,7 +660,6 @@ it("H-03, NEW-05 & L-10: aborts overwrite when backup snapshot fails, supports c
     }
 });
 
-
 it("P0: stale HTTP media uploads are rejected after account deletion", async () => {
     const user = "http-media-deletion-generation";
     const col = createDefaultCollection();
