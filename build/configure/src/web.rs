@@ -301,8 +301,11 @@ fn build_and_check_reviewer(build: &mut Build) -> Result<()> {
 }
 
 fn check_web(build: &mut Build) -> Result<()> {
-    let fmt_excluded = "{target,extra,.mypy_cache,ts/.svelte-kit,node_modules,.venv}/**";
-    let dprint_files = inputs![glob!["**/*.{ts,mjs,js,md,json,toml,scss}", fmt_excluded]];
+    let fmt_excluded = "{target,extra,.mypy_cache,ts/.svelte-kit,node_modules,.venv,web/node_modules,web/dist,web/.vite,web/.wrangler,web/public/vendor}/**";
+    let dprint_files = inputs![glob![
+        "**/*.{ts,tsx,mjs,js,jsx,cjs,md,json,toml,scss}",
+        fmt_excluded
+    ]];
     let prettier_pattern = "{**/*.svelte,docs-site/**/*.mdx}";
     let prettier_files = inputs![
         glob!["**/*.svelte", fmt_excluded],
