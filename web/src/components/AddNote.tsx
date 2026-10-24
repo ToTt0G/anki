@@ -13,7 +13,7 @@ import { Card, Collection, Note } from "../core/types";
 interface Props {
     collection: Collection;
     defaultDeckId?: number;
-    onAddNote: (note: Note, cards: Card[]) => void;
+    onAddNote: (note: Note, cards: Card[]) => Promise<boolean>;
     onSaveMedia?: (
         filename: string,
         dataUrl: string,
@@ -153,7 +153,7 @@ export const AddNote: React.FC<Props> = ({
         }
     };
 
-    const handleAdd = () => {
+    const handleAdd = async () => {
         if (!activeModel) { return; }
 
         const fields = activeModel.flds.map((_, idx) => sanitizeCardHtml(fieldValues[idx] || ""));
@@ -194,7 +194,16 @@ export const AddNote: React.FC<Props> = ({
             now,
         );
 
-        onAddNote(note, cards);
+        try {
+            const saved = await onAddNote(note, cards);
+            if (!saved) {
+                setErrorMsg("Your note was not saved reliably. Keep the draft and retry when storage is available.");
+                return;
+            }
+        } catch {
+            setErrorMsg("Saving failed. Your draft has been preserved.");
+            return;
+        }
 
         const newFieldVals: Record<number, string> = {};
         activeModel.flds.forEach((fld, idx) => {
