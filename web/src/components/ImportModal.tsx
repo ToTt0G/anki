@@ -359,8 +359,12 @@ export const ImportModal: React.FC<Props> = ({
 
                             {previewResult.warnings && previewResult.warnings.length > 0 && (
                                 <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
-                                    <input type="checkbox" checked={warningsAcknowledged}
-                                        onChange={e => setWarningsAcknowledged(e.target.checked)} />
+                                    <input
+                                        type="checkbox"
+                                        checked={warningsAcknowledged}
+                                        onChange={e =>
+                                            setWarningsAcknowledged(e.target.checked)}
+                                    />
                                     I understand this import may omit unsupported media or review data.
                                 </label>
                             )}
@@ -378,7 +382,8 @@ export const ImportModal: React.FC<Props> = ({
                                     type="button"
                                     className="primary"
                                     onClick={handleConfirmImport}
-                                    disabled={isProcessing || (Boolean(previewResult.warnings?.length) && !warningsAcknowledged)}
+                                    disabled={isProcessing
+                                        || (Boolean(previewResult.warnings?.length) && !warningsAcknowledged)}
                                 >
                                     Confirm Import
                                 </button>
