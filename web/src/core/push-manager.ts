@@ -268,11 +268,14 @@ export async function unsubscribeFromPush(
         const endpoint = sub?.endpoint || localStorage.getItem(PUSH_ENDPOINT_STORAGE_KEY);
         if (endpoint) {
             const headers = await buildAuthHeaders(getToken);
-            await fetch("/api/push/unsubscribe", {
+            const response = await fetch("/api/push/unsubscribe", {
                 method: "POST",
                 headers,
                 body: JSON.stringify({ endpoint }),
-            }).catch(() => {});
+            });
+            if (!response.ok) {
+                throw new Error(`Could not remove server push subscription (HTTP ${response.status})`);
+            }
         }
         if (sub) {
             await sub.unsubscribe().catch(() => {});

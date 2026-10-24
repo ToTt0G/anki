@@ -5,6 +5,7 @@ import { AuthenticateWithRedirectCallback, Show, SignInButton, SignUpButton, use
 import { Moon, Sun } from "lucide-react";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AddNote } from "./components/AddNote";
+import { findClozeNumbers } from "./core/cloze";
 import { CardBrowser } from "./components/CardBrowser";
 import { CustomStudyModal } from "./components/CustomStudyModal";
 import { CyborgDuckLoader } from "./components/CyborgDuckLoader";
@@ -32,7 +33,7 @@ import {
     findOrphanedMediaFilenames,
     importEp1100Decks,
 } from "./core/import-export";
-import { syncPushSubscriptionForUser } from "./core/push-manager";
+import { syncPushSubscriptionForUser, unsubscribeFromPush } from "./core/push-manager";
 import { applyServiceWorkerUpdate, registerServiceWorker } from "./core/pwa";
 import { getCustomStudyCardIds, getTodayDay } from "./core/scheduler";
 import { SyncClient, SyncStatus } from "./core/sync-client";
@@ -551,7 +552,14 @@ export const App: React.FC = () => {
         const model = collection.models[note.mid];
         const deckId = cards[0]?.did ?? 1;
         const missing = model ? createMissingClozeCards(note, model, collection, deckId) : [];
-        syncClientRef.current?.upsertNote(note, [...cards, ...missing], false);
+        const remainingCloze = model?.type === 1 ? new Set(findClozeNumbers(note.fields[0] || "")) : null;
+        const removedCardIds = remainingCloze ? cards.filter(c => !remainingCloze.has(c.ord + 1)).map(c => c.id) : [];
+        syncClientRef.current?.upsertNote(
+            note,
+            [...cards, ...missing].filter(c => !removedCardIds.includes(c.id)),
+            false,
+            removedCardIds,
+        );
     };
 
     const handleUpdateCard = (card: Card) => {
@@ -880,6 +888,11 @@ export const App: React.FC = () => {
                                 Boolean(options?.discardUnsynced),
                             );
                             if (!ok) { return; }
+                        }
+                        const pushResult = await unsubscribeFromPush(() => getToken());
+                        if (!pushResult.success) {
+                            setSyncBannerError(pushResult.error || "Could not remove push notifications before signing out.");
+                            return;
                         }
                         previousUserIdRef.current = null;
                         if (syncClientRef.current) {
