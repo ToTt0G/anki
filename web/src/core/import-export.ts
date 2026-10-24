@@ -861,14 +861,13 @@ export async function importApkg(
                 }
             }
         } catch (e: any) {
-            if (
-                e?.message?.includes("too many review log")
-                || e?.message?.includes("cancelled")
-                || e?.message?.includes("timed out")
-            ) {
+            // Some minimal APKG exports omit revlog entirely. No other SQL, data,
+            // cancellation, or resource error may be mistaken for a successful import.
+            if (/no such table:\\s*revlog/i.test(String(e?.message ?? ""))) {
+                warnings.push("Archive has no revlog table; review history was not imported.");
+            } else {
                 throw e;
             }
-            // revlog table is optional in minimal .apkg exports
         }
 
         Object.assign(targetCol.media, extractedMedia);
