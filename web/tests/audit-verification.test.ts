@@ -1079,7 +1079,7 @@ describe("C. Anki Scheduler, FSRS Reference Validation, Search, Export & Perform
         });
     });
 
-    it("UX-06, PERF-01, PERF-05 & SCHED-02: collision-safe bundle merge, O(N) deck counts, backoff jitter, and DST calendar math", () => {
+    it("UX-06, PERF-01, PERF-05 & SCHED-02: collision-safe bundle merge, O(N) deck counts, backoff jitter, and DST calendar math", async () => {
         const col = createDefaultCollection();
         const existingNoteId = Number(Object.keys(col.notes)[0]);
         const existingCardId = Number(Object.keys(col.cards)[0]);
