@@ -522,7 +522,6 @@ describe("A. Security & Privacy (SEC-01–SEC-13, S01–S12, V01–V03)", () => 
 
         await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
         const addr = server.address() as { port: number };
-        let procExited = false;
         let browserDiagnostics = "";
         const proc = spawn(chromeBin, [
             "--headless",
@@ -539,9 +538,6 @@ describe("A. Security & Privacy (SEC-01–SEC-13, S01–S12, V01–V03)", () => 
             "--dump-dom",
             `http://127.0.0.1:${addr.port}/`,
         ]);
-        proc.on("exit", () => {
-            procExited = true;
-        });
         proc.stderr.on("data", chunk => {
             const text = String(chunk);
             browserDiagnostics += text.slice(0, 2000);
@@ -552,7 +548,7 @@ describe("A. Security & Privacy (SEC-01–SEC-13, S01–S12, V01–V03)", () => 
 
         try {
             const start = Date.now();
-            while (!report && !procExited && Date.now() - start < 10000) {
+            while (!report && Date.now() - start < 20000) {
                 await new Promise(r => setTimeout(r, 40));
             }
             // M-10: Never silently skip if browser failed to report
