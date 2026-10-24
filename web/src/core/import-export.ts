@@ -406,7 +406,11 @@ export async function importApkg(
                         );
                     }
                     const base64 = btoa(binary);
-                    extractedMedia[safeFilename] = `data:${inspected.mime};base64,${base64}`;
+                    const newMedia = `data:${inspected.mime};base64,${base64}`;
+                    if (targetCol.media[safeFilename] && targetCol.media[safeFilename] !== newMedia) {
+                        throw new Error(`Media filename collision with existing collection: '${safeFilename}'.`);
+                    }
+                    extractedMedia[safeFilename] = newMedia;
                     mediaCount++;
                 }
             } catch (e: any) {

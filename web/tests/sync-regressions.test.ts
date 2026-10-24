@@ -10,7 +10,9 @@ import { setImmediate } from "node:timers/promises";
 import { createDefaultCollection } from "../src/core/default-data";
 import {
     clearUserOfflineData,
+    discardDeletedGenerationRecovery,
     enqueueOutboxOp,
+    getDeletedGenerationRecovery,
     getOutboxOps,
     removeOutboxOp,
     saveCollectionToIdb,
@@ -428,6 +430,85 @@ it("NEW-01, NEW-02, M-04 & H-05: durable media save, note edit preserving card s
     } finally {
         client.disconnect();
         Object.assign(globalThis, originals);
+        await clearUserOfflineData(userId);
+    }
+});
+
+it("A-02: sequential offline deletions rebase their revision only after an acknowledged local mutation", async () => {
+    const userId = "audit-sequential-replay";
+    const col = createDefaultCollection();
+    await saveCollectionToIdb(userId, col, 7, true, true);
+    const originals = { window: globalThis.window, fetch: globalThis.fetch, WebSocket: globalThis.WebSocket };
+    Object.assign(globalThis, {
+        window: { location: { protocol: "https:", host: "test.example" } },
+        WebSocket: Socket,
+    });
+    globalThis.fetch = async () => Response.json({ ticket: "test" });
+    const client = new SyncClient(userId, async () => "token", () => {}, () => {});
+    try {
+        await client.connect();
+        const socket = Socket.instances.at(-1)!;
+        socket.onopen?.();
+        const [firstNote, secondNote] = Object.values(col.notes);
+        client.deleteNote(firstNote.id);
+        client.deleteNote(secondNote.id);
+        await until(() => client.getPendingOutboxCount() === 2);
+        await until(() => socket.messages.some(m => m.type === "delete_note"));
+        const deletes = () => socket.messages.filter(m => m.type === "delete_note");
+        assert.equal(deletes().length, 1, "Only one operation may be in flight");
+        assert.equal(deletes()[0].expectedRevision, 7);
+        socket.receive({ type: "ack", opId: deletes()[0].opId, revision: 8 });
+        await until(() => deletes().length === 2);
+        assert.equal(deletes()[1].expectedRevision, 8, "A local ack advances the next precondition");
+        socket.receive({ type: "ack", opId: deletes()[1].opId, revision: 9 });
+        await until(async () => (await getOutboxOps(userId)).length === 0);
+    } finally {
+        client.disconnect();
+        Object.assign(globalThis, originals);
+        await clearUserOfflineData(userId);
+    }
+});
+
+it("A-04: generation deletion quarantines unsynced work without reseeding deleted cloud data", async () => {
+    const userId = "audit-deleted-recovery";
+    const col = createDefaultCollection();
+    await saveCollectionToIdb(userId, col, 4, true, true);
+    const editedDeck = { ...col.decks[1], name: "Recovered offline deck" };
+    await enqueueOutboxOp({
+        userId,
+        opId: "offline-edit",
+        createdAt: Date.now(),
+        msg: { type: "upsert_deck", deck: editedDeck, expectedMod: col.decks[1].mod },
+    });
+    const originals = { window: globalThis.window, fetch: globalThis.fetch, WebSocket: globalThis.WebSocket };
+    Object.assign(globalThis, {
+        window: { location: { protocol: "https:", host: "test.example" } },
+        WebSocket: Socket,
+    });
+    globalThis.fetch = async () => Response.json({ ticket: "test" });
+    const client = new SyncClient(userId, async () => "token", () => {}, () => {});
+    try {
+        await client.connect();
+        const socket = Socket.instances.at(-1)!;
+        socket.onopen?.();
+        socket.receive({
+            type: "full_state",
+            collection: createDefaultCollection(),
+            revision: 5,
+            generation: "deleted-new-generation",
+            initialized: false,
+            deleted: true,
+        });
+        await until(async () => (await getDeletedGenerationRecovery(userId)) !== null);
+        const recovery = await getDeletedGenerationRecovery(userId);
+        assert.equal(recovery?.collection.decks[1].name, "Recovered offline deck");
+        assert.equal(recovery?.operations.length, 1);
+        await until(async () => (await getOutboxOps(userId)).length === 0);
+        assert.equal(socket.messages.some(m => m.type === "import_collection"), false);
+    } finally {
+        client.disconnect();
+        Object.assign(globalThis, originals);
+        await discardDeletedGenerationRecovery(userId);
         await clearUserOfflineData(userId);
     }
 });
