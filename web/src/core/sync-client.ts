@@ -1281,24 +1281,22 @@ export class SyncClient {
         });
     }
 
-    public importCollection(
+    public async importCollection(
         col: Collection,
         forceOverwrite?: boolean,
         allowNoBackup?: boolean,
-    ) {
+    ): Promise<boolean> {
         const imported = structuredClone(col);
-        void this.hydration.then(() => {
-            if (this.disposed) { return; }
-            this.hasBackup = true;
-            this.autoSeedBlocked = false;
-            void this.applyAndQueue({
-                type: "import_collection",
-                opId: makeOpId(),
-                expectedRevision: this.revision,
-                forceOverwrite,
-                allowNoBackup,
-                collection: imported,
-            });
+        await this.ensureHydrated();
+        if (this.disposed) { return false; }
+        this.autoSeedBlocked = false;
+        return this.applyAndQueue({
+            type: "import_collection",
+            opId: makeOpId(),
+            expectedRevision: this.revision,
+            forceOverwrite,
+            allowNoBackup,
+            collection: imported,
         });
     }
 }

@@ -73,6 +73,10 @@ export const CardBrowser: React.FC<Props> = ({
     // Local debounced editor state to prevent per-keystroke persistence thrash (P02)
     const [draftFields, setDraftFields] = useState<string[]>([]);
     const [draftTags, setDraftTags] = useState<string>("");
+    const draftFieldsRef = useRef<string[]>(draftFields);
+    const draftTagsRef = useRef<string>(draftTags);
+    draftFieldsRef.current = draftFields;
+    draftTagsRef.current = draftTags;
     const [saveState, setSaveState] = useState<"saved" | "saving">("saved");
     const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const pendingDraftRef = useRef<{ note: Note; fields: string[]; tags: string } | null>(null);
@@ -127,12 +131,17 @@ export const CardBrowser: React.FC<Props> = ({
         return searchResults[0] || null;
     }, [searchResults, selectedCardId]);
 
+    const activeNoteIdRef = useRef<number | null>(selectedCardItem?.note.id ?? null);
+    activeNoteIdRef.current = selectedCardItem?.note.id ?? null;
+
     // Synchronize local draft fields when selected note changes
     useEffect(() => {
         // A pending note draft belongs to the previous note: flush rather than discard.
         flushPendingDraft();
         setUploadError(null);
         if (selectedCardItem) {
+            draftFieldsRef.current = [...selectedCardItem.note.fields];
+            draftTagsRef.current = selectedCardItem.note.tags.join(" ");
             setDraftFields([...selectedCardItem.note.fields]);
             setDraftTags(selectedCardItem.note.tags.join(" "));
             setSaveState("saved");
@@ -176,22 +185,26 @@ export const CardBrowser: React.FC<Props> = ({
 
     const handleFieldChange = (fieldIdx: number, val: string) => {
         if (!selectedCardItem) { return; }
-        const nextFields = [...draftFields];
+        const nextFields = [...draftFieldsRef.current];
         nextFields[fieldIdx] = val;
+        draftFieldsRef.current = nextFields;
         setDraftFields(nextFields);
-        scheduleDebouncedNoteSave(selectedCardItem.note, nextFields, draftTags);
+        scheduleDebouncedNoteSave(selectedCardItem.note, nextFields, draftTagsRef.current);
     };
 
     const handleTagsChange = (val: string) => {
         if (!selectedCardItem) { return; }
+        draftTagsRef.current = val;
         setDraftTags(val);
-        scheduleDebouncedNoteSave(selectedCardItem.note, draftFields, val);
+        scheduleDebouncedNoteSave(selectedCardItem.note, draftFieldsRef.current, val);
     };
 
     const handleBrowserImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         e.target.value = "";
         if (!file || !selectedCardItem) { return; }
+        const uploadNoteId = selectedCardItem.note.id;
+        const uploadFieldIdx = editingFieldIdxRef.current;
 
         // UX-10 & SEC-13: Validate size, extension, magic bytes, and image dimensions before optimistic save
         setUploadError(null);
@@ -239,10 +252,13 @@ export const CardBrowser: React.FC<Props> = ({
                 .replace(/[_-]+/g, " ")
                 .trim() || "Flashcard image";
             const escapedAlt = altDesc.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
-            const idx = editingFieldIdxRef.current;
-            const cur = draftFields[idx] || "";
+            if (activeNoteIdRef.current !== uploadNoteId) {
+                setUploadError("The selected note changed during upload. The image was saved but not inserted.");
+                return;
+            }
+            const cur = draftFieldsRef.current[uploadFieldIdx] || "";
             const imgTag = `<img src="${canonicalFilename}" alt="${escapedAlt}">`;
-            handleFieldChange(idx, cur ? `${cur}\n${imgTag}` : imgTag);
+            handleFieldChange(uploadFieldIdx, cur ? `${cur}\n${imgTag}` : imgTag);
         } catch {
             setUploadError("Could not read image file.");
         }

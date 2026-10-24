@@ -12,7 +12,7 @@ interface Props {
     collection: Collection;
     syncStatus?: SyncStatus;
     pendingOutboxCount?: number;
-    onImportComplete: (updatedCol: Collection) => void;
+    onImportComplete: (updatedCol: Collection) => Promise<boolean>;
     onRestoreBackup?: (options?: { discardPending?: boolean }) => Promise<boolean>;
     hasBackup?: boolean;
     onClose: () => void;
@@ -110,12 +110,23 @@ export const ImportModal: React.FC<Props> = ({
         }
     };
 
-    const handleConfirmImport = () => {
-        if (!stagedCol || !previewResult) { return; }
-        onImportComplete(stagedCol);
-        setCommittedResult(previewResult);
-        setPreviewResult(null);
-        setStagedCol(null);
+    const handleConfirmImport = async () => {
+        if (!stagedCol || !previewResult || isProcessing) { return; }
+        setIsProcessing(true);
+        setErrorMsg(null);
+        try {
+            const saved = await onImportComplete(stagedCol);
+            if (!saved) {
+                throw new Error("Import was not saved locally. Your preview is still available; try again.");
+            }
+            setCommittedResult(previewResult);
+            setPreviewResult(null);
+            setStagedCol(null);
+        } catch (err: any) {
+            setErrorMsg(err?.message || "Could not queue the import.");
+        } finally {
+            setIsProcessing(false);
+        }
     };
 
     const handleRestore = async (discardPending: boolean = false) => {
@@ -149,10 +160,9 @@ export const ImportModal: React.FC<Props> = ({
         }
     };
 
-    const commitStatusHeading = syncStatus === "connected" && pendingOutboxCount === 0
-        ? "Backed up to cloud"
-        : syncStatus === "connected"
-        ? "Saved locally · Syncing to cloud..."
+    // Queue durability is not equivalent to the operation-specific cloud acknowledgement.
+    const commitStatusHeading = syncStatus === "connected"
+        ? "Saved locally · Check cloud sync in Settings"
         : "Saved locally · Waiting to sync";
 
     return (
@@ -355,7 +365,7 @@ export const ImportModal: React.FC<Props> = ({
                                 >
                                     Discard
                                 </button>
-                                <button type="button" className="primary" onClick={handleConfirmImport}>
+                                <button type="button" className="primary" onClick={handleConfirmImport} disabled={isProcessing}>
                                     Confirm Import
                                 </button>
                             </div>

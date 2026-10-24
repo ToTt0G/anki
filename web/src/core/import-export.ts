@@ -1202,36 +1202,49 @@ export async function exportApkg(col: Collection, did?: number): Promise<Blob> {
         ) {
             continue;
         }
-        const idxStr = String(mediaIdx++);
-        mediaMap[idxStr] = normalizedFn;
 
+        const idxStr = String(mediaIdx);
         if (dataUrl.startsWith("data:")) {
             const base64 = dataUrl.split(",")[1];
+            if (!base64) { throw new Error(`Cannot export media '${filename}': missing base64 data`); }
             zip.file(idxStr, base64, { base64: true });
         } else if (dataUrl.startsWith("blob:") || dataUrl.startsWith("http") || dataUrl.startsWith("/")) {
+            let response: Response;
             try {
-                const resp = await fetch(dataUrl);
-                const ab = await resp.arrayBuffer();
-                zip.file(idxStr, ab);
-            } catch (e) {
-                console.warn(`Failed to package media ${filename}:`, e);
+                response = await fetch(dataUrl);
+            } catch (error) {
+                throw new Error(`Cannot export media '${filename}': attachment could not be loaded`, {
+                    cause: error,
+                });
             }
+            if (!response.ok) {
+                throw new Error(`Cannot export media '${filename}': HTTP ${response.status}`);
+            }
+            zip.file(idxStr, await response.arrayBuffer());
+        } else {
+            throw new Error(`Cannot export media '${filename}': unsupported attachment reference`);
         }
+        // The manifest must only reference archive entries that were actually added.
+        mediaMap[idxStr] = normalizedFn;
+        mediaIdx++;
     }
 
     for (const [filename, url] of staticMediaUrls.entries()) {
         if (col.media && col.media[filename]) { continue; }
+        let response: Response;
         try {
-            const resp = await fetch(url);
-            if (resp.ok) {
-                const ab = await resp.arrayBuffer();
-                const idxStr = String(mediaIdx++);
-                mediaMap[idxStr] = filename;
-                zip.file(idxStr, ab);
-            }
-        } catch (e) {
-            console.warn(`Failed to package static media ${filename}:`, e);
+            response = await fetch(url);
+        } catch (error) {
+            throw new Error(`Cannot export bundled media '${filename}': attachment could not be loaded`, {
+                cause: error,
+            });
         }
+        if (!response.ok) {
+            throw new Error(`Cannot export bundled media '${filename}': HTTP ${response.status}`);
+        }
+        const idxStr = String(mediaIdx++);
+        zip.file(idxStr, await response.arrayBuffer());
+        mediaMap[idxStr] = filename;
     }
 
     zip.file("media", JSON.stringify(mediaMap));

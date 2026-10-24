@@ -234,6 +234,10 @@ function parseAndSanitizeAttributes(tagName: string, rawAttrs: string): string {
         }
 
         const rawVal = match[2] ?? match[3] ?? match[4] ?? "";
+        // Imported cards must not collide with internal sandbox bootstrap nodes.
+        if (attrName === "id" && (/^klanki-/i.test(rawVal.trim()) || rawVal.trim() === "card-root")) {
+            continue;
+        }
         if (attrName === "src" || attrName === "href") {
             if (!isSafeUriValue(rawVal, attrName)) {
                 keptAttrs.push(`${attrName}="#"`);
@@ -323,7 +327,8 @@ function sanitizeViaInertDomParser(html: string): string {
                     for (const attr of Array.from(el.attributes)) {
                         const name = attr.name.toLowerCase();
                         if (
-                            name.startsWith("on")
+                            (name === "id" && (/^klanki-/i.test(attr.value.trim()) || attr.value.trim() === "card-root"))
+                            || name.startsWith("on")
                             || (!GLOBAL_ALLOWED_ATTRS.has(name) && !tagAllowed?.has(name))
                         ) {
                             el.removeAttribute(attr.name);

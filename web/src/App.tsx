@@ -97,6 +97,7 @@ export const App: React.FC = () => {
     const [isStudying, setIsStudying] = useState<boolean>(initialNav.studying);
     const [syncStatus, setSyncStatus] = useState<SyncStatus>("offline");
     const [syncBannerError, setSyncBannerError] = useState<string | null>(null);
+    const [storageDurabilityWarning, setStorageDurabilityWarning] = useState<string | null>(null);
     const [pendingSwUpdate, setPendingSwUpdate] = useState<ServiceWorkerRegistration | null>(null);
     const [cleanupFailedUser, setCleanupFailedUser] = useState<string | null>(null);
     const [retainedUnsyncedUser, setRetainedUnsyncedUser] = useState<{ userId: string; count: number } | null>(null);
@@ -137,6 +138,35 @@ export const App: React.FC = () => {
         };
         window.addEventListener("popstate", onPopState);
         return () => window.removeEventListener("popstate", onPopState);
+    }, []);
+
+    // A-15: Refresh day-dependent study counts at local midnight and when resuming a sleeping tab.
+    useEffect(() => {
+        let midnightTimer: ReturnType<typeof setTimeout> | null = null;
+        const refreshCounts = () => setCollection(prev => prev ? { ...prev } : prev);
+        const scheduleMidnight = () => {
+            if (midnightTimer !== null) { clearTimeout(midnightTimer); }
+            const nextDay = new Date();
+            nextDay.setHours(24, 0, 1, 0);
+            midnightTimer = setTimeout(() => {
+                refreshCounts();
+                scheduleMidnight();
+            }, Math.max(1000, nextDay.getTime() - Date.now()));
+        };
+        const onResume = () => {
+            if (!document.hidden) {
+                refreshCounts();
+                scheduleMidnight();
+            }
+        };
+        scheduleMidnight();
+        document.addEventListener("visibilitychange", onResume);
+        window.addEventListener("focus", onResume);
+        return () => {
+            if (midnightTimer !== null) { clearTimeout(midnightTimer); }
+            document.removeEventListener("visibilitychange", onResume);
+            window.removeEventListener("focus", onResume);
+        };
     }, []);
 
     const handleSelectView = (view: NavView) => {
@@ -224,6 +254,10 @@ export const App: React.FC = () => {
                 },
                 status => setSyncStatus(status),
                 err => {
+                    if (/offline persistence unavailable|saved for this session only/i.test(err)) {
+                        setStorageDurabilityWarning(err);
+                        return;
+                    }
                     setSyncBannerError(err);
                     window.setTimeout(() => setSyncBannerError(null), 5000);
                 },
@@ -633,6 +667,25 @@ export const App: React.FC = () => {
                 </div>
             )}
 
+            {storageDurabilityWarning && (
+                <div
+                    role="alert"
+                    style={{
+                        maxWidth: 900,
+                        margin: "8px auto 0",
+                        padding: "10px 14px",
+                        borderRadius: 6,
+                        background: "rgba(217, 119, 6, 0.12)",
+                        border: "1px solid var(--color-again)",
+                        color: "var(--text-primary)",
+                        fontSize: 13,
+                    }}
+                >
+                    <strong>Offline changes are not stored durably.</strong>{" "}
+                    {storageDurabilityWarning} Do not close this tab until cloud sync is confirmed.
+                </div>
+            )}
+
             {syncBannerError && (
                 <div
                     role="alert"
@@ -774,9 +827,9 @@ export const App: React.FC = () => {
                     syncStatus={syncStatus}
                     pendingOutboxCount={pendingOutboxCount}
                     hasBackup={syncClientRef.current?.getHasServerBackup()}
-                    onImportComplete={updated => {
-                        syncClientRef.current?.importCollection(updated);
-                    }}
+                    onImportComplete={updated =>
+                        syncClientRef.current?.importCollection(updated) ?? Promise.resolve(false)
+                    }
                     onRestoreBackup={async options => {
                         return (await syncClientRef.current?.restoreServerBackup(options)) || false;
                     }}

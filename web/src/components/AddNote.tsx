@@ -88,6 +88,13 @@ export const AddNote: React.FC<Props> = ({
         e.target.value = "";
         if (!file) { return; }
 
+        // Capture the target once; subsequent field changes must not redirect an in-flight upload.
+        const targetIdx = activeFieldIdxRef.current;
+        const initialValue = fieldValues[targetIdx] || "";
+        const fieldInput = fieldRefs.current[targetIdx];
+        const insertionStart = fieldInput?.selectionStart ?? initialValue.length;
+        const insertionEnd = fieldInput?.selectionEnd ?? initialValue.length;
+
         // UX-10, SEC-13, NEW-02, L-02, L-03, L-08
         setErrorMsg(null);
         if (file.size > MAX_SINGLE_MEDIA_BYTES) {
@@ -132,22 +139,15 @@ export const AddNote: React.FC<Props> = ({
             }
 
             const altDesc = imageAltText.trim() || defaultAltFromFilename(safeBase);
-            const targetIdx = activeFieldIdxRef.current;
-            const currentVal = fieldValues[targetIdx] || "";
             const imgTag = `<img src="${escapeAttr(canonicalFilename)}" alt="${escapeAttr(altDesc)}">`;
-            const input = fieldRefs.current[targetIdx];
-
-            if (input) {
-                const start = input.selectionStart || 0;
-                const end = input.selectionEnd || 0;
-                const newVal = currentVal.substring(0, start) + imgTag + currentVal.substring(end);
-                setFieldValues(prev => ({ ...prev, [targetIdx]: newVal }));
-            } else {
-                setFieldValues(prev => ({
-                    ...prev,
-                    [targetIdx]: currentVal ? `${currentVal}\n${imgTag}` : imgTag,
-                }));
-            }
+            setFieldValues(prev => {
+                const currentVal = prev[targetIdx] || "";
+                // If typing continued during upload, append rather than replacing the newer draft.
+                const newVal = currentVal !== initialValue
+                    ? (currentVal ? `${currentVal}\n${imgTag}` : imgTag)
+                    : currentVal.substring(0, insertionStart) + imgTag + currentVal.substring(insertionEnd);
+                return { ...prev, [targetIdx]: newVal };
+            });
         } catch {
             setErrorMsg("Could not read image file.");
         }

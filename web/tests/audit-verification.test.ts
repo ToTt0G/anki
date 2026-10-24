@@ -106,6 +106,12 @@ describe("A. Security & Privacy (SEC-01–SEC-13, S01–S12, V01–V03)", () => 
         assert.ok(!cleaned.includes("data:text/html"), "data:text/html URI must be neutralized");
         assert.ok(!cleaned.includes("<iframe"), "iframe must be removed");
         assert.ok(cleaned.includes("Safe Question"), "legitimate content preserved");
+        const collision = sanitizeCardHtml(
+            '<div id="klanki-card-config">bad</div><div id="card-root">bad</div><div id="custom-id">ok</div>',
+        );
+        assert.ok(!collision.includes('id="klanki-card-config"'), "internal config ID cannot be shadowed");
+        assert.ok(!collision.includes('id="card-root"'), "internal card root ID cannot be shadowed");
+        assert.ok(collision.includes('id="custom-id"'), "ordinary note IDs are preserved");
 
         assert.equal(decodeHtmlEntities("java&#x09;script&#58;"), "java\tscript:");
         assert.equal(extractTextFromHtml("<b>Hello</b> <script>evil()</script>World"), "Hello World");
