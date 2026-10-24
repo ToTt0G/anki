@@ -381,12 +381,16 @@ it("NEW-01, NEW-02, M-04 & H-05: durable media save, note edit preserving card s
         const answerMsg = socket.messages.find(m => m.type === "answer_card");
         const beforeFailedRestore = (await getOutboxOps(userId)).map(op => op.opId);
         const previousFetch = globalThis.fetch;
-        globalThis.fetch = async (url: any, ...args: any[]) => String(url).includes("restore-backup")
-            ? Response.json({ error: "Revision changed" }, { status: 409 })
-            : previousFetch(url, ...args);
+        globalThis.fetch = async (url: any, ...args: any[]) =>
+            String(url).includes("restore-backup")
+                ? Response.json({ error: "Revision changed" }, { status: 409 })
+                : previousFetch(url, ...args);
         assert.equal(await client.restoreServerBackup({ discardPending: true }), false);
-        assert.deepEqual((await getOutboxOps(userId)).map(op => op.opId), beforeFailedRestore,
-            "Failed server restore must not destroy the offline outbox");
+        assert.deepEqual(
+            (await getOutboxOps(userId)).map(op => op.opId),
+            beforeFailedRestore,
+            "Failed server restore must not destroy the offline outbox",
+        );
         globalThis.fetch = previousFetch;
         socket.receive({
             type: "ack",
