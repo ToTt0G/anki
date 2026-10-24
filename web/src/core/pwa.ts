@@ -62,10 +62,12 @@ export async function promptPwaInstall(): Promise<boolean> {
 }
 
 export function applyServiceWorkerUpdate(registration: ServiceWorkerRegistration): void {
-    if (registration.waiting) {
-        registration.waiting.postMessage({ type: "SKIP_WAITING" });
-    }
-    window.location.reload();
+    if (!registration.waiting) { return; }
+    // Reload only after the new worker controls this page, not merely after posting a message.
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+        window.location.reload();
+    }, { once: true });
+    registration.waiting.postMessage({ type: "SKIP_WAITING" });
 }
 
 /**
