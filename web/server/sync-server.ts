@@ -964,6 +964,9 @@ export class AnkiSyncServer extends DurableObject {
             const pair = new WebSocketPair();
             const [client, server] = Object.values(pair);
             this.ctx.acceptWebSocket(server);
+            if (typeof (server as any).serializeAttachment === "function") {
+                (server as any).serializeAttachment({ leaseExpiresAt: Date.now() + 15 * 60_000 });
+            }
             return new Response(null, { status: 101, webSocket: client });
         }
 
@@ -1571,6 +1574,13 @@ export class AnkiSyncServer extends DurableObject {
     }
 
     async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
+        const lease = typeof (ws as any).deserializeAttachment === "function"
+            ? (ws as any).deserializeAttachment() as { leaseExpiresAt?: number } | null
+            : null;
+        if (lease && (!Number.isFinite(lease.leaseExpiresAt) || Date.now() >= (lease.leaseExpiresAt || 0))) {
+            ws.close(4001, "Authorization lease expired");
+            return;
+        }
         if (typeof message !== "string") {
             this.sendOpError(ws, undefined, "Binary WebSocket frames are not supported", "validation", false);
             return;
@@ -1634,6 +1644,13 @@ export class AnkiSyncServer extends DurableObject {
             if (msg.type === "init") {
                 if (!this.checkInitRateLimit()) {
                     this.sendOpError(ws, undefined, "Rate limit exceeded for init requests", "validation", true);
+                    return;
+                }
+                const generation = this.getMeta("col_generation") ?? "0";
+                const revision = this.getRevision();
+                if (!msg.force && msg.hasLocalCollection && msg.knownGeneration === generation
+                    && msg.lastRevision === revision && this.isInitialized() && !this.getDeletionTombstone()) {
+                    ws.send(JSON.stringify({ type: "sync_unchanged", revision, generation } satisfies ServerMessage));
                     return;
                 }
                 const excludeMedia = msg.knownMedia && msg.knownMedia.length > 0
@@ -2056,6 +2073,13 @@ export class AnkiSyncServer extends DurableObject {
                         JSON.stringify(msg.note),
                     );
 
+                    for (const cid of msg.removedCardIds || []) {
+                        const previousCard = this.sql.exec("SELECT json FROM cards WHERE id = ?", cid).toArray();
+                        if (previousCard.length && (JSON.parse(previousCard[0].json) as Card).nid !== msg.note.id) {
+                            throw new OpError("Cannot remove a card belonging to another note", "validation");
+                        }
+                        this.sql.exec("DELETE FROM cards WHERE id = ?", cid);
+                    }
                     // NEW-01: When editing an existing note (`!msg.isNew`), NEVER overwrite existing
                     // card scheduling state (`ivl`, `due`, `reps`, `lapses`, `queue`, `type`, `data`).
                     // Only insert cards that do not yet exist (e.g. newly added cloze ordinals).
@@ -2089,6 +2113,7 @@ export class AnkiSyncServer extends DurableObject {
                         opId,
                         note: msg.note,
                         cards: authoritativeCards,
+                        removedCardIds: msg.removedCardIds,
                         isNew: msg.isNew,
                         revision: rev,
                     },

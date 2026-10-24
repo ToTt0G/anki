@@ -6,7 +6,8 @@ import { Card, Collection, Deck, DeckConfig, Note, RevlogEntry } from "../src/co
 export type ClientMessage =
     & { generation?: string }
     & (
-        | { type: "init"; lastMod?: number; lastRevision?: number; force?: boolean; knownMedia?: string[] }
+        | { type: "init"; lastMod?: number; lastRevision?: number; force?: boolean; knownMedia?: string[];
+            knownGeneration?: string; hasLocalCollection?: boolean }
         | {
             type: "answer_card";
             opId?: string;
@@ -31,6 +32,7 @@ export type ClientMessage =
             opId?: string;
             note: Note;
             cards: Card[];
+            removedCardIds?: number[];
             isNew?: boolean;
             expectedMod?: number;
             forceOverwrite?: boolean;
@@ -120,7 +122,7 @@ export type ServerMessage =
         revision?: number;
     }
     | { type: "upsert_deck_config"; opId?: string; dconf: DeckConfig; revision?: number }
-    | { type: "upsert_note"; opId?: string; note: Note; cards: Card[]; isNew?: boolean; revision?: number }
+    | { type: "upsert_note"; opId?: string; note: Note; cards: Card[]; removedCardIds?: number[]; isNew?: boolean; revision?: number }
     | {
         type: "delete_note";
         opId?: string;
@@ -137,4 +139,5 @@ export type ServerMessage =
         collection: Collection;
         revision?: number;
     }
+    | { type: "sync_unchanged"; revision: number; generation: string }
     | { type: "pong" };

@@ -144,6 +144,7 @@ export function applyClientMutationLocally(col: Collection, msg: ClientMessage):
                 col.cards[c.id] = c;
             }
         }
+        for (const cid of msg.removedCardIds || []) { delete col.cards[cid]; }
     } else if (msg.type === "delete_note") {
         // DATA-02: Only delete cards whose authoritative `nid` matches `msg.noteId`
         for (const card of Object.values(col.cards)) {
@@ -192,6 +193,7 @@ export class SyncClient {
     private messageQueue: Promise<void> = Promise.resolve();
     /** Only one mutation is in flight, so local acknowledgments advance subsequent preconditions. */
     private inFlightOpId: string | null = null;
+    private leaseTimer: ReturnType<typeof setTimeout> | null = null;
     /** Serialized local persistence queue ordering outbox, media, and collection writes (M-06). */
     private persistenceQueue: Promise<void> = Promise.resolve();
     private importing = new Set<string>();
@@ -465,10 +467,19 @@ export class SyncClient {
                 }
                 this.reconnectAttempts = 0;
                 this.setStatus("connected");
+                const activeSocket = this.ws;
+                if (this.leaseTimer) { clearTimeout(this.leaseTimer); }
+                this.leaseTimer = setTimeout(() => {
+                    if (this.ws === activeSocket && !this.disposed) {
+                        activeSocket?.close(4001, "Renewing authentication");
+                    }
+                }, 14 * 60_000);
                 this.sendDirect({
                     type: "init",
                     lastMod: this.col.mod,
                     lastRevision: this.revision,
+                    knownGeneration: this.generation,
+                    hasLocalCollection: this.initialized,
                 });
             };
 
@@ -486,6 +497,7 @@ export class SyncClient {
 
             this.ws.onclose = () => {
                 this.inFlightOpId = null;
+                if (this.leaseTimer) { clearTimeout(this.leaseTimer); this.leaseTimer = null; }
                 if (this.disposed) { return; }
                 this.setStatus("offline");
                 this.scheduleReconnect();
@@ -595,6 +607,7 @@ export class SyncClient {
             clearTimeout(this.reconnectTimer);
             this.reconnectTimer = null;
         }
+        if (this.leaseTimer) { clearTimeout(this.leaseTimer); this.leaseTimer = null; }
         if (this.ws) {
             try {
                 this.ws.onopen = null;
@@ -882,6 +895,10 @@ export class SyncClient {
     }
 
     private async handleServerMessage(msg: ServerMessage) {
+        if (msg.type === "sync_unchanged") {
+            await this.drainOutbox();
+            return;
+        }
         if (msg.type === "ack") {
             this.revision = Math.max(this.revision, msg.revision);
             this.initialized = true;
@@ -1100,6 +1117,10 @@ export class SyncClient {
         if (msg.type === "upsert_note") {
             this.serverBaseCol.notes[msg.note.id] = msg.note;
             this.col.notes[msg.note.id] = msg.note;
+            for (const cid of msg.removedCardIds || []) {
+                delete this.serverBaseCol.cards[cid];
+                delete this.col.cards[cid];
+            }
             for (const card of msg.cards) {
                 if (msg.isNew || !this.serverBaseCol.cards[card.id]) {
                     this.serverBaseCol.cards[card.id] = card;
@@ -1258,7 +1279,12 @@ export class SyncClient {
         void this.applyAndQueue(msg);
     }
 
-    public upsertNote(note: Note, cards: Card[], isNew: boolean = false): Promise<boolean> {
+    public upsertNote(
+        note: Note,
+        cards: Card[],
+        isNew: boolean = false,
+        removedCardIds: number[] = [],
+    ): Promise<boolean> {
         const opId = makeOpId();
         const expectedMod = !isNew ? this.serverBaseCol.notes[note.id]?.mod : undefined;
         const msg: ClientMessage & { opId: string } = {
@@ -1266,6 +1292,7 @@ export class SyncClient {
             opId,
             note,
             cards,
+            removedCardIds,
             isNew,
             expectedMod,
         };
