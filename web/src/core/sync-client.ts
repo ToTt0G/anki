@@ -524,11 +524,8 @@ export class SyncClient {
                 } unsynced or conflicted. Sync or confirm discarding them first.`,
             );
         }
-        if (ops.length > 0 && options?.discardPending) {
-            await clearUserOutbox(this.userId);
-            this.pendingOutboxCount = 0;
-        }
-
+        // Do not discard pending edits before the remote restore has succeeded.
+        // A failed request must leave the offline recovery path intact.
         try {
             const token = await this.getToken();
             if (!token) { return false; }
@@ -546,6 +543,11 @@ export class SyncClient {
             }
             if (!res.ok) { return false; }
             const data = await res.json();
+            if (!data.collection) { return false; }
+            if (ops.length > 0 && options?.discardPending) {
+                await clearUserOutbox(this.userId);
+                this.pendingOutboxCount = 0;
+            }
             if (data.collection) {
                 this.revision = data.revision || this.revision + 1;
                 this.initialized = true;
@@ -561,7 +563,7 @@ export class SyncClient {
     public async clearOfflineStorage(options?: { forceDiscardPending?: boolean }): Promise<void> {
         if (!options?.forceDiscardPending) {
             const ops = await getOutboxOps(this.userId);
-            const pendingCount = ops.filter(isPendingOutboxEntry).length;
+            const pendingCount = ops.length;
             if (pendingCount > 0) {
                 throw new Error(
                     `Cannot clear offline cache while ${pendingCount} unsynced ${
@@ -982,7 +984,7 @@ export class SyncClient {
                     target.cards[msg.cardId] = {
                         ...card,
                         ...msg.nextState,
-                        mod: Math.floor(Date.now() / 1000),
+                        mod: msg.nextState.mod ?? card.mod,
                     };
                 }
                 if (!target.revlog.some(r => r.id === msg.revlogEntry.id)) {
@@ -1204,7 +1206,7 @@ export class SyncClient {
         void this.applyAndQueue(msg);
     }
 
-    public upsertNote(note: Note, cards: Card[], isNew: boolean = false) {
+    public upsertNote(note: Note, cards: Card[], isNew: boolean = false): Promise<boolean> {
         const opId = makeOpId();
         const expectedMod = !isNew ? this.serverBaseCol.notes[note.id]?.mod : undefined;
         const msg: ClientMessage & { opId: string } = {
@@ -1215,7 +1217,7 @@ export class SyncClient {
             isNew,
             expectedMod,
         };
-        void this.applyAndQueue(msg);
+        return this.applyAndQueue(msg);
     }
 
     public deleteNote(noteId: number) {
