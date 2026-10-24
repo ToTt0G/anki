@@ -7,10 +7,11 @@ import { ClientMessage } from "../../server/types";
 import { Collection } from "./types";
 
 const DB_NAME = "klanki_db_v2";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_COLLECTIONS = "collections";
 const STORE_MEDIA = "media";
 const STORE_OUTBOX = "outbox";
+const STORE_RECOVERY = "recovery";
 
 export interface OutboxEntry {
     opId: string;
@@ -25,6 +26,14 @@ export interface OutboxEntry {
 }
 
 export type OutboxStatus = "pending" | "conflict";
+
+export interface RecoverySnapshot {
+    userId: string;
+    collection: Collection;
+    operations: OutboxEntry[];
+    sourceGeneration: string;
+    savedAt: number;
+}
 
 /**
  * Result of queueing an outbox operation. `durable: true` guarantees the entry survived the
@@ -51,6 +60,7 @@ export interface StoredCollectionMeta {
 const memoryCollections = new Map<string, StoredCollectionMeta>();
 const memoryMedia = new Map<string, Record<string, string>>();
 const memoryOutbox = new Map<string, OutboxEntry[]>();
+const memoryRecovery = new Map<string, RecoverySnapshot>();
 
 function hasIndexedDB(): boolean {
     return typeof indexedDB !== "undefined" && indexedDB !== null;
@@ -70,6 +80,9 @@ function openDb(): Promise<IDBDatabase> {
             if (!db.objectStoreNames.contains(STORE_MEDIA)) {
                 const mediaStore = db.createObjectStore(STORE_MEDIA, { keyPath: "id" });
                 mediaStore.createIndex("by_user", "userId", { unique: false });
+            }
+            if (!db.objectStoreNames.contains(STORE_RECOVERY)) {
+                db.createObjectStore(STORE_RECOVERY, { keyPath: "userId" });
             }
             if (!db.objectStoreNames.contains(STORE_OUTBOX)) {
                 const outboxStore = db.createObjectStore(STORE_OUTBOX, { keyPath: "opId" });
@@ -454,7 +467,7 @@ export async function clearUserOutbox(userId: string): Promise<void> {
 /**
  * Clear all offline data (collection, media, and outbox) for a specific user or all users (S07, SEC-04).
  */
-export async function clearUserOfflineData(userId?: string): Promise<void> {
+export async function clearUserOfflineData(userId?: string, preserveRecovery: boolean = false): Promise<void> {
     try {
         if (typeof localStorage !== "undefined") {
             const keysToRemove: string[] = [];
@@ -478,10 +491,12 @@ export async function clearUserOfflineData(userId?: string): Promise<void> {
         memoryCollections.delete(userId);
         memoryMedia.delete(userId);
         memoryOutbox.delete(userId);
+        if (!preserveRecovery) { memoryRecovery.delete(userId); }
     } else {
         memoryCollections.clear();
         memoryMedia.clear();
         memoryOutbox.clear();
+        memoryRecovery.clear();
     }
     if (!hasIndexedDB()) { return; }
 
@@ -489,7 +504,7 @@ export async function clearUserOfflineData(userId?: string): Promise<void> {
         const db = await openDb();
         await new Promise<void>((resolve, reject) => {
             const tx = db.transaction(
-                [STORE_COLLECTIONS, STORE_MEDIA, STORE_OUTBOX],
+                [STORE_COLLECTIONS, STORE_MEDIA, STORE_OUTBOX, STORE_RECOVERY],
                 "readwrite",
             );
 
@@ -497,8 +512,10 @@ export async function clearUserOfflineData(userId?: string): Promise<void> {
                 tx.objectStore(STORE_COLLECTIONS).clear();
                 tx.objectStore(STORE_MEDIA).clear();
                 tx.objectStore(STORE_OUTBOX).clear();
+                tx.objectStore(STORE_RECOVERY).clear();
             } else {
                 tx.objectStore(STORE_COLLECTIONS).delete(userId);
+                if (!preserveRecovery) { tx.objectStore(STORE_RECOVERY).delete(userId); }
 
                 const mediaIdx = tx.objectStore(STORE_MEDIA).index("by_user");
                 const mediaReq = mediaIdx.openKeyCursor(IDBKeyRange.only(userId));
@@ -528,4 +545,64 @@ export async function clearUserOfflineData(userId?: string): Promise<void> {
     } catch (err) {
         throw new Error("Could not clear offline data. Please try again.", { cause: err });
     }
+}
+
+/** Quarantine pending work from a deleted cloud generation; never auto-upload it. */
+export async function preserveDeletedGenerationRecovery(
+    userId: string,
+    collection: Collection,
+    sourceGeneration: string,
+): Promise<boolean> {
+    const operations = await getOutboxOps(userId);
+    if (operations.length === 0) { return true; }
+    const record: RecoverySnapshot = {
+        userId,
+        collection: structuredClone(collection),
+        operations,
+        sourceGeneration,
+        savedAt: Date.now(),
+    };
+    if (!hasIndexedDB()) { return false; }
+    try {
+        const db = await openDb();
+        await new Promise<void>((resolve, reject) => {
+            const tx = db.transaction(STORE_RECOVERY, "readwrite");
+            tx.objectStore(STORE_RECOVERY).put(record);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+            tx.onabort = () => reject(tx.error);
+        });
+        memoryRecovery.set(userId, record);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+export async function getDeletedGenerationRecovery(userId: string): Promise<RecoverySnapshot | null> {
+    if (!hasIndexedDB()) { return memoryRecovery.get(userId) ?? null; }
+    try {
+        const db = await openDb();
+        return await new Promise<RecoverySnapshot | null>((resolve, reject) => {
+            const tx = db.transaction(STORE_RECOVERY, "readonly");
+            const req = tx.objectStore(STORE_RECOVERY).get(userId);
+            req.onsuccess = () => resolve(req.result || null);
+            req.onerror = () => reject(req.error);
+        });
+    } catch {
+        return null;
+    }
+}
+
+export async function discardDeletedGenerationRecovery(userId: string): Promise<void> {
+    memoryRecovery.delete(userId);
+    if (!hasIndexedDB()) { return; }
+    const db = await openDb();
+    await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(STORE_RECOVERY, "readwrite");
+        tx.objectStore(STORE_RECOVERY).delete(userId);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
+    });
 }

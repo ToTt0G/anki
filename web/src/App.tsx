@@ -21,6 +21,9 @@ import { SyncModal } from "./components/SyncModal";
 import { findClozeNumbers } from "./core/cloze";
 import {
     clearUserOfflineData,
+    discardDeletedGenerationRecovery,
+    getDeletedGenerationRecovery,
+    RecoverySnapshot,
     getClearDataOnSignOutPreference,
     hasUnsyncedUserChanges,
     OutboxEntry,
@@ -115,6 +118,7 @@ export const App: React.FC = () => {
         } | null
     >(null);
     const [conflictedOps, setConflictedOps] = useState<OutboxEntry[]>([]);
+    const [recoverySnapshot, setRecoverySnapshot] = useState<RecoverySnapshot | null>(null);
 
     // Modals state
     const [optionsDeckId, setOptionsDeckId] = useState<number | null>(null);
@@ -266,10 +270,14 @@ export const App: React.FC = () => {
                         return;
                     }
                     setSyncBannerError(err);
+                    if (/deleted/i.test(err)) {
+                        void getDeletedGenerationRecovery(userId).then(setRecoverySnapshot);
+                    }
                     window.setTimeout(() => setSyncBannerError(null), 5000);
                 },
             );
             syncClientRef.current = client;
+            void getDeletedGenerationRecovery(userId).then(setRecoverySnapshot);
             setCollection(client.getCollection());
             setCustomStudySession(null);
             setConflictedOps([]);
@@ -651,6 +659,27 @@ export const App: React.FC = () => {
                 }}
                 onInstallClick={() => setShowManualInstallGuide(true)}
             />
+
+            {recoverySnapshot && (
+                <div role="alert" style={{ maxWidth: 900, margin: "8px auto", padding: 12, border: "1px solid var(--color-again)", borderRadius: 6 }}>
+                    <strong>Offline recovery available.</strong> The cloud collection was deleted on another device.
+                    Your unsynced work is quarantined and will not be reuploaded automatically.
+                    <button type="button" onClick={() => {
+                        void exportApkg(recoverySnapshot.collection).then(blob => {
+                            const url = URL.createObjectURL(blob);
+                            const a = document.createElement("a");
+                            a.href = url;
+                            a.download = "anki-deleted-generation-recovery.apkg";
+                            a.click();
+                            URL.revokeObjectURL(url);
+                        }).catch(err => setSyncBannerError(String(err)));
+                    }}>Export Recovery (.apkg)</button>
+                    <button type="button" onClick={() => {
+                        void discardDeletedGenerationRecovery(recoverySnapshot.userId).then(() => setRecoverySnapshot(null))
+                            .catch(err => setSyncBannerError(String(err)));
+                    }}>Discard Recovery</button>
+                </div>
+            )}
 
             {/* U-07: Visible Service Worker update recovery banner */}
             {pendingSwUpdate && (
