@@ -1,0 +1,30 @@
+name: Temporary audit branch formatter
+on:
+  push:
+    branches:
+      - fix/anki-comprehensive-audit-20261024
+permissions:
+  contents: write
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci
+        working-directory: web
+      - run: npm exec --yes --package=dprint@0.56.0 -- dprint fmt .
+        working-directory: web
+      - name: Commit formatting changes when needed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add web
+          if ! git diff --cached --quiet; then
+            git commit -m "style(web): format audit remediation with dprint"
+            git push
+          fi
