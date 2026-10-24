@@ -1700,12 +1700,11 @@ export class AnkiSyncServer extends DurableObject {
 
                     // NEW-04 / H-01: Reject concurrent reviews answered from a stale card version
                     if (
-                        msg.baseReps !== undefined
-                        && !msg.forceOverwrite
-                        && (card.reps || 0) !== msg.baseReps
+                        !msg.forceOverwrite
+                        && (msg.baseReps === undefined || (card.reps || 0) !== msg.baseReps)
                     ) {
                         throw new OpError(
-                            `Concurrent review conflict on card ${msg.cardId}: expected ${msg.baseReps} reviews, server has ${
+                            `Concurrent review conflict on card ${msg.cardId}: expected ${msg.baseReps ?? "a supplied base review count"} reviews, server has ${
                                 card.reps || 0
                             }.`,
                             "conflict_revision",
