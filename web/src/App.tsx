@@ -928,7 +928,7 @@ export const App: React.FC = () => {
                             a.click();
                             URL.revokeObjectURL(url);
                         }).catch(err => setSyncBannerError(String(err)));
-                    }
+                    }}
                     onCleanOrphanedMedia={async filenames => {
                         await syncClientRef.current?.deleteMedia(filenames);
                     }}
