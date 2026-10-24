@@ -1468,6 +1468,41 @@ export function createCardsForNote(
     return cards;
 }
 
+/**
+ * Generate only missing cloze ordinals after an existing note is edited.
+ * Previously studied cards retain their identity, scheduling, and review history.
+ * Obsolete ordinals are intentionally retained until an explicit removal workflow exists.
+ */
+export function createMissingClozeCards(
+    note: Note,
+    model: NoteType,
+    col: Collection,
+    deckId: number,
+): Card[] {
+    if (model.type !== 1) { return []; }
+    const desired = findClozeNumbers((note.fields || []).join("\n"));
+    if (desired.length === 0) { return []; }
+    const currentOrdinals = new Set(
+        Object.values(col.cards).filter(card => card.nid === note.id).map(card => card.ord),
+    );
+    if (desired.every(num => currentOrdinals.has(num - 1))) { return []; }
+
+    const takenIds = new Set<number>(Object.keys(col.cards).map(Number));
+    const lastNewDue = Object.values(col.cards).reduce(
+        (max, card) => card.queue === 0 ? Math.max(max, card.due) : max,
+        0,
+    );
+    const generated = createCardsForNote(
+        note,
+        model,
+        deckId,
+        takenIds,
+        { value: lastNewDue + 1 },
+        Math.floor(Date.now() / 1000),
+    );
+    return generated.filter(card => !currentOrdinals.has(card.ord));
+}
+
 export function parseDelimitedRows(rawText: string, explicitDelimiter?: string): string[][] {
     const text = rawText.replace(/^\uFEFF/, "");
     if (!text.trim()) { return []; }

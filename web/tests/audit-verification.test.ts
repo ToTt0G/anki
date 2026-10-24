@@ -33,6 +33,7 @@ import {
 } from "../src/core/idb-storage.ts";
 import { generateUniqueId, generateUniqueIds } from "../src/core/ids.ts";
 import {
+    createMissingClozeCards,
     exportApkg,
     exportDeckCsv,
     findOrphanedMediaFilenames,
@@ -1172,5 +1173,26 @@ describe("C. Anki Scheduler, FSRS Reference Validation, Search, Export & Perform
         assert.equal(rows.length, 2);
         assert.equal(importCsv("Q1\tA1\nQ2\tA2", createDefaultCollection(), 1, 1).noteCount, 2);
         assert.equal(calculateTodayStats(createDefaultCollection()).retentionRate, null);
+
+        // A-13: Editing cloze text creates missing ordinals without resetting studied cards.
+        const clozeCollection = createDefaultCollection();
+        const clozeModel = Object.values(clozeCollection.models).find(model => model.type === 1)!;
+        const initialCard = Object.values(clozeCollection.cards)[0];
+        const initialNote = clozeCollection.notes[initialCard.nid];
+        const expandedNote = {
+            ...initialNote,
+            mid: clozeModel.id,
+            fields: ["{{c1::existing}} {{c2::new deletion}}"],
+        };
+        const generated = createMissingClozeCards(expandedNote, clozeModel, clozeCollection, initialCard.did);
+        assert.equal(generated.length, 1);
+        assert.equal(generated[0].ord, 1);
+        assert.notEqual(generated[0].id, initialCard.id);
+        assert.equal(clozeCollection.cards[initialCard.id].reps, initialCard.reps);
+
+        // A-12: A missing media attachment must abort export, not produce a corrupt manifest.
+        const missingMediaCol = createDefaultCollection();
+        missingMediaCol.media["missing.png"] = "/missing-attachment.png";
+        await assert.rejects(exportApkg(missingMediaCol), /Cannot export media 'missing.png'/);
     });
 });

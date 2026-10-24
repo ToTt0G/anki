@@ -25,7 +25,13 @@ import {
     OutboxEntry,
 } from "./core/idb-storage";
 import { generateUniqueId } from "./core/ids";
-import { exportApkg, exportDeckCsv, findOrphanedMediaFilenames, importEp1100Decks } from "./core/import-export";
+import {
+    createMissingClozeCards,
+    exportApkg,
+    exportDeckCsv,
+    findOrphanedMediaFilenames,
+    importEp1100Decks,
+} from "./core/import-export";
 import { syncPushSubscriptionForUser } from "./core/push-manager";
 import { applyServiceWorkerUpdate, registerServiceWorker } from "./core/pwa";
 import { getCustomStudyCardIds, getTodayDay } from "./core/scheduler";
@@ -543,7 +549,10 @@ export const App: React.FC = () => {
 
     const handleUpdateNote = (note: Note) => {
         const cards = Object.values(collection.cards).filter(c => c.nid === note.id);
-        syncClientRef.current?.upsertNote(note, cards, false);
+        const model = collection.models[note.mid];
+        const deckId = cards[0]?.did ?? 1;
+        const missing = model ? createMissingClozeCards(note, model, collection, deckId) : [];
+        syncClientRef.current?.upsertNote(note, [...cards, ...missing], false);
     };
 
     const handleUpdateCard = (card: Card) => {
