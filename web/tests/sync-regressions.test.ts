@@ -291,7 +291,7 @@ it("DATA-05, DATA-06, UX-09 & PERF-08: blocks clearing offline cache with 3 pend
         // DATA-05: Attempting to clear offline storage with 3 pending answers without confirmation must fail
         await assert.rejects(
             client.clearOfflineStorage(),
-            /3 unsynced changes are pending without confirmation/,
+            /3 unsynced or conflicted changes are pending without confirmation/,
         );
         assert.equal(client.getPendingOutboxCount(), 3, "All 3 pending answers preserved");
 
@@ -356,6 +356,14 @@ it("NEW-01, NEW-02, M-04 & H-05: durable media save, note edit preserving card s
             /unsynced or conflicted/,
         );
 
+        // Sequential delivery: acknowledge media and note before the review can be sent.
+        await until(() => socket.messages.some(m => m.type === "save_media"));
+        const mediaMsg = socket.messages.find(m => m.type === "save_media");
+        socket.receive({ type: "ack", opId: mediaMsg.opId, revision: 4 });
+        await until(() => socket.messages.some(m => m.type === "upsert_note"));
+        const noteMsg = socket.messages.find(m => m.type === "upsert_note");
+        socket.receive({ type: "ack", opId: noteMsg.opId, revision: 5, updatedMod: note.mod + 1 });
+
         // M-04: Ack carrying repaired revlogEntry ID updates client revlog in place
         const revTs = 1700000090000;
         client.answerCard(firstCard.id, { ivl: 50, reps: 5 }, {
@@ -371,6 +379,15 @@ it("NEW-01, NEW-02, M-04 & H-05: durable media save, note edit preserving card s
         });
         await until(() => socket.messages.some(m => m.type === "answer_card"));
         const answerMsg = socket.messages.find(m => m.type === "answer_card");
+        const beforeFailedRestore = (await getOutboxOps(userId)).map(op => op.opId);
+        const previousFetch = globalThis.fetch;
+        globalThis.fetch = async (url: any, ...args: any[]) => String(url).includes("restore-backup")
+            ? Response.json({ error: "Revision changed" }, { status: 409 })
+            : previousFetch(url, ...args);
+        assert.equal(await client.restoreServerBackup({ discardPending: true }), false);
+        assert.deepEqual((await getOutboxOps(userId)).map(op => op.opId), beforeFailedRestore,
+            "Failed server restore must not destroy the offline outbox");
+        globalThis.fetch = previousFetch;
         socket.receive({
             type: "ack",
             opId: answerMsg.opId,

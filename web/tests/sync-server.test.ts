@@ -234,6 +234,7 @@ it("D06/DATA-14: new-record collisions leave existing data untouched and old los
             type: "answer_card",
             opId: "lost-ack",
             cardId: card.id,
+            baseReps: 0,
             nextState: { reps: 1 },
             revlogEntry: {
                 id: 1700000000000,
