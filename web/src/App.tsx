@@ -543,9 +543,8 @@ export const App: React.FC = () => {
         syncClientRef.current?.deleteNote(card.nid);
     };
 
-    const handleAddNote = (note: Note, cards: Card[]) => {
-        syncClientRef.current?.upsertNote(note, cards, true);
-    };
+    const handleAddNote = (note: Note, cards: Card[]): Promise<boolean> =>
+        syncClientRef.current?.upsertNote(note, cards, true) ?? Promise.resolve(false);
 
     const handleUpdateNote = (note: Note) => {
         const cards = Object.values(collection.cards).filter(c => c.nid === note.id);

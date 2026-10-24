@@ -72,7 +72,7 @@ export function calculateTodayStats(col: Collection): TodayStats {
     // In Anki, Hard (2), Good (3), and Easy (4) are passing recall ratings; Again (1) is a lapse (U12)
     const passing = hard + good + easy;
     const retention = total > 0 ? Math.round((passing / total) * 100) : null;
-    const trueReviewRetention = review > 0 ? Math.round((reviewPassed / review) * 100) : retention;
+    const trueReviewRetention = review > 0 ? Math.round((reviewPassed / review) * 100) : null;
 
     return {
         totalStudied: total,

@@ -548,7 +548,7 @@ export function validateClientMessage(raw: any): { ok: true; msg: ClientMessage 
                     error: "answer_card revlogEntry.cid must match cardId",
                 };
             }
-            if (raw.baseReps !== undefined && !isNonNegativeInt(raw.baseReps)) {
+            if (!isNonNegativeInt(raw.baseReps)) {
                 return { ok: false, error: "answer_card baseReps must be a non-negative integer" };
             }
             if (raw.forceOverwrite !== undefined && typeof raw.forceOverwrite !== "boolean") {

@@ -5,6 +5,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { SANDBOX_BOOTSTRAP_SCRIPT, SANDBOX_BOOTSTRAP_SHA256 } from "../core/csp-constants";
 import { loadMathJaxAssets, MathJaxAssets, selectMathJaxSourcesForHtml } from "../core/mathjax";
 import { sanitizeCardCss, sanitizeCardHtml } from "../core/sanitize";
+import { useAccessibleModal } from "./useAccessibleModal";
 
 export { SANDBOX_BOOTSTRAP_SCRIPT, SANDBOX_BOOTSTRAP_SHA256 };
 
@@ -39,6 +40,10 @@ export const SandboxedCardFrame: React.FC<Props> = ({
 }) => {
     const [mathAssets, setMathAssets] = useState<MathJaxAssets | null>(null);
     const [pendingExternalUrl, setPendingExternalUrl] = useState<string | null>(null);
+    const linkDialogRef = useAccessibleModal<HTMLDivElement>(
+        pendingExternalUrl !== null,
+        () => setPendingExternalUrl(null),
+    );
     const hasMath = /\\\(|\\\[|\$\$/.test(html);
     useEffect(() => {
         if (!hasMath) { return; }
@@ -253,6 +258,8 @@ export const SandboxedCardFrame: React.FC<Props> = ({
             />
             {pendingExternalUrl && (
                 <div
+                    ref={linkDialogRef}
+                    tabIndex={-1}
                     role="dialog"
                     aria-modal="true"
                     aria-label="Open external link"

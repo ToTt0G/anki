@@ -13,7 +13,7 @@ import { Card, Collection, Note } from "../core/types";
 interface Props {
     collection: Collection;
     defaultDeckId?: number;
-    onAddNote: (note: Note, cards: Card[]) => void;
+    onAddNote: (note: Note, cards: Card[]) => Promise<boolean>;
     onSaveMedia?: (
         filename: string,
         dataUrl: string,
@@ -48,6 +48,7 @@ export const AddNote: React.FC<Props> = ({
     const [tagsStr, setTagsStr] = useState<string>("");
     const [imageAltText, setImageAltText] = useState<string>("");
     const [addedStatus, setAddedStatus] = useState<boolean>(false);
+    const [isSaving, setIsSaving] = useState(false);
     const [errorMsg, setErrorMsg] = useState<string | null>(null);
     const fileInputRef = useRef<HTMLInputElement | null>(null);
     const activeFieldIdxRef = useRef<number>(0);
@@ -153,8 +154,8 @@ export const AddNote: React.FC<Props> = ({
         }
     };
 
-    const handleAdd = () => {
-        if (!activeModel) { return; }
+    const handleAdd = async () => {
+        if (!activeModel || isSaving) { return; }
 
         const fields = activeModel.flds.map((_, idx) => sanitizeCardHtml(fieldValues[idx] || ""));
         const firstField = fields[0] || "";
@@ -194,7 +195,19 @@ export const AddNote: React.FC<Props> = ({
             now,
         );
 
-        onAddNote(note, cards);
+        setIsSaving(true);
+        try {
+            const durable = await onAddNote(note, cards);
+            if (!durable) {
+                setErrorMsg("Not safely saved. Keep this tab open and reconnect; your draft has been preserved.");
+                return;
+            }
+        } catch (err: any) {
+            setErrorMsg(err?.message || "Could not save note offline. Your draft was preserved.");
+            return;
+        } finally {
+            setIsSaving(false);
+        }
 
         const newFieldVals: Record<number, string> = {};
         activeModel.flds.forEach((fld, idx) => {
@@ -211,7 +224,7 @@ export const AddNote: React.FC<Props> = ({
     const handleKeyDown = (e: React.KeyboardEvent) => {
         if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
             e.preventDefault();
-            handleAdd();
+            void handleAdd();
         }
     };
 
@@ -353,12 +366,12 @@ export const AddNote: React.FC<Props> = ({
                 )}
                 {addedStatus && (
                     <span role="status" aria-live="polite" style={{ fontSize: 13, color: "var(--color-due)" }}>
-                        Added
+                        Saved offline
                     </span>
                 )}
-                <button type="button" className="primary" onClick={handleAdd} style={{ padding: "8px 24px" }}>
+                <button type="button" className="primary" disabled={isSaving} onClick={() => void handleAdd()} style={{ padding: "8px 24px" }}>
                     <Plus size={16} />
-                    <span>Add</span>
+                    <span>{isSaving ? "Saving..." : "Add"}</span>
                 </button>
             </div>
         </div>

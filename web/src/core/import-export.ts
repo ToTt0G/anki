@@ -787,8 +787,12 @@ export async function importApkg(
             }
         }
 
-        // 8. Read revlog with remapped card IDs and identity-aware collision handling (M-08, SEC-06)
-        try {
+        // An absent revlog table is legitimate for a minimal archive; corruption is not.
+        const hasRevlogTable = db.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'revlog'")
+            .some(result => result.values.length > 0);
+        if (!hasRevlogTable) {
+            warnings.push("This archive has no review-history table; no historical reviews were imported.");
+        } else {
             const countRes = db.exec("SELECT COUNT(*) FROM revlog");
             const totalRevlogInDb = Number(countRes?.[0]?.values?.[0]?.[0] || 0);
             if (totalRevlogInDb > MAX_IMPORT_REVLOG_RECORDS) {
@@ -860,15 +864,6 @@ export async function importApkg(
                     revlogCount++;
                 }
             }
-        } catch (e: any) {
-            if (
-                e?.message?.includes("too many review log")
-                || e?.message?.includes("cancelled")
-                || e?.message?.includes("timed out")
-            ) {
-                throw e;
-            }
-            // revlog table is optional in minimal .apkg exports
         }
 
         Object.assign(targetCol.media, extractedMedia);

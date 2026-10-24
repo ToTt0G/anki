@@ -190,6 +190,8 @@ export class SyncClient {
     private revision: number = 0;
     private generation: string = "0";
     private messageQueue: Promise<void> = Promise.resolve();
+    /** Only one mutation is in flight, so local acknowledgments advance subsequent preconditions. */
+    private inFlightOpId: string | null = null;
     /** Serialized local persistence queue ordering outbox, media, and collection writes (M-06). */
     private persistenceQueue: Promise<void> = Promise.resolve();
     private importing = new Set<string>();
@@ -315,6 +317,9 @@ export class SyncClient {
         const entry = (await getOutboxOps(this.userId)).find(op => op.opId === opId && op.status === "conflict");
         if (!entry) { return; }
         if (entry.msg.type === "import_collection") {
+            if (!forceOverwrite) {
+                throw new Error("An imported snapshot cannot be safely rebased on newer cloud data. Export both copies, review their differences, then explicitly confirm replacement.");
+            }
             entry.msg = {
                 ...entry.msg,
                 expectedRevision: this.revision,
@@ -334,6 +339,9 @@ export class SyncClient {
             || entry.msg.type === "update_card"
             || entry.msg.type === "answer_card"
         ) {
+            if (!forceOverwrite && entry.error?.includes("Conflict")) {
+                throw new Error("This edit has a stale version. Review and explicitly overwrite the server copy, or discard this edit; retrying unchanged cannot resolve the conflict.");
+            }
             entry.msg = {
                 ...entry.msg,
                 forceOverwrite,
@@ -477,6 +485,7 @@ export class SyncClient {
             };
 
             this.ws.onclose = () => {
+                this.inFlightOpId = null;
                 if (this.disposed) { return; }
                 this.setStatus("offline");
                 this.scheduleReconnect();
@@ -524,11 +533,7 @@ export class SyncClient {
                 } unsynced or conflicted. Sync or confirm discarding them first.`,
             );
         }
-        if (ops.length > 0 && options?.discardPending) {
-            await clearUserOutbox(this.userId);
-            this.pendingOutboxCount = 0;
-        }
-
+        // Never discard offline changes until the remote restore has succeeded.
         try {
             const token = await this.getToken();
             if (!token) { return false; }
@@ -546,6 +551,11 @@ export class SyncClient {
             }
             if (!res.ok) { return false; }
             const data = await res.json();
+            if (!data.collection || !Number.isSafeInteger(data.revision)) { return false; }
+            if (options?.discardPending && ops.length > 0) {
+                await clearUserOutbox(this.userId);
+                this.pendingOutboxCount = 0;
+            }
             if (data.collection) {
                 this.revision = data.revision || this.revision + 1;
                 this.initialized = true;
@@ -561,10 +571,10 @@ export class SyncClient {
     public async clearOfflineStorage(options?: { forceDiscardPending?: boolean }): Promise<void> {
         if (!options?.forceDiscardPending) {
             const ops = await getOutboxOps(this.userId);
-            const pendingCount = ops.filter(isPendingOutboxEntry).length;
+            const pendingCount = ops.length;
             if (pendingCount > 0) {
                 throw new Error(
-                    `Cannot clear offline cache while ${pendingCount} unsynced ${
+                    `Cannot clear offline cache while ${pendingCount} unsynced or conflicted ${
                         pendingCount === 1 ? "change is" : "changes are"
                     } pending without confirmation.`,
                 );
@@ -817,18 +827,56 @@ export class SyncClient {
         }
 
         await this.refreshPendingOutboxCount();
-        this.sendDirect(entry.msg);
-        return true;
+        await this.drainOutbox();
+        return res.durable;
     }
 
     private async drainOutbox() {
-        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) { return; }
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN || this.inFlightOpId) { return; }
         const ops = await getOutboxOps(this.userId);
         this.pendingOutboxCount = ops.filter(isPendingOutboxEntry).length;
-        for (const op of ops) {
-            if (!isPendingOutboxEntry(op)) { continue; }
-            if (this.ws.readyState === WebSocket.OPEN) {
-                this.sendDirect(op.msg);
+        const next = ops.find(isPendingOutboxEntry);
+        if (next && this.ws?.readyState === WebSocket.OPEN) {
+            this.inFlightOpId = next.opId;
+            this.sendDirect(next.msg);
+        }
+    }
+
+    /** Rebase only changes causally following a successful *local* mutation. A remote
+     * edit does not pass this path, so genuine multi-device conflicts are retained. */
+    private async advanceLocalPreconditions(acked: OutboxEntry | undefined, server: Extract<ServerMessage, { type: "ack" }>) {
+        if (!acked) { return; }
+        const previous = acked.msg;
+        for (const entry of await getOutboxOps(this.userId)) {
+            if (entry.opId === acked.opId || !isPendingOutboxEntry(entry)) { continue; }
+            const pending = { ...entry.msg };
+            let modified = false;
+            if ("expectedRevision" in previous && "expectedRevision" in pending
+                && previous.expectedRevision !== undefined
+                && pending.expectedRevision === previous.expectedRevision) {
+                pending.expectedRevision = server.revision;
+                modified = true;
+            }
+            if (server.updatedMod !== undefined && "expectedMod" in previous && "expectedMod" in pending
+                && previous.expectedMod !== undefined && pending.expectedMod === previous.expectedMod
+                && previous.type === pending.type
+                && ((previous.type === "upsert_deck" && pending.type === "upsert_deck" && previous.deck.id === pending.deck.id)
+                    || (previous.type === "upsert_note" && pending.type === "upsert_note" && previous.note.id === pending.note.id)
+                    || (previous.type === "update_card" && pending.type === "update_card" && previous.card.id === pending.card.id))) {
+                pending.expectedMod = server.updatedMod;
+                modified = true;
+            }
+            if (previous.type === "answer_card" && pending.type === "answer_card"
+                && previous.cardId === pending.cardId && server.cardState
+                && pending.baseReps === previous.baseReps) {
+                pending.baseReps = server.cardState.reps;
+                modified = true;
+            }
+            if (modified) {
+                const persisted = await enqueueOutboxOp({ ...entry, msg: pending });
+                if (!persisted.durable) {
+                    throw new Error("Could not persist rebased offline change; stop replay and reconnect before closing.");
+                }
             }
         }
     }
@@ -868,8 +916,11 @@ export class SyncClient {
                 this.saveLocalCollection({ ...this.col });
             }
 
+            await this.advanceLocalPreconditions(ackedOp, msg);
             await removeOutboxOp(this.userId, msg.opId);
+            if (this.inFlightOpId === msg.opId) { this.inFlightOpId = null; }
             await this.refreshPendingOutboxCount();
+            await this.drainOutbox();
             if (ackedOp && ["upsert_deck", "upsert_note", "update_card"].includes(ackedOp.msg.type)) {
                 const op = ackedOp.msg;
                 if (typeof msg.updatedMod === "number") {
@@ -899,6 +950,8 @@ export class SyncClient {
         }
 
         if (msg.type === "full_state") {
+            // A full-state reload is the only safe replay point after a rejected operation.
+            this.inFlightOpId = null;
             const serverGeneration = msg.generation ?? "0";
             if (serverGeneration !== this.generation) {
                 await this.clearOfflineStorage({ forceDiscardPending: true });
@@ -982,7 +1035,7 @@ export class SyncClient {
                     target.cards[msg.cardId] = {
                         ...card,
                         ...msg.nextState,
-                        mod: Math.floor(Date.now() / 1000),
+                        mod: msg.nextState.mod ?? card.mod,
                     };
                 }
                 if (!target.revlog.some(r => r.id === msg.revlogEntry.id)) {
@@ -1125,6 +1178,7 @@ export class SyncClient {
     }
 
     private async handleOpError(msg: Extract<ServerMessage, { type: "op_error" }>) {
+        if (msg.opId === this.inFlightOpId) { this.inFlightOpId = null; }
         const kind = msg.kind || "internal";
         const rawError = msg.error || "The server rejected this change.";
 
@@ -1204,7 +1258,7 @@ export class SyncClient {
         void this.applyAndQueue(msg);
     }
 
-    public upsertNote(note: Note, cards: Card[], isNew: boolean = false) {
+    public upsertNote(note: Note, cards: Card[], isNew: boolean = false): Promise<boolean> {
         const opId = makeOpId();
         const expectedMod = !isNew ? this.serverBaseCol.notes[note.id]?.mod : undefined;
         const msg: ClientMessage & { opId: string } = {
@@ -1215,7 +1269,7 @@ export class SyncClient {
             isNew,
             expectedMod,
         };
-        void this.applyAndQueue(msg);
+        return this.applyAndQueue(msg);
     }
 
     public deleteNote(noteId: number) {

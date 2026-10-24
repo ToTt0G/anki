@@ -1700,8 +1700,7 @@ export class AnkiSyncServer extends DurableObject {
 
                     // NEW-04 / H-01: Reject concurrent reviews answered from a stale card version
                     if (
-                        msg.baseReps !== undefined
-                        && !msg.forceOverwrite
+                        !msg.forceOverwrite
                         && (card.reps || 0) !== msg.baseReps
                     ) {
                         throw new OpError(
