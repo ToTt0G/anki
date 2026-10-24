@@ -287,6 +287,11 @@ export class AnkiSyncServer extends DurableObject {
         this.setMeta("col_revision", String(next));
         this.setMeta("col_initialized", "1");
         this.dueSummaryCache = null;
+        // A-09: Bound idempotency-key growth while preserving a one-year replay window
+        // for clients that have been offline for extended periods.
+        if (next % 1024 === 0) {
+            this.sql.exec("DELETE FROM applied_ops WHERE applied_at < ?", Date.now() - 365 * 86_400_000);
+        }
         if (opId) {
             const now = Date.now();
             this.sql.exec(

@@ -1190,6 +1190,20 @@ describe("C. Anki Scheduler, FSRS Reference Validation, Search, Export & Perform
         assert.notEqual(generated[0].id, initialCard.id);
         assert.equal(clozeCollection.cards[initialCard.id].reps, initialCard.reps);
 
+        // A-14: Studying a parent must not bypass intermediate subdeck limits.
+        const nested = createDefaultCollection();
+        const baseDeck = nested.decks[1];
+        const baseConfig = nested.dconf[baseDeck.conf];
+        const nestedCard = Object.values(nested.cards)[0];
+        nested.decks[1] = { ...baseDeck, name: "Root" };
+        nested.decks[2] = { ...baseDeck, id: 2, name: "Root::Limited", conf: 2 };
+        nested.decks[3] = { ...baseDeck, id: 3, name: "Root::Limited::Leaf" };
+        nested.dconf[2] = { ...baseConfig, id: 2, new: { ...baseConfig.new, perDay: 0 } };
+        nested.cards = { [nestedCard.id]: { ...nestedCard, did: 3, queue: 0, due: 1 } };
+        assert.equal(getNextStudyCard(nested, 1), null, "Ancestor's zero new-card limit must apply");
+        nested.dconf[2] = { ...nested.dconf[2], new: { ...baseConfig.new, perDay: 20 } };
+        assert.equal(getNextStudyCard(nested, 1)?.id, nestedCard.id);
+
         // A-12: A missing media attachment must abort export, not produce a corrupt manifest.
         const missingMediaCol = createDefaultCollection();
         missingMediaCol.media["missing.png"] = "/missing-attachment.png";

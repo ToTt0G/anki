@@ -1207,6 +1207,25 @@ export function getNextStudyCard(col: Collection, did: number): Card | null {
     const canStudyNew = studiedNewToday < maxNew;
     const canStudyRev = studiedRevToday < maxRev;
 
+    // A-14: A parent study session must also obey the daily caps of each child
+    // and intermediate ancestor deck, not only the selected parent.
+    const allowedByDeck = getAllDeckCounts(col);
+    const deckIdByName = new Map(Object.values(col.decks).map(deck => [deck.name, deck.id]));
+    const withinAncestorLimits = (cardDeckId: number, kind: "newCount" | "reviewCount"): boolean => {
+        const deck = col.decks[cardDeckId];
+        if (!deck) { return false; }
+        const parts = deck.name.split("::");
+        let path = "";
+        for (const segment of parts) {
+            path = path ? `${path}::${segment}` : segment;
+            const ancestorId = deckIdByName.get(path);
+            if (ancestorId !== undefined && (allowedByDeck[ancestorId]?.[kind] ?? 0) <= 0) {
+                return false;
+            }
+        }
+        return true;
+    };
+
     // 1. Learning cards due right now (or within 5m lookahead if none due this second)
     let dueLearn: Card | null = null;
     let earliestLearnDue = Infinity;
@@ -1233,13 +1252,13 @@ export function getNextStudyCard(col: Collection, did: number): Card | null {
                     earliestLearnDue = sortMetric;
                 }
             }
-        } else if (card.queue === 2 && canStudyRev) {
+        } else if (card.queue === 2 && canStudyRev && withinAncestorLimits(card.did, "reviewCount")) {
             const dueDay = normalizeReviewDueDay(card.due, col.crt);
             if (dueDay <= today && dueDay < earliestReviewDue) {
                 dueReview = card;
                 earliestReviewDue = dueDay;
             }
-        } else if (card.queue === 0 && canStudyNew) {
+        } else if (card.queue === 0 && canStudyNew && withinAncestorLimits(card.did, "newCount")) {
             if (card.due < earliestNewPos) {
                 nextNew = card;
                 earliestNewPos = card.due;
