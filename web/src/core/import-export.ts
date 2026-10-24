@@ -323,6 +323,7 @@ export async function importApkg(
         // 1. Parse media map with resource budgets & signature validation (SEC-06, SEC-13, M-07, L-02)
         const mediaFile = zip.file("media");
         const extractedMedia: Record<string, string> = {};
+        const originalNames = new Map<string, string>();
         const mediaMapSize = mediaFile ? expandedSizeOf("media") : undefined;
         const mediaMapAllowed = mediaMapSize === undefined || mediaMapSize <= MAX_MEDIA_MAP_BYTES;
         if (mediaFile && !mediaMapAllowed) {
@@ -354,6 +355,11 @@ export async function importApkg(
                         continue;
                     }
 
+                    const previousOriginal = originalNames.get(safeFilename);
+                    if (previousOriginal !== undefined && previousOriginal !== realFilename) {
+                        throw new Error(`Media filename collision: '${previousOriginal}' and '${realFilename}' both normalize to '${safeFilename}'. Re-export with unique names.`);
+                    }
+                    originalNames.set(safeFilename, realFilename);
                     const entry = zip.file(archiveKey);
                     if (!entry) { continue; }
 
@@ -407,6 +413,7 @@ export async function importApkg(
                     || e?.message?.includes("cancelled")
                     || e?.message?.includes("timed out")
                     || e?.message?.includes("too many entries")
+                    || e?.message?.includes("Media filename collision")
                 ) {
                     throw e;
                 }
