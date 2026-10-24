@@ -322,6 +322,13 @@ export class SyncClient {
                 allowNoBackup: allowNoBackup ?? entry.msg.allowNoBackup,
             };
         } else if (
+            forceOverwrite
+            && (entry.msg.type === "delete_deck"
+                || entry.msg.type === "delete_note"
+                || entry.msg.type === "upsert_deck_config")
+        ) {
+            entry.msg = { ...entry.msg, expectedRevision: this.revision };
+        } else if (
             entry.msg.type === "upsert_deck"
             || entry.msg.type === "upsert_note"
             || entry.msg.type === "update_card"

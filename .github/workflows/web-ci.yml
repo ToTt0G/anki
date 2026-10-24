@@ -34,11 +34,6 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Audit production and build-time dependencies for known advisories (CI-04, L-06)
-        run: |
-          npm run audit:deps
-          npm run audit:all
-
       - name: Enable headless Chrome sandbox on Ubuntu 24.04 runner (M-10)
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
 
@@ -59,3 +54,10 @@ jobs:
 
       - name: Validate Cloudflare Worker bundle & bindings (dry-run)
         run: npx wrangler deploy --dry-run
+
+      # Run the full tests/build even when a newly disclosed dependency advisory
+      # fails the security gate; the audit still fails CI until remediated.
+      - name: Audit production and build-time dependencies for known advisories (CI-04, L-06)
+        run: |
+          npm run audit:deps
+          npm run audit:all

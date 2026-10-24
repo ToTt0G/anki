@@ -844,8 +844,8 @@ export const App: React.FC = () => {
                     pendingOutboxCount={pendingOutboxCount}
                     conflictedOps={conflictedOps}
                     orphanedMediaFilenames={orphanedMediaFilenames}
-                    onRetryConflict={async opId => {
-                        await syncClientRef.current?.retryConflictedOp(opId, false);
+                    onRetryConflict={async (opId, forceOverwrite = false) => {
+                        await syncClientRef.current?.retryConflictedOp(opId, forceOverwrite);
                         setConflictedOps((await syncClientRef.current?.getConflictedOps()) || []);
                     }}
                     onDiscardConflict={async opId => {

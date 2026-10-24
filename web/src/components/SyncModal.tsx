@@ -50,7 +50,7 @@ interface Props {
     /** Operations rejected by the server, parked for retry/discard (D13). */
     conflictedOps?: OutboxEntry[];
     orphanedMediaFilenames?: string[];
-    onRetryConflict?: (opId: string) => Promise<void>;
+    onRetryConflict?: (opId: string, forceOverwrite?: boolean) => Promise<void>;
     onDiscardConflict?: (opId: string) => Promise<void>;
     onExportRecoverySnapshot?: () => void;
     onCleanOrphanedMedia?: (filenames: string[]) => Promise<void>;
@@ -521,9 +521,22 @@ export const SyncModal: React.FC<Props> = ({
                                                                 style={{ fontSize: 12.5, padding: "5px 10px" }}
                                                                 title="Send this change to the server again"
                                                             >
-                                                                <Undo2 size={12} className="inline" /> Retry
+                                                                <Undo2 size={12} className="inline" /> Retry Safely
                                                             </button>
                                                         )}
+                                                    {!isImport && (
+                                                        <button
+                                                            type="button"
+                                                            disabled={busyConflict !== null}
+                                                            onClick={() =>
+                                                                setConfirmForceOverwriteOpId(
+                                                                    isConfirmingOverwrite ? null : entry.opId,
+                                                                )}
+                                                            style={{ fontSize: 12.5, padding: "5px 10px" }}
+                                                        >
+                                                            Review & Overwrite...
+                                                        </button>
+                                                    )}
                                                     <button
                                                         type="button"
                                                         disabled={busyConflict !== null}
@@ -538,7 +551,7 @@ export const SyncModal: React.FC<Props> = ({
                                             </div>
 
                                             {/* NEW-08 / M-03: Second confirmation with displaced-change diff & recovery export */}
-                                            {isImport && isConfirmingOverwrite && (
+                                            {isConfirmingOverwrite && (
                                                 <div
                                                     role="alert"
                                                     style={{
@@ -552,8 +565,17 @@ export const SyncModal: React.FC<Props> = ({
                                                     }}
                                                 >
                                                     <div style={{ fontWeight: 600, color: "var(--color-again)" }}>
-                                                        Confirm Full Cloud Collection Replacement
+                                                        {isImport
+                                                            ? "Confirm Full Cloud Collection Replacement"
+                                                            : "Confirm Overwriting a Conflicting Change"}
                                                     </div>
+                                                    {!isImport && (
+                                                        <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
+                                                            This can replace a newer change saved on another device.
+                                                            Export a recovery snapshot before continuing if the existing
+                                                            cloud state matters.
+                                                        </div>
+                                                    )}
                                                     {cloudCounts && importCounts && (
                                                         <div
                                                             style={{
@@ -606,7 +628,10 @@ export const SyncModal: React.FC<Props> = ({
                                                             type="button"
                                                             disabled={busyConflict !== null}
                                                             onClick={() =>
-                                                                void resolveConflict(entry.opId, onRetryConflict)}
+                                                                void resolveConflict(
+                                                                    entry.opId,
+                                                                    onRetryConflict ? id => onRetryConflict(id, true) : undefined,
+                                                                )}
                                                             style={{
                                                                 fontSize: 12,
                                                                 padding: "5px 10px",
