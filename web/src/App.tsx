@@ -5,7 +5,6 @@ import { AuthenticateWithRedirectCallback, Show, SignInButton, SignUpButton, use
 import { Moon, Sun } from "lucide-react";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AddNote } from "./components/AddNote";
-import { findClozeNumbers } from "./core/cloze";
 import { CardBrowser } from "./components/CardBrowser";
 import { CustomStudyModal } from "./components/CustomStudyModal";
 import { CyborgDuckLoader } from "./components/CyborgDuckLoader";
@@ -19,6 +18,7 @@ import { Navbar, NavView } from "./components/Navbar";
 import { Reviewer } from "./components/Reviewer";
 import { StatsView } from "./components/StatsView";
 import { SyncModal } from "./components/SyncModal";
+import { findClozeNumbers } from "./core/cloze";
 import {
     clearUserOfflineData,
     getClearDataOnSignOutPreference,
@@ -891,7 +891,9 @@ export const App: React.FC = () => {
                         }
                         const pushResult = await unsubscribeFromPush(() => getToken());
                         if (!pushResult.success) {
-                            setSyncBannerError(pushResult.error || "Could not remove push notifications before signing out.");
+                            setSyncBannerError(
+                                pushResult.error || "Could not remove push notifications before signing out.",
+                            );
                             return;
                         }
                         previousUserIdRef.current = null;

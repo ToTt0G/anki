@@ -320,7 +320,9 @@ export class SyncClient {
         if (!entry) { return; }
         if (entry.msg.type === "import_collection") {
             if (!forceOverwrite) {
-                throw new Error("An imported snapshot cannot be safely rebased on newer cloud data. Export both copies, review their differences, then explicitly confirm replacement.");
+                throw new Error(
+                    "An imported snapshot cannot be safely rebased on newer cloud data. Export both copies, review their differences, then explicitly confirm replacement.",
+                );
             }
             entry.msg = {
                 ...entry.msg,
@@ -342,7 +344,9 @@ export class SyncClient {
             || entry.msg.type === "answer_card"
         ) {
             if (!forceOverwrite && entry.error?.includes("Conflict")) {
-                throw new Error("This edit has a stale version. Review and explicitly overwrite the server copy, or discard this edit; retrying unchanged cannot resolve the conflict.");
+                throw new Error(
+                    "This edit has a stale version. Review and explicitly overwrite the server copy, or discard this edit; retrying unchanged cannot resolve the conflict.",
+                );
             }
             entry.msg = {
                 ...entry.msg,
@@ -497,7 +501,10 @@ export class SyncClient {
 
             this.ws.onclose = () => {
                 this.inFlightOpId = null;
-                if (this.leaseTimer) { clearTimeout(this.leaseTimer); this.leaseTimer = null; }
+                if (this.leaseTimer) {
+                    clearTimeout(this.leaseTimer);
+                    this.leaseTimer = null;
+                }
                 if (this.disposed) { return; }
                 this.setStatus("offline");
                 this.scheduleReconnect();
@@ -607,7 +614,10 @@ export class SyncClient {
             clearTimeout(this.reconnectTimer);
             this.reconnectTimer = null;
         }
-        if (this.leaseTimer) { clearTimeout(this.leaseTimer); this.leaseTimer = null; }
+        if (this.leaseTimer) {
+            clearTimeout(this.leaseTimer);
+            this.leaseTimer = null;
+        }
         if (this.ws) {
             try {
                 this.ws.onopen = null;
@@ -857,38 +867,52 @@ export class SyncClient {
 
     /** Rebase only changes causally following a successful *local* mutation. A remote
      * edit does not pass this path, so genuine multi-device conflicts are retained. */
-    private async advanceLocalPreconditions(acked: OutboxEntry | undefined, server: Extract<ServerMessage, { type: "ack" }>) {
+    private async advanceLocalPreconditions(
+        acked: OutboxEntry | undefined,
+        server: Extract<ServerMessage, { type: "ack" }>,
+    ) {
         if (!acked) { return; }
         const previous = acked.msg;
         for (const entry of await getOutboxOps(this.userId)) {
             if (entry.opId === acked.opId || !isPendingOutboxEntry(entry)) { continue; }
             const pending = { ...entry.msg };
             let modified = false;
-            if ("expectedRevision" in previous && "expectedRevision" in pending
+            if (
+                "expectedRevision" in previous && "expectedRevision" in pending
                 && previous.expectedRevision !== undefined
-                && pending.expectedRevision === previous.expectedRevision) {
+                && pending.expectedRevision === previous.expectedRevision
+            ) {
                 pending.expectedRevision = server.revision;
                 modified = true;
             }
-            if (server.updatedMod !== undefined && "expectedMod" in previous && "expectedMod" in pending
+            if (
+                server.updatedMod !== undefined && "expectedMod" in previous && "expectedMod" in pending
                 && previous.expectedMod !== undefined && pending.expectedMod === previous.expectedMod
                 && previous.type === pending.type
-                && ((previous.type === "upsert_deck" && pending.type === "upsert_deck" && previous.deck.id === pending.deck.id)
-                    || (previous.type === "upsert_note" && pending.type === "upsert_note" && previous.note.id === pending.note.id)
-                    || (previous.type === "update_card" && pending.type === "update_card" && previous.card.id === pending.card.id))) {
+                && ((previous.type === "upsert_deck" && pending.type === "upsert_deck"
+                    && previous.deck.id === pending.deck.id)
+                    || (previous.type === "upsert_note" && pending.type === "upsert_note"
+                        && previous.note.id === pending.note.id)
+                    || (previous.type === "update_card" && pending.type === "update_card"
+                        && previous.card.id === pending.card.id))
+            ) {
                 pending.expectedMod = server.updatedMod;
                 modified = true;
             }
-            if (previous.type === "answer_card" && pending.type === "answer_card"
+            if (
+                previous.type === "answer_card" && pending.type === "answer_card"
                 && previous.cardId === pending.cardId && server.cardState
-                && pending.baseReps === previous.baseReps) {
+                && pending.baseReps === previous.baseReps
+            ) {
                 pending.baseReps = server.cardState.reps;
                 modified = true;
             }
             if (modified) {
                 const persisted = await enqueueOutboxOp({ ...entry, msg: pending });
                 if (!persisted.durable) {
-                    throw new Error("Could not persist rebased offline change; stop replay and reconnect before closing.");
+                    throw new Error(
+                        "Could not persist rebased offline change; stop replay and reconnect before closing.",
+                    );
                 }
             }
         }

@@ -357,7 +357,9 @@ export async function importApkg(
 
                     const previousOriginal = originalNames.get(safeFilename);
                     if (previousOriginal !== undefined && previousOriginal !== realFilename) {
-                        throw new Error(`Media filename collision: '${previousOriginal}' and '${realFilename}' both normalize to '${safeFilename}'. Re-export with unique names.`);
+                        throw new Error(
+                            `Media filename collision: '${previousOriginal}' and '${realFilename}' both normalize to '${safeFilename}'. Re-export with unique names.`,
+                        );
                     }
                     originalNames.set(safeFilename, realFilename);
                     const entry = zip.file(archiveKey);

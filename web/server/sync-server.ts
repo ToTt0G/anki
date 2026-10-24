@@ -1648,8 +1648,10 @@ export class AnkiSyncServer extends DurableObject {
                 }
                 const generation = this.getMeta("col_generation") ?? "0";
                 const revision = this.getRevision();
-                if (!msg.force && msg.hasLocalCollection && msg.knownGeneration === generation
-                    && msg.lastRevision === revision && this.isInitialized() && !this.getDeletionTombstone()) {
+                if (
+                    !msg.force && msg.hasLocalCollection && msg.knownGeneration === generation
+                    && msg.lastRevision === revision && this.isInitialized() && !this.getDeletionTombstone()
+                ) {
                     ws.send(JSON.stringify({ type: "sync_unchanged", revision, generation } satisfies ServerMessage));
                     return;
                 }

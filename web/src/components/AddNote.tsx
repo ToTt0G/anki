@@ -369,7 +369,13 @@ export const AddNote: React.FC<Props> = ({
                         Saved offline
                     </span>
                 )}
-                <button type="button" className="primary" disabled={isSaving} onClick={() => void handleAdd()} style={{ padding: "8px 24px" }}>
+                <button
+                    type="button"
+                    className="primary"
+                    disabled={isSaving}
+                    onClick={() => void handleAdd()}
+                    style={{ padding: "8px 24px" }}
+                >
                     <Plus size={16} />
                     <span>{isSaving ? "Saving..." : "Add"}</span>
                 </button>

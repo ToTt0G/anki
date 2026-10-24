@@ -517,7 +517,10 @@ export function validateClientMessage(raw: any): { ok: true; msg: ClientMessage 
             return { ok: true, msg: raw as ClientMessage };
 
         case "init": {
-            if (raw.knownGeneration !== undefined && (typeof raw.knownGeneration !== "string" || raw.knownGeneration.length > 64)) {
+            if (
+                raw.knownGeneration !== undefined
+                && (typeof raw.knownGeneration !== "string" || raw.knownGeneration.length > 64)
+            ) {
                 return { ok: false, error: "Invalid knownGeneration" };
             }
             if (raw.hasLocalCollection !== undefined && typeof raw.hasLocalCollection !== "boolean") {
@@ -616,10 +619,12 @@ export function validateClientMessage(raw: any): { ok: true; msg: ClientMessage 
                     return { ok: false, error: "upsert_note card.nid must match note.id" };
                 }
             }
-            if (raw.removedCardIds !== undefined
+            if (
+                raw.removedCardIds !== undefined
                 && (!Array.isArray(raw.removedCardIds)
                     || raw.removedCardIds.length > 64
-                    || !raw.removedCardIds.every(isPositiveInt))) {
+                    || !raw.removedCardIds.every(isPositiveInt))
+            ) {
                 return { ok: false, error: "upsert_note removedCardIds must contain valid card IDs" };
             }
             if (raw.isNew !== undefined && typeof raw.isNew !== "boolean") {
