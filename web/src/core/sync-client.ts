@@ -6,13 +6,13 @@ import { createDefaultCollection } from "./default-data";
 import {
     clearUserOfflineData,
     clearUserOutbox,
-    preserveDeletedGenerationRecovery,
     deleteMediaItemsFromIdb,
     enqueueOutboxOp,
     getOutboxOps,
     isPendingOutboxEntry,
     loadCollectionFromIdb,
     OutboxEntry,
+    preserveDeletedGenerationRecovery,
     removeOutboxOp,
     saveCollectionToIdb,
     saveMediaItemToIdb,
@@ -588,7 +588,9 @@ export class SyncClient {
         }
     }
 
-    public async clearOfflineStorage(options?: { forceDiscardPending?: boolean; preserveRecovery?: boolean }): Promise<void> {
+    public async clearOfflineStorage(
+        options?: { forceDiscardPending?: boolean; preserveRecovery?: boolean },
+    ): Promise<void> {
         if (!options?.forceDiscardPending) {
             const ops = await getOutboxOps(this.userId);
             const pendingCount = ops.length;
@@ -1215,7 +1217,9 @@ export class SyncClient {
     private async preserveDeletedWork(): Promise<boolean> {
         const saved = await preserveDeletedGenerationRecovery(this.userId, this.col, this.generation);
         if (!saved) {
-            this.onError?.("Cloud data was deleted. Could not save your unsynced edits for recovery: export the local collection before closing this tab.");
+            this.onError?.(
+                "Cloud data was deleted. Could not save your unsynced edits for recovery: export the local collection before closing this tab.",
+            );
         }
         return saved;
     }
@@ -1230,7 +1234,9 @@ export class SyncClient {
         this.initialized = false;
         this.autoSeedBlocked = true;
         this.saveLocalCollection(this.col, true);
-        this.onError?.("This account's cloud data was deleted elsewhere. Unsynced edits, if any, have been preserved separately for manual export.");
+        this.onError?.(
+            "This account's cloud data was deleted elsewhere. Unsynced edits, if any, have been preserved separately for manual export.",
+        );
     }
 
     private async handleOpError(msg: Extract<ServerMessage, { type: "op_error" }>) {
