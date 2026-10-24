@@ -39,6 +39,14 @@ export const SandboxedCardFrame: React.FC<Props> = ({
     onTypedAnswerSubmit,
 }) => {
     const [mathAssets, setMathAssets] = useState<MathJaxAssets | null>(null);
+    const lastIframeTypedValue = useRef(typedValue ?? "");
+    const [externalTypedVersion, setExternalTypedVersion] = useState(0);
+    useEffect(() => {
+        if (typedValue !== undefined && typedValue !== lastIframeTypedValue.current) {
+            lastIframeTypedValue.current = typedValue;
+            setExternalTypedVersion(version => version + 1);
+        }
+    }, [typedValue]);
     const [pendingExternalUrl, setPendingExternalUrl] = useState<string | null>(null);
     const linkDialogRef = useAccessibleModal<HTMLDivElement>(
         pendingExternalUrl !== null,
@@ -88,8 +96,10 @@ export const SandboxedCardFrame: React.FC<Props> = ({
             } else if (data.type === "klanki-card-click") {
                 onCardClick?.();
             } else if (data.type === "klanki-type-answer" && typeof data.value === "string") {
+                lastIframeTypedValue.current = data.value;
                 onTypedAnswerChange?.(data.value);
             } else if (data.type === "klanki-type-submit" && typeof data.value === "string") {
+                lastIframeTypedValue.current = data.value;
                 onTypedAnswerChange?.(data.value);
                 onTypedAnswerSubmit?.(data.value);
             } else if (data.type === "klanki-card-link" && typeof data.href === "string") {
@@ -239,7 +249,7 @@ export const SandboxedCardFrame: React.FC<Props> = ({
   <script>${SANDBOX_BOOTSTRAP_SCRIPT}</script>
 </body>
 </html>`;
-    }, [html, css, hasMath, mathAssets, isDark]);
+    }, [html, css, hasMath, mathAssets, isDark, externalTypedVersion]);
 
     return (
         <>

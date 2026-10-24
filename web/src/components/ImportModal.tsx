@@ -44,6 +44,7 @@ export const ImportModal: React.FC<Props> = ({
     onClose,
 }) => {
     const [isProcessing, setIsProcessing] = useState<boolean>(false);
+    const [warningsAcknowledged, setWarningsAcknowledged] = useState(false);
     const [progressStage, setProgressStage] = useState<string>("Inspecting package...");
     const [preserveScheduling, setPreserveScheduling] = useState<boolean>(true);
     const [stagedCol, setStagedCol] = useState<Collection | null>(null);
@@ -70,6 +71,7 @@ export const ImportModal: React.FC<Props> = ({
         setProgressStage("Inspecting package...");
         setErrorMsg(null);
         setPreviewResult(null);
+        setWarningsAcknowledged(false);
         setCommittedResult(null);
         setStagedCol(null);
         setRestoredSuccess(false);
@@ -355,6 +357,13 @@ export const ImportModal: React.FC<Props> = ({
                                 </div>
                             )}
 
+                            {previewResult.warnings && previewResult.warnings.length > 0 && (
+                                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+                                    <input type="checkbox" checked={warningsAcknowledged}
+                                        onChange={e => setWarningsAcknowledged(e.target.checked)} />
+                                    I understand this import may omit unsupported media or review data.
+                                </label>
+                            )}
                             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
                                 <button
                                     type="button"
@@ -369,7 +378,7 @@ export const ImportModal: React.FC<Props> = ({
                                     type="button"
                                     className="primary"
                                     onClick={handleConfirmImport}
-                                    disabled={isProcessing}
+                                    disabled={isProcessing || (Boolean(previewResult.warnings?.length) && !warningsAcknowledged)}
                                 >
                                     Confirm Import
                                 </button>

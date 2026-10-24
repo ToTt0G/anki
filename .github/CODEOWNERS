@@ -1,0 +1,8 @@
+# Protect sensitive web sync, security and deployment changes through required code review.
+/web/server/ @ToTt0G
+/web/src/core/sync-client.ts @ToTt0G
+/web/src/core/idb-storage.ts @ToTt0G
+/web/src/core/sanitize.ts @ToTt0G
+/web/src/core/import-export.ts @ToTt0G
+/web/wrangler.jsonc @ToTt0G
+/.github/workflows/web-ci.yml @ToTt0G

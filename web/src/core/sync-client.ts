@@ -344,7 +344,7 @@ export class SyncClient {
             || entry.msg.type === "update_card"
             || entry.msg.type === "answer_card"
         ) {
-            if (!forceOverwrite && entry.error?.includes("Conflict")) {
+            if (!forceOverwrite && /conflict|revision|modified|collision|version/i.test(entry.error || "")) {
                 throw new Error(
                     "This edit has a stale version. Review and explicitly overwrite the server copy, or discard this edit; retrying unchanged cannot resolve the conflict.",
                 );

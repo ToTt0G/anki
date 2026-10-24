@@ -919,8 +919,16 @@ export const App: React.FC = () => {
                         setConflictedOps((await syncClientRef.current?.getConflictedOps()) || []);
                     }}
                     onExportRecoverySnapshot={() => {
-                        void handleExportDeckApkg();
-                    }}
+                        const base = syncClientRef.current?.getServerBaseCollection() || collection;
+                        void exportApkg(base).then(blob => {
+                            const url = URL.createObjectURL(blob);
+                            const a = document.createElement("a");
+                            a.href = url;
+                            a.download = "anki-cloud-recovery.apkg";
+                            a.click();
+                            URL.revokeObjectURL(url);
+                        }).catch(err => setSyncBannerError(String(err)));
+                    }
                     onCleanOrphanedMedia={async filenames => {
                         await syncClientRef.current?.deleteMedia(filenames);
                     }}
