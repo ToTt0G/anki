@@ -365,7 +365,12 @@ export const ImportModal: React.FC<Props> = ({
                                 >
                                     Discard
                                 </button>
-                                <button type="button" className="primary" onClick={handleConfirmImport} disabled={isProcessing}>
+                                <button
+                                    type="button"
+                                    className="primary"
+                                    onClick={handleConfirmImport}
+                                    disabled={isProcessing}
+                                >
                                     Confirm Import
                                 </button>
                             </div>

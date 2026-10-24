@@ -681,8 +681,8 @@ export const App: React.FC = () => {
                         fontSize: 13,
                     }}
                 >
-                    <strong>Offline changes are not stored durably.</strong>{" "}
-                    {storageDurabilityWarning} Do not close this tab until cloud sync is confirmed.
+                    <strong>Offline changes are not stored durably.</strong> {storageDurabilityWarning}{" "}
+                    Do not close this tab until cloud sync is confirmed.
                 </div>
             )}
 
@@ -828,8 +828,7 @@ export const App: React.FC = () => {
                     pendingOutboxCount={pendingOutboxCount}
                     hasBackup={syncClientRef.current?.getHasServerBackup()}
                     onImportComplete={updated =>
-                        syncClientRef.current?.importCollection(updated) ?? Promise.resolve(false)
-                    }
+                        syncClientRef.current?.importCollection(updated) ?? Promise.resolve(false)}
                     onRestoreBackup={async options => {
                         return (await syncClientRef.current?.restoreServerBackup(options)) || false;
                     }}

@@ -327,7 +327,8 @@ function sanitizeViaInertDomParser(html: string): string {
                     for (const attr of Array.from(el.attributes)) {
                         const name = attr.name.toLowerCase();
                         if (
-                            (name === "id" && (/^klanki-/i.test(attr.value.trim()) || attr.value.trim() === "card-root"))
+                            (name === "id"
+                                && (/^klanki-/i.test(attr.value.trim()) || attr.value.trim() === "card-root"))
                             || name.startsWith("on")
                             || (!GLOBAL_ALLOWED_ATTRS.has(name) && !tagAllowed?.has(name))
                         ) {

@@ -630,7 +630,9 @@ export const SyncModal: React.FC<Props> = ({
                                                             onClick={() =>
                                                                 void resolveConflict(
                                                                     entry.opId,
-                                                                    onRetryConflict ? id => onRetryConflict(id, true) : undefined,
+                                                                    onRetryConflict
+                                                                        ? id => onRetryConflict(id, true)
+                                                                        : undefined,
                                                                 )}
                                                             style={{
                                                                 fontSize: 12,
