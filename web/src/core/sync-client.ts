@@ -545,6 +545,10 @@ export class SyncClient {
      * Requires reconciling or explicitly discarding pending outbox operations first (H-05).
      */
     public async restoreServerBackup(options?: { discardPending?: boolean }): Promise<boolean> {
+        // Finish handling received acknowledgements and durable writes before deciding
+        // which queued operations the user explicitly agrees to discard.
+        await this.messageQueue;
+        await this.persistenceQueue;
         const ops = await getOutboxOps(this.userId);
         if (ops.length > 0 && !options?.discardPending) {
             throw new Error(
