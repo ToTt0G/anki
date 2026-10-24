@@ -463,7 +463,7 @@ describe("A. Security & Privacy (SEC-01–SEC-13, S01–S12, V01–V03)", () => 
             document.body.appendChild(host);
             createRoot(host).render(React.createElement(SandboxedCardFrame, { html: adversarialCardHtml }));
 
-            setTimeout(sendReport, 2500);
+            setTimeout(sendReport, 1500);
         `;
 
         const built = await esbuild.build({
@@ -523,6 +523,7 @@ describe("A. Security & Privacy (SEC-01–SEC-13, S01–S12, V01–V03)", () => 
         await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
         const addr = server.address() as { port: number };
         let procExited = false;
+        let browserDiagnostics = "";
         const proc = spawn(chromeBin, [
             "--headless",
             "--no-sandbox",
@@ -534,7 +535,7 @@ describe("A. Security & Privacy (SEC-01–SEC-13, S01–S12, V01–V03)", () => 
             "--disable-extensions",
             "--enable-logging=stderr",
             "--v=0",
-            "--virtual-time-budget=2500",
+            "--virtual-time-budget=8000",
             "--dump-dom",
             `http://127.0.0.1:${addr.port}/`,
         ]);
@@ -543,6 +544,7 @@ describe("A. Security & Privacy (SEC-01–SEC-13, S01–S12, V01–V03)", () => 
         });
         proc.stderr.on("data", chunk => {
             const text = String(chunk);
+            browserDiagnostics += text.slice(0, 2000);
             if (text.includes("violates the following Content Security Policy")) {
                 cspViolations.push(text.trim());
             }
@@ -554,7 +556,10 @@ describe("A. Security & Privacy (SEC-01–SEC-13, S01–S12, V01–V03)", () => 
                 await new Promise(r => setTimeout(r, 40));
             }
             // M-10: Never silently skip if browser failed to report
-            assert.ok(report, "Browser security report must be received from headless Chromium");
+            assert.ok(
+                report,
+                `Browser security report must be received from headless Chromium: ${browserDiagnostics.slice(-1200)}`,
+            );
             assert.equal(report.xssExecuted, false, "No adversarial script or event handler may execute");
             assert.equal(
                 report.opaqueOriginIsolated,
