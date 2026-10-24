@@ -798,7 +798,7 @@ export async function importApkg(
 
         // An absent revlog table is legitimate for a minimal archive; corruption is not.
         const hasRevlogTable = db.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'revlog'")
-            .some(result => result.values.length > 0);
+            .some((result: { values: unknown[] }) => result.values.length > 0);
         if (!hasRevlogTable) {
             warnings.push("This archive has no review-history table; no historical reviews were imported.");
         } else {
