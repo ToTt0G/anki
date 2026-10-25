@@ -1219,7 +1219,11 @@ export function getNextStudyCard(col: Collection, did: number): Card | null {
         for (const segment of parts) {
             path = path ? `${path}::${segment}` : segment;
             const ancestorId = deckIdByName.get(path);
-            if (ancestorId !== undefined && (allowedByDeck[ancestorId]?.[kind] ?? 0) <= 0) {
+            if (
+                ancestorId !== undefined
+                && matchingDid.has(ancestorId)
+                && (allowedByDeck[ancestorId]?.[kind] ?? 0) <= 0
+            ) {
                 return false;
             }
         }

@@ -127,13 +127,20 @@ export const DeckList: React.FC<Props> = ({
                             const displayName = deck.name.split("::").pop() || deck.name;
 
                             return (
-                                <tr key={deck.id} className="deck-row">
+                                <tr
+                                    key={deck.id}
+                                    className="deck-row"
+                                    onClick={() => onSelectDeck(deck.id)}
+                                >
                                     <td>
                                         <button
                                             type="button"
                                             className="deck-name-cell"
                                             style={{ paddingLeft: indentLevel * 18 }}
-                                            onClick={() => onSelectDeck(deck.id)}
+                                            onClick={e => {
+                                                e.stopPropagation();
+                                                onSelectDeck(deck.id);
+                                            }}
                                         >
                                             <span>{displayName}</span>
                                         </button>
@@ -147,11 +154,15 @@ export const DeckList: React.FC<Props> = ({
                                     <td className="count-badge count-due">
                                         {counts.reviewCount > 0 ? counts.reviewCount : ""}
                                     </td>
-                                    <td style={{ textAlign: "right" }}>
+                                    <td
+                                        style={{ textAlign: "right" }}
+                                        onClick={e => e.stopPropagation()}
+                                    >
                                         <button
                                             type="button"
                                             aria-label={`Deck options for ${deck.name}`}
                                             onClick={e => {
+                                                e.stopPropagation();
                                                 if (activeMenu?.did === deck.id) {
                                                     setActiveMenu(null);
                                                     return;

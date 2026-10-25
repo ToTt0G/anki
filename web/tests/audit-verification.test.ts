@@ -1205,6 +1205,37 @@ describe("C. Anki Scheduler, FSRS Reference Validation, Search, Export & Perform
         nested.dconf[2] = { ...nested.dconf[2], new: { ...baseConfig.new, perDay: 20 } };
         assert.equal(getNextStudyCard(nested, 1)?.id, nestedCard.id);
 
+        // Studying a sibling subdeck directly must not be blocked when another sibling subdeck
+        // already exhausted the parent container deck's daily new-card allowance.
+        const siblingCol = createDefaultCollection();
+        siblingCol.decks[10] = { ...baseDeck, id: 10, name: "EP1100", conf: 1 };
+        siblingCol.decks[11] = { ...baseDeck, id: 11, name: "EP1100::Modul: Inledning", conf: 1 };
+        siblingCol.decks[12] = { ...baseDeck, id: 12, name: "EP1100::Modul: Flerlänksnät", conf: 1 };
+        siblingCol.dconf[1] = { ...baseConfig, id: 1, new: { ...baseConfig.new, perDay: 1 } };
+        siblingCol.cards = {
+            101: { ...nestedCard, id: 101, did: 11, queue: 1, type: 1, due: Math.floor(Date.now() / 1000) + 600 },
+            102: { ...nestedCard, id: 102, did: 12, queue: 0, type: 0, due: 1 },
+        };
+        siblingCol.revlog = [
+            {
+                id: Date.now(),
+                cid: 101,
+                usn: 0,
+                ease: 3,
+                ivl: -600,
+                lastIvl: 0,
+                factor: 2500,
+                time: 1000,
+                type: 0,
+            },
+        ];
+        assert.equal(getDeckCounts(siblingCol, 12).newCount, 1);
+        assert.equal(
+            getNextStudyCard(siblingCol, 12)?.id,
+            102,
+            "Sibling subdeck must remain studiable after another sibling finishes its daily new limit",
+        );
+
         // A-12: A missing media attachment must abort export, not produce a corrupt manifest.
         const missingMediaCol = createDefaultCollection();
         missingMediaCol.media["missing.png"] = "/missing-attachment.png";
