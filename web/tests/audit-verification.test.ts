@@ -1206,15 +1206,18 @@ describe("C. Anki Scheduler, FSRS Reference Validation, Search, Export & Perform
         assert.equal(getNextStudyCard(nested, 1)?.id, nestedCard.id);
 
         // Studying a sibling subdeck directly must not be blocked when another sibling subdeck
-        // already exhausted the parent container deck's daily new-card allowance.
+        // already exhausted its daily new-card allowance, AND the parent deck must sum all subdecks
+        // and serve cards from subdecks in order when studying the parent deck.
         const siblingCol = createDefaultCollection();
         siblingCol.decks[10] = { ...baseDeck, id: 10, name: "EP1100", conf: 1 };
-        siblingCol.decks[11] = { ...baseDeck, id: 11, name: "EP1100::Modul: Inledning", conf: 1 };
-        siblingCol.decks[12] = { ...baseDeck, id: 12, name: "EP1100::Modul: Flerlänksnät", conf: 1 };
+        siblingCol.decks[11] = { ...baseDeck, id: 11, name: "EP1100::Modul: A_Done", conf: 1 };
+        siblingCol.decks[12] = { ...baseDeck, id: 12, name: "EP1100::Modul: B_First", conf: 1 };
+        siblingCol.decks[13] = { ...baseDeck, id: 13, name: "EP1100::Modul: C_Second", conf: 1 };
         siblingCol.dconf[1] = { ...baseConfig, id: 1, new: { ...baseConfig.new, perDay: 1 } };
         siblingCol.cards = {
-            101: { ...nestedCard, id: 101, did: 11, queue: 1, type: 1, due: Math.floor(Date.now() / 1000) + 600 },
+            101: { ...nestedCard, id: 101, did: 11, queue: 1, type: 1, due: Math.floor(Date.now() / 1000) + 10 },
             102: { ...nestedCard, id: 102, did: 12, queue: 0, type: 0, due: 1 },
+            103: { ...nestedCard, id: 103, did: 13, queue: 0, type: 0, due: 1 },
         };
         siblingCol.revlog = [
             {
@@ -1230,10 +1233,29 @@ describe("C. Anki Scheduler, FSRS Reference Validation, Search, Export & Perform
             },
         ];
         assert.equal(getDeckCounts(siblingCol, 12).newCount, 1);
+        assert.equal(getDeckCounts(siblingCol, 13).newCount, 1);
+        assert.equal(
+            getDeckCounts(siblingCol, 10).newCount,
+            2,
+            "Parent deck must sum remaining new counts across all subdecks",
+        );
+        assert.equal(
+            getDeckCounts(siblingCol, 10).learnCount,
+            1,
+            "Parent deck must sum learning counts across all subdecks",
+        );
         assert.equal(
             getNextStudyCard(siblingCol, 12)?.id,
             102,
             "Sibling subdeck must remain studiable after another sibling finishes its daily new limit",
+        );
+        // When learning card 101 is not yet due (e.g. 1 hour in the future), studying parent deck 10
+        // takes new cards from subdecks in order (12 before 13):
+        siblingCol.cards[101].due = Math.floor(Date.now() / 1000) + 3600;
+        assert.equal(
+            getNextStudyCard(siblingCol, 10)?.id,
+            102,
+            "Studying parent deck must take cards from subdecks in order",
         );
 
         // A-12: A missing media attachment must abort export, not produce a corrupt manifest.

@@ -136,12 +136,28 @@ export const DeckList: React.FC<Props> = ({
                                         <button
                                             type="button"
                                             className="deck-name-cell"
-                                            style={{ paddingLeft: indentLevel * 18 }}
+                                            style={{
+                                                paddingLeft: indentLevel * 22,
+                                                fontWeight: indentLevel === 0 ? 600 : 500,
+                                            }}
                                             onClick={e => {
                                                 e.stopPropagation();
                                                 onSelectDeck(deck.id);
                                             }}
                                         >
+                                            {indentLevel > 0 && (
+                                                <span
+                                                    aria-hidden="true"
+                                                    style={{
+                                                        color: "var(--text-muted)",
+                                                        fontSize: 12,
+                                                        flexShrink: 0,
+                                                        userSelect: "none",
+                                                    }}
+                                                >
+                                                    └
+                                                </span>
+                                            )}
                                             <span>{displayName}</span>
                                         </button>
                                     </td>

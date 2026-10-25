@@ -1051,7 +1051,8 @@ function getEffectiveDailyLimits(
 
 /**
  * Compute study counts for all decks in `col` in a single pass (`O(D + C + R)`) (PERF-01).
- * Avoids quadratic rescanning of cards and revlogs when rendering collections with many decks.
+ * Parent decks aggregate the playable New, Learn, and Due counts of all their subdecks
+ * bottom-up so a main deck always reflects the sum of its subdecks.
  */
 export function getAllDeckCounts(col: Collection): Record<number, DeckStudyCounts> {
     const today = getTodayDay();
@@ -1101,46 +1102,26 @@ export function getAllDeckCounts(col: Collection): Record<number, DeckStudyCount
         }
     }
 
-    // Build deck name -> id lookup so each deck can roll up into its `Parent` ancestors in O(depth)
     const deckByName = new Map<string, number>();
     const allDecks = Object.values(col.decks);
     for (const d of allDecks) {
         deckByName.set(d.name, d.id);
     }
 
-    const aggNew: Record<number, number> = {};
-    const aggLearn: Record<number, number> = {};
-    const aggRev: Record<number, number> = {};
-    const aggStudiedNew: Record<number, number> = {};
-    const aggStudiedRev: Record<number, number> = {};
-
-    for (const d of allDecks) {
-        const n = directNew[d.id] || 0;
-        const l = directLearn[d.id] || 0;
-        const r = directRev[d.id] || 0;
-        const sn = studiedNewByDeck.get(d.id)?.size || 0;
-        const sr = studiedRevByDeck.get(d.id)?.size || 0;
-
-        // Roll up into self and every existing ancestor deck (`A::B::C` -> `A::B`, `A`)
-        const parts = d.name.split("::");
-        let prefix = "";
-        for (let i = 0; i < parts.length; i++) {
-            prefix = i === 0 ? parts[0] : `${prefix}::${parts[i]}`;
-            const targetId = i === parts.length - 1 ? d.id : deckByName.get(prefix);
-            if (targetId !== undefined) {
-                aggNew[targetId] = (aggNew[targetId] || 0) + n;
-                aggLearn[targetId] = (aggLearn[targetId] || 0) + l;
-                aggRev[targetId] = (aggRev[targetId] || 0) + r;
-                aggStudiedNew[targetId] = (aggStudiedNew[targetId] || 0) + sn;
-                aggStudiedRev[targetId] = (aggStudiedRev[targetId] || 0) + sr;
-            }
-        }
-    }
+    // Sort decks deepest-first so child subdecks are evaluated before their parent deck
+    const decksByDepthDesc = [...allDecks].sort((a, b) => {
+        const depthA = (a.name.match(/::/g) || []).length;
+        const depthB = (b.name.match(/::/g) || []).length;
+        return depthB - depthA;
+    });
 
     const defaultDconf = col.dconf[1] || Object.values(col.dconf)[0];
+    const childrenNew: Record<number, number> = {};
+    const childrenLearn: Record<number, number> = {};
+    const childrenRev: Record<number, number> = {};
     const result: Record<number, DeckStudyCounts> = {};
 
-    for (const d of allDecks) {
+    for (const d of decksByDepthDesc) {
         const conf = col.dconf[d.conf] || defaultDconf;
         const baseNewLimit = conf?.new?.perDay !== undefined ? Math.max(0, conf.new.perDay) : 20;
         const baseRevLimit = conf?.rev?.perDay !== undefined ? Math.max(0, conf.rev.perDay) : 200;
@@ -1150,68 +1131,98 @@ export function getAllDeckCounts(col: Collection): Record<number, DeckStudyCount
 
         const maxNew = baseNewLimit + extraNew;
         const maxRev = baseRevLimit + extraRev;
-        const remainingNew = Math.max(0, maxNew - (aggStudiedNew[d.id] || 0));
-        const remainingRev = Math.max(0, maxRev - (aggStudiedRev[d.id] || 0));
+        const studiedNew = studiedNewByDeck.get(d.id)?.size || 0;
+        const studiedRev = studiedRevByDeck.get(d.id)?.size || 0;
+
+        const ownRemainingNew = Math.max(0, maxNew - studiedNew);
+        const ownRemainingRev = Math.max(0, maxRev - studiedRev);
+        const ownPlayableNew = Math.min(directNew[d.id] || 0, ownRemainingNew);
+        const ownPlayableRev = Math.min(directRev[d.id] || 0, ownRemainingRev);
+        const ownPlayableLearn = directLearn[d.id] || 0;
+
+        const totalNew = maxNew === 0 ? 0 : ownPlayableNew + (childrenNew[d.id] || 0);
+        const totalLearn = ownPlayableLearn + (childrenLearn[d.id] || 0);
+        const totalRev = maxRev === 0 ? 0 : ownPlayableRev + (childrenRev[d.id] || 0);
 
         result[d.id] = {
-            newCount: Math.min(aggNew[d.id] || 0, remainingNew),
-            learnCount: aggLearn[d.id] || 0,
-            reviewCount: Math.min(aggRev[d.id] || 0, remainingRev),
+            newCount: totalNew,
+            learnCount: totalLearn,
+            reviewCount: totalRev,
         };
+
+        // Roll up into the closest existing ancestor deck (`A::B::C` -> `A::B` or `A`)
+        const parts = d.name.split("::");
+        for (let i = parts.length - 1; i >= 1; i--) {
+            const ancestorName = parts.slice(0, i).join("::");
+            const parentId = deckByName.get(ancestorName);
+            if (parentId !== undefined) {
+                childrenNew[parentId] = (childrenNew[parentId] || 0) + totalNew;
+                childrenLearn[parentId] = (childrenLearn[parentId] || 0) + totalLearn;
+                childrenRev[parentId] = (childrenRev[parentId] || 0) + totalRev;
+                break;
+            }
+        }
     }
 
     return result;
 }
 
 export function getDeckCounts(col: Collection, did: number): DeckStudyCounts {
-    const today = getTodayDay();
-    const nowSec = Math.floor(Date.now() / 1000);
-    const { maxNew, maxRev, studiedNewToday, studiedRevToday, matchingDid } = getEffectiveDailyLimits(col, did, today);
-
-    let rawNewCount = 0;
-    let learnCount = 0;
-    let rawReviewCount = 0;
-
-    for (const card of Object.values(col.cards)) {
-        if (!matchingDid.has(card.did)) { continue; }
-        if (card.queue < 0) { continue; }
-
-        if (card.queue === 0) {
-            rawNewCount++;
-        } else if (card.queue === 1 || card.queue === 3) {
-            if (isCardDueInLearnQueue(card, nowSec, today, col.crt, 300)) {
-                learnCount++;
-            }
-        } else if (card.queue === 2) {
-            if (isCardDueForReview(card, today, col.crt)) {
-                rawReviewCount++;
-            }
-        }
-    }
-
-    const remainingNewAllowance = Math.max(0, maxNew - studiedNewToday);
-    const remainingRevAllowance = Math.max(0, maxRev - studiedRevToday);
-
-    return {
-        newCount: Math.min(rawNewCount, remainingNewAllowance),
-        learnCount,
-        reviewCount: Math.min(rawReviewCount, remainingRevAllowance),
-    };
+    const all = getAllDeckCounts(col);
+    return all[did] || { newCount: 0, learnCount: 0, reviewCount: 0 };
 }
 
 export function getNextStudyCard(col: Collection, did: number): Card | null {
     const today = getTodayDay();
     const nowSec = Math.floor(Date.now() / 1000);
-    const { maxNew, maxRev, studiedNewToday, studiedRevToday, matchingDid } = getEffectiveDailyLimits(col, did, today);
+    const { matchingDid } = getEffectiveDailyLimits(col, did, today);
 
-    const canStudyNew = studiedNewToday < maxNew;
-    const canStudyRev = studiedRevToday < maxRev;
-
-    // A-14: A parent study session must also obey the daily caps of each child
-    // and intermediate ancestor deck, not only the selected parent.
     const allowedByDeck = getAllDeckCounts(col);
-    const deckIdByName = new Map(Object.values(col.decks).map(deck => [deck.name, deck.id]));
+    const targetCounts = allowedByDeck[did] || { newCount: 0, learnCount: 0, reviewCount: 0 };
+    const canStudyNew = targetCounts.newCount > 0;
+    const canStudyRev = targetCounts.reviewCount > 0;
+
+    // Order decks alphabetically by name so studying a parent deck walks subdecks in display order
+    const sortedDecks = Object.values(col.decks).sort((a, b) => a.name.localeCompare(b.name));
+    const deckOrderRank = new Map<number, number>();
+    sortedDecks.forEach((d, idx) => deckOrderRank.set(d.id, idx));
+
+    const deckIdByName = new Map(sortedDecks.map(deck => [deck.name, deck.id]));
+
+    // Also compute each individual deck's direct remaining allowance so a subdeck whose own
+    // daily cap is exhausted is skipped in favor of the next subdeck with remaining allowance.
+    const startOfDayMs = getLocalDayStartMs();
+    const directStudiedNew: Record<number, Set<number>> = {};
+    const directStudiedRev: Record<number, Set<number>> = {};
+    for (const entry of col.revlog || []) {
+        if (entry.id < startOfDayMs) { continue; }
+        const c = col.cards[entry.cid];
+        if (!c || !matchingDid.has(c.did)) { continue; }
+        if (entry.type === 0 && entry.lastIvl === 0) {
+            (directStudiedNew[c.did] ||= new Set()).add(entry.cid);
+        } else if (entry.type === 1) {
+            (directStudiedRev[c.did] ||= new Set()).add(entry.cid);
+        }
+    }
+    const defaultDconf = col.dconf[1] || Object.values(col.dconf)[0];
+    const hasDirectAllowance = (cardDeckId: number, kind: "newCount" | "reviewCount"): boolean => {
+        const d = col.decks[cardDeckId];
+        if (!d) { return false; }
+        const conf = col.dconf[d.conf] || defaultDconf;
+        const custom = d.customStudy;
+        if (kind === "newCount") {
+            const base = conf?.new?.perDay !== undefined ? Math.max(0, conf.new.perDay) : 20;
+            const extra = custom && custom.day === today ? Math.max(0, custom.extraNew || 0) : 0;
+            return (directStudiedNew[cardDeckId]?.size || 0) < base + extra;
+        } else {
+            const base = conf?.rev?.perDay !== undefined ? Math.max(0, conf.rev.perDay) : 200;
+            const extra = custom && custom.day === today ? Math.max(0, custom.extraRev || 0) : 0;
+            return (directStudiedRev[cardDeckId]?.size || 0) < base + extra;
+        }
+    };
+
     const withinAncestorLimits = (cardDeckId: number, kind: "newCount" | "reviewCount"): boolean => {
+        if (!hasDirectAllowance(cardDeckId, kind)) { return false; }
         const deck = col.decks[cardDeckId];
         if (!deck) { return false; }
         const parts = deck.name.split("::");
@@ -1234,17 +1245,20 @@ export function getNextStudyCard(col: Collection, did: number): Card | null {
     let dueLearn: Card | null = null;
     let earliestLearnDue = Infinity;
 
-    // 2. Review cards due today (respecting daily review limit C04)
+    // 2. Review cards due today (ordered by subdeck order, then due day)
     let dueReview: Card | null = null;
+    let earliestReviewRank = Infinity;
     let earliestReviewDue = Infinity;
 
-    // 3. New cards (respecting daily new limit C04)
+    // 3. New cards (ordered by subdeck display order, then card due position)
     let nextNew: Card | null = null;
+    let earliestNewDeckRank = Infinity;
     let earliestNewPos = Infinity;
 
     for (const card of Object.values(col.cards)) {
         if (!matchingDid.has(card.did)) { continue; }
         if (card.queue < 0) { continue; }
+        const dRank = deckOrderRank.get(card.did) ?? 0;
 
         if (card.queue === 1 || card.queue === 3) {
             if (isCardDueInLearnQueue(card, nowSec, today, col.crt, 300)) {
@@ -1258,13 +1272,21 @@ export function getNextStudyCard(col: Collection, did: number): Card | null {
             }
         } else if (card.queue === 2 && canStudyRev && withinAncestorLimits(card.did, "reviewCount")) {
             const dueDay = normalizeReviewDueDay(card.due, col.crt);
-            if (dueDay <= today && dueDay < earliestReviewDue) {
+            if (
+                dueDay <= today
+                && (dRank < earliestReviewRank || (dRank === earliestReviewRank && dueDay < earliestReviewDue))
+            ) {
                 dueReview = card;
+                earliestReviewRank = dRank;
                 earliestReviewDue = dueDay;
             }
         } else if (card.queue === 0 && canStudyNew && withinAncestorLimits(card.did, "newCount")) {
-            if (card.due < earliestNewPos) {
+            if (
+                dRank < earliestNewDeckRank
+                || (dRank === earliestNewDeckRank && card.due < earliestNewPos)
+            ) {
                 nextNew = card;
+                earliestNewDeckRank = dRank;
                 earliestNewPos = card.due;
             }
         }
