@@ -1,0 +1,46 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "klanki",
+  "main": "server/index.ts",
+  "compatibility_date": "2024-12-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "routes": [
+    {
+      "pattern": "klanki.ezryder.us",
+      "custom_domain": true
+    }
+  ],
+  "vars": {
+    "ENVIRONMENT": "production",
+    "CLERK_AUTHORIZED_PARTIES": "https://klanki.ezryder.us",
+    "CLERK_PUBLISHABLE_KEY": "pk_live_Y2xlcmsua2xhbmtpLmV6cnlkZXIudXMk",
+    "CLERK_JWT_KEY": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAz2vzO6LfSJ/ZsHhRUWHf\nb4cWW0EgqrlPEU+EqHHxBT6X2qrL5vJ3m57yvzRW0S9qSfjuKV5nI9H16ya4hJ0+\n171EnAyuY7VJoq922NdWBc7ZyQjt64gB67JwWuuid5QZz154cuQX834VbU8JwLBR\n4WUuROLBNiqIYrFRq4Ivt//idu02x/I3s0wGWRCMHj2ai1lwFL2gMiOtIU3IcGXc\ndke1msGEzK8hB+iK8mKiOCrwytqWxa48FUu6+RjU3LCOIWBIBISFRQN4Bzv3KmB8\nih5+1L7PC1C9z0qUg2/nT1XF5UIe/8Sj9pBRvaTGpy2zJ/aHytJJ+hz+T7KBekty\nAwIDAQAB\n-----END PUBLIC KEY-----",
+    "VAPID_PUBLIC_KEY": "BMvc07ap8EiEgS3O3upQee-f8UUuB2pDgaaNoZtkx4pxxURiZUh-WEhCDo_NYfrnqYvXrVyMj2NiPfwSI9aV6WM",
+    "VAPID_SUBJECT": "mailto:rainryder4@gmail.com"
+  },
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "ANKI_SYNC",
+        "class_name": "AnkiSyncServer"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["AnkiSyncServer"]
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "traces": {
+      "enabled": true
+    }
+  }
+}

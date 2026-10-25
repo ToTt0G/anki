@@ -1,0 +1,66 @@
+name: Web App CI (klanki)
+
+on:
+  push:
+    branches: [web-app, main]
+    paths:
+      - "web/**"
+      - ".dprint.json"
+      - ".github/workflows/web-ci.yml"
+  pull_request:
+    paths:
+      - "web/**"
+      - ".dprint.json"
+      - ".github/workflows/web-ci.yml"
+
+jobs:
+  verify-web:
+    name: Typecheck, Unit Tests, Build & Worker Dry-Run
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 #v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 #v7.0.0
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Enable headless Chrome sandbox on Ubuntu 24.04 runner (M-10)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+      - name: Check web source formatting
+        run: npm exec --yes --package=dprint@0.56.0 -- dprint check .
+
+      - name: Typecheck client & Cloudflare Worker server (strict)
+        run: npm run typecheck
+
+      - name: Install the headless Chromium required by browser security tests
+        run: npx --yes playwright@1.56.1 install chromium-headless-shell --with-deps
+
+      - name: Run security, sync, scheduler & headless browser verification tests
+        run: npm test
+
+      - name: Build production client bundle
+        run: npm run build
+
+      - name: Generate CycloneDX production SBOM
+        run: npm run sbom
+
+      - name: Validate Cloudflare Worker bundle & bindings (dry-run)
+        run: npx wrangler deploy --dry-run
+
+      # Run the full tests/build even when a newly disclosed dependency advisory
+      # fails the security gate; the audit still fails CI until remediated.
+      - name: Audit production and build-time dependencies for known advisories (CI-04, L-06)
+        run: |
+          npm run audit:deps
+          npm run audit:all
