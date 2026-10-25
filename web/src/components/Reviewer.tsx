@@ -141,6 +141,10 @@ export const Reviewer: React.FC<Props> = ({
         setIsAnswerShown(true);
     };
 
+    const handleToggleAnswer = () => {
+        setIsAnswerShown(prev => !prev);
+    };
+
     const handleRate = (rating: Rating) => {
         if (!currentCard) { return; }
         const lockKey = `${currentCard.id}:${currentCard.reps}:${currentCard.due}`;
@@ -409,17 +413,13 @@ export const Reviewer: React.FC<Props> = ({
 
             <div
                 className="review-card-area"
-                onClick={() => {
-                    if (!isAnswerShown) { handleShowAnswer(); }
-                }}
+                onClick={handleToggleAnswer}
             >
                 <SandboxedCardFrame
                     html={displayedHtml}
                     css={rendered.css}
                     typedValue={typedAnswer}
-                    onCardClick={() => {
-                        if (!isAnswerShown) { handleShowAnswer(); }
-                    }}
+                    onCardClick={handleToggleAnswer}
                     onTypedAnswerChange={val => setTypedAnswer(val)}
                     onTypedAnswerSubmit={() => {
                         if (!isAnswerShown) { handleShowAnswer(); }
